@@ -1,0 +1,11 @@
+DevSpace Ultra
+Copyright (c) 2026 DevSpace Ultra contributors
+
+This distribution is based on DevSpace by Waishnav:
+https://github.com/Waishnav/devspace
+
+Upstream DevSpace is licensed under the MIT License. The original copyright and MIT license terms are preserved in LICENSE.
+
+DevSpace Ultra adds Chat Swarm orchestration, elastic ChatGPT Classic worker runtime management, recovery, project routing, and update compatibility tooling.
+
+DevSpace Ultra is an independent community fork/distribution. It is not an official OpenAI product and is not affiliated with or endorsed by OpenAI.

@@ -1,0 +1,17 @@
+dist/chat-swarm.js.bak-before-plain-tools
+restart-devspace.ps1
+docs/DEVSPACE-ULTRA-HANDOFF-2026-08-18.md
+*.log
+*.tgz
+*.bak*
+*.backup
+.env
+.env.*
+.local/
+.devspace/
+chat-swarm-state.json
+controller-state.json
+update-backups/
+auth-seed/
+ChatGPT-Classic-Worker-Session-Backups/
+ChatGPT-Classic-Worker-Runtimes/

@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Architecture comparison: Claude Code dynamic workflows and DevSpace local-agent orchestration." />
+  <title>Dynamic Workflows × DevSpace</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: '#15231f',
+            paper: '#f1ecdf',
+            cream: '#faf7ee',
+            signal: '#ff5a36',
+            mint: '#b9ff66',
+            cyan: '#69d7d1',
+            fog: '#d8d4c8',
+          },
+          fontFamily: {
+            display: ['Fraunces', 'serif'],
+            body: ['IBM Plex Sans', 'sans-serif'],
+            mono: ['IBM Plex Mono', 'monospace'],
+          },
+          boxShadow: {
+            hard: '7px 7px 0 #15231f',
+            'hard-sm': '4px 4px 0 #15231f',
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800;9..144,900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root { --ink: #15231f; --paper: #f1ecdf; --cream: #faf7ee; --signal: #ff5a36; }
+    * { box-sizing: border-box; }
+    body {
+      background:
+        linear-gradient(rgba(21,35,31,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(21,35,31,.045) 1px, transparent 1px),
+        var(--paper);
+      background-size: 24px 24px;
+      color: var(--ink);
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .22;
+      z-index: 60;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.12'/%3E%3C/svg%3E");
+    }
+    ::selection { background: #b9ff66; color: #15231f; }
+    .reveal { opacity: 0; transform: translateY(18px); transition: opacity .65s ease, transform .65s ease; }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+    .rail::before { content: ''; position: absolute; top: .65rem; bottom: .65rem; left: 1.05rem; width: 2px; background: #15231f; }
+    .flow-arrow::after { content: '↓'; display: block; text-align: center; margin: .35rem 0; font: 700 1.2rem 'IBM Plex Mono'; }
+    .tab[aria-selected="true"] { background: #15231f; color: #faf7ee; }
+    .code-line { display: block; }
+    .code-line::before { content: attr(data-line); display: inline-block; width: 2rem; margin-right: 1rem; color: #7f9189; user-select: none; text-align: right; }
+    .matrix-row:hover > * { background: #fffdf6; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+      .reveal { opacity: 1; transform: none; }
+    }
+  </style>
+</head>
+<body class="font-body antialiased">
+  <a href="#main" class="sr-only focus:not-sr-only focus:fixed focus:z-[100] focus:left-4 focus:top-4 focus:bg-mint focus:border-2 focus:border-ink focus:px-4 focus:py-2">Skip to content</a>
+
+  <header class="border-b-2 border-ink bg-cream/95 backdrop-blur sticky top-0 z-50">
+    <div class="mx-auto max-w-[1480px] px-4 lg:px-8 h-16 flex items-center justify-between gap-5">
+      <a href="#top" class="font-mono text-xs sm:text-sm font-semibold tracking-tight">DEVSPACE / ARCHITECTURE NOTE 01</a>
+      <nav aria-label="Page sections" class="hidden md:flex items-center gap-6 font-mono text-xs font-semibold">
+        <a class="hover:text-signal" href="#anatomy">Anatomy</a>
+        <a class="hover:text-signal" href="#comparison">Gap map</a>
+        <a class="hover:text-signal" href="#approaches">Approaches</a>
+        <a class="hover:text-signal" href="#roadmap">Roadmap</a>
+      </nav>
+      <span class="border-2 border-ink bg-mint px-3 py-1 font-mono text-[10px] sm:text-xs font-semibold -rotate-1">RECOMMENDATION INSIDE</span>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="top" class="relative overflow-hidden border-b-2 border-ink">
+      <div class="absolute -right-20 top-24 size-72 rounded-full border-[36px] border-signal/90 opacity-90" aria-hidden="true"></div>
+      <div class="absolute right-[28%] -top-8 h-48 w-12 bg-cyan border-x-2 border-ink rotate-[32deg]" aria-hidden="true"></div>
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-16 lg:py-28 relative">
+        <div class="grid lg:grid-cols-12 gap-10 items-end">
+          <div class="lg:col-span-8 reveal">
+            <p class="font-mono text-xs font-semibold uppercase tracking-[.22em] mb-5">Claude Code dynamic workflows × DevSpace local agents</p>
+            <h1 class="font-display text-[clamp(4rem,10vw,9.8rem)] leading-[.76] tracking-[-.055em] font-black max-w-6xl">
+              The model should write <span class="text-signal italic">plans</span>, not process plumbing.
+            </h1>
+          </div>
+          <div class="lg:col-span-4 reveal" style="transition-delay:120ms">
+            <div class="border-2 border-ink bg-mint p-5 lg:p-7 shadow-hard rotate-1">
+              <p class="font-mono text-xs font-semibold mb-3">THE SHORT ANSWER</p>
+              <p class="text-xl lg:text-2xl font-semibold leading-tight">Keep Bash + <code class="font-mono text-[.8em]">devspace agents</code> as the bootstrap. Do not make it the orchestration protocol.</p>
+              <div class="mt-5 pt-4 border-t-2 border-ink text-sm leading-relaxed">
+                Build one durable orchestration service; expose it through typed MCP tools, the CLI, and later a restricted JavaScript workflow runtime.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-16 lg:mt-24 grid sm:grid-cols-3 border-2 border-ink bg-cream shadow-hard-sm reveal">
+          <div class="p-5 border-b-2 sm:border-b-0 sm:border-r-2 border-ink">
+            <div class="font-display text-5xl font-black">6</div>
+            <p class="font-mono text-xs mt-2">LOCAL PROVIDERS ALREADY ADAPTED</p>
+          </div>
+          <div class="p-5 border-b-2 sm:border-b-0 sm:border-r-2 border-ink">
+            <div class="font-display text-5xl font-black">0</div>
+            <p class="font-mono text-xs mt-2">FIRST-CLASS MCP AGENT RUN TOOLS</p>
+          </div>
+          <div class="p-5 bg-signal text-cream">
+            <div class="font-display text-5xl font-black">1</div>
+            <p class="font-mono text-xs mt-2">SHARED CONTROL PLANE TO BUILD</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b-2 border-ink bg-ink text-cream">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-10 lg:py-14 grid lg:grid-cols-12 gap-8 items-start">
+        <h2 class="lg:col-span-4 font-display text-4xl lg:text-6xl leading-none font-black reveal">Two systems at different layers.</h2>
+        <div class="lg:col-span-8 grid md:grid-cols-2 gap-px bg-cream/30 border border-cream/30 reveal">
+          <article class="bg-ink p-6 lg:p-8">
+            <p class="font-mono text-xs text-mint font-semibold mb-3">CLAUDE CODE</p>
+            <h3 class="font-display text-3xl font-bold">Workflow orchestrator</h3>
+            <p class="mt-3 text-cream/75 leading-relaxed">A restricted JavaScript control program fans work out to isolated subagents, validates structured results, tracks progress, applies budgets, and can replay completed calls.</p>
+          </article>
+          <article class="bg-ink p-6 lg:p-8">
+            <p class="font-mono text-xs text-cyan font-semibold mb-3">DEVSPACE TODAY</p>
+            <h3 class="font-display text-3xl font-bold">Persistent agent launcher</h3>
+            <p class="mt-3 text-cream/75 leading-relaxed">Profiles select one of six provider adapters. Detached workers run prompts and SQLite remembers the latest session summary. There is no graph, event stream, or scheduler yet.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="anatomy" class="border-b-2 border-ink">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="grid lg:grid-cols-12 gap-10">
+          <div class="lg:col-span-4 reveal">
+            <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">01 / UNDER THE HOOD</p>
+            <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">How dynamic workflows think.</h2>
+            <p class="mt-7 text-lg leading-relaxed max-w-xl">The important idea is not “agents calling agents.” It is a deterministic orchestration program controlling nondeterministic workers.</p>
+            <div class="mt-8 border-l-8 border-mint pl-5 py-1">
+              <p class="font-semibold">Control flow remains code.</p>
+              <p class="text-sm mt-1">Reasoning and execution are delegated to fresh model contexts.</p>
+            </div>
+          </div>
+
+          <div class="lg:col-span-8 reveal" style="transition-delay:100ms">
+            <div class="border-2 border-ink bg-cream shadow-hard p-4 sm:p-8">
+              <div class="flex justify-between gap-4 items-center border-b-2 border-ink pb-4 mb-6">
+                <span class="font-mono text-xs font-semibold">WORKFLOW CONTROL PLANE</span>
+                <span class="font-mono text-[10px] border border-ink px-2 py-1">RESTRICTED JS VM</span>
+              </div>
+              <div class="grid md:grid-cols-[1fr_auto_1fr] gap-4 items-center">
+                <div class="space-y-3">
+                  <div class="border-2 border-ink bg-paper p-4">
+                    <p class="font-mono text-xs font-semibold">SCRIPT</p>
+                    <p class="text-sm mt-2">Loops, conditions, fan-out, aggregation</p>
+                  </div>
+                  <div class="border-2 border-ink bg-cyan p-4">
+                    <p class="font-mono text-xs font-semibold">INJECTED GLOBALS</p>
+                    <p class="font-mono text-xs mt-2">agent · pipeline · parallel<br />workflow · phase · log<br />args · budget</p>
+                  </div>
+                </div>
+                <div class="hidden md:flex flex-col items-center font-mono font-bold text-2xl" aria-hidden="true">
+                  <span>→</span><span class="text-signal my-3">↕</span><span>←</span>
+                </div>
+                <div class="space-y-3">
+                  <div class="border-2 border-ink bg-mint p-4">
+                    <p class="font-mono text-xs font-semibold">SUBAGENT QUEUE</p>
+                    <p class="text-sm mt-2">Bounded concurrency; isolated contexts; optional worktrees</p>
+                  </div>
+                  <div class="border-2 border-ink bg-signal text-cream p-4">
+                    <p class="font-mono text-xs font-semibold">JOURNAL</p>
+                    <p class="text-sm mt-2">Append-only call records enable longest-unchanged-prefix replay</p>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-5 border-2 border-dashed border-ink p-4 grid sm:grid-cols-3 gap-3 text-center font-mono text-xs font-semibold">
+                <div>SCHEMA-VALIDATED OUTPUT</div><div>TOKEN BUDGET</div><div>PHASE PROGRESS</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-16 grid md:grid-cols-3 gap-5 reveal">
+          <article class="border-2 border-ink bg-cream p-6 shadow-hard-sm">
+            <div class="size-10 bg-mint border-2 border-ink grid place-items-center font-mono font-bold mb-5">A</div>
+            <h3 class="font-display text-3xl font-bold">agent()</h3>
+            <p class="mt-3 text-sm leading-relaxed">Starts a subagent with an isolated context. Options can select a label, phase, JSON Schema, model, effort, custom agent type, or worktree isolation.</p>
+          </article>
+          <article class="border-2 border-ink bg-cream p-6 shadow-hard-sm md:-translate-y-5">
+            <div class="size-10 bg-cyan border-2 border-ink grid place-items-center font-mono font-bold mb-5">P</div>
+            <h3 class="font-display text-3xl font-bold">pipeline()</h3>
+            <p class="mt-3 text-sm leading-relaxed">Each item advances through its own stages as soon as it is ready. No global stage barrier: fast items do not wait for the slowest sibling.</p>
+          </article>
+          <article class="border-2 border-ink bg-cream p-6 shadow-hard-sm">
+            <div class="size-10 bg-signal text-cream border-2 border-ink grid place-items-center font-mono font-bold mb-5">∥</div>
+            <h3 class="font-display text-3xl font-bold">parallel()</h3>
+            <p class="mt-3 text-sm leading-relaxed">Runs independent thunks concurrently and waits for all of them. Use it only when the next operation genuinely needs the complete result set.</p>
+          </article>
+        </div>
+
+        <div class="mt-14 grid lg:grid-cols-2 gap-6 reveal">
+          <div class="bg-ink text-cream border-2 border-ink p-5 lg:p-7 shadow-hard-sm overflow-x-auto">
+            <div class="flex items-center justify-between gap-4 mb-5">
+              <span class="font-mono text-xs text-mint font-semibold">PIPELINE: NO STAGE BARRIER</span>
+              <span class="font-mono text-[10px] text-cream/60">PREFERRED DEFAULT</span>
+            </div>
+            <pre class="font-mono text-xs sm:text-sm leading-7 min-w-[500px]"><code><span class="code-line" data-line="1">const results = await pipeline(components,</span><span class="code-line" data-line="2">  item =&gt; agent(`Review ${item}`),</span><span class="code-line" data-line="3">  review =&gt; agent(`Verify ${review}`),</span><span class="code-line" data-line="4">  verdict =&gt; summarize(verdict),</span><span class="code-line" data-line="5">)</span></code></pre>
+          </div>
+          <div class="bg-cream border-2 border-ink p-5 lg:p-7 shadow-hard-sm">
+            <p class="font-mono text-xs text-signal font-semibold mb-5">TIMELINE</p>
+            <div class="space-y-4 font-mono text-xs">
+              <div class="grid grid-cols-[5rem_1fr] gap-3 items-center"><span>ITEM A</span><div class="flex"><i class="not-italic bg-mint border-2 border-ink px-3 py-2">review</i><i class="not-italic bg-cyan border-y-2 border-r-2 border-ink px-3 py-2">verify</i><i class="not-italic bg-signal text-cream border-y-2 border-r-2 border-ink px-3 py-2">done</i></div></div>
+              <div class="grid grid-cols-[5rem_1fr] gap-3 items-center"><span>ITEM B</span><div class="flex"><i class="not-italic bg-mint border-2 border-ink px-6 py-2">slow review</i><i class="not-italic bg-cyan border-y-2 border-r-2 border-ink px-3 py-2">verify</i></div></div>
+              <div class="grid grid-cols-[5rem_1fr] gap-3 items-center"><span>ITEM C</span><div class="flex"><i class="not-italic bg-mint border-2 border-ink px-3 py-2">review</i><i class="not-italic bg-cyan border-y-2 border-r-2 border-ink px-5 py-2">verify</i><i class="not-italic bg-signal text-cream border-y-2 border-r-2 border-ink px-3 py-2">done</i></div></div>
+            </div>
+            <p class="mt-5 text-sm">A and C finish while B is still working. A barrier would waste that head start.</p>
+          </div>
+        </div>
+
+        <div class="mt-14 border-2 border-ink bg-signal text-cream p-6 lg:p-9 reveal">
+          <div class="grid lg:grid-cols-3 gap-7">
+            <div>
+              <p class="font-mono text-xs font-semibold text-ink">IMPORTANT CAVEAT</p>
+              <h3 class="font-display text-4xl font-black mt-2">Replay is not time travel.</h3>
+            </div>
+            <div class="lg:col-span-2 grid sm:grid-cols-2 gap-5 text-sm leading-relaxed">
+              <p><strong>What it does:</strong> reuse recorded results for the longest unchanged prefix of completed <code class="font-mono">agent()</code> calls in the same session.</p>
+              <p><strong>What it does not do:</strong> guarantee deterministic inference, fresh repository state, or exactly-once filesystem and external side effects.</p>
+              <p class="sm:col-span-2 border-t border-cream/50 pt-4"><strong>Operational rule:</strong> mutating agents still need idempotent instructions, state inspection before writes, managed isolation, and verification afterward.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b-2 border-ink bg-cream">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="grid lg:grid-cols-12 gap-10">
+          <div class="lg:col-span-5 reveal">
+            <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">02 / DEVSPACE TODAY</p>
+            <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">Strong adapters. Thin control plane.</h2>
+            <p class="mt-7 text-lg leading-relaxed">DevSpace has already solved a difficult portability problem: one profile system can dispatch work across six different coding-agent providers.</p>
+          </div>
+          <div class="lg:col-span-7 reveal">
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 font-mono text-xs font-semibold">
+              <div class="border-2 border-ink p-4 bg-mint">CODEX</div>
+              <div class="border-2 border-ink p-4 bg-cyan">CLAUDE</div>
+              <div class="border-2 border-ink p-4 bg-paper">OPENCODE</div>
+              <div class="border-2 border-ink p-4 bg-paper">PI</div>
+              <div class="border-2 border-ink p-4 bg-paper">CURSOR</div>
+              <div class="border-2 border-ink p-4 bg-paper">COPILOT</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-14 grid lg:grid-cols-[1fr_5rem_1fr_5rem_1fr] gap-4 items-stretch reveal">
+          <div class="border-2 border-ink bg-paper p-6">
+            <span class="font-mono text-[10px] font-semibold">01 / DISCOVER</span>
+            <h3 class="font-display text-3xl font-bold mt-2">Markdown profiles</h3>
+            <p class="mt-3 text-sm leading-relaxed">Global and project-local profiles describe provider, model, thinking level, and role instructions. Project profiles override matching global names.</p>
+          </div>
+          <div class="hidden lg:grid place-items-center text-4xl font-black">→</div>
+          <div class="border-2 border-ink bg-cyan p-6">
+            <span class="font-mono text-[10px] font-semibold">02 / LAUNCH</span>
+            <h3 class="font-display text-3xl font-bold mt-2">Detached worker</h3>
+            <p class="mt-3 text-sm leading-relaxed"><code class="font-mono">devspace agents run</code> starts an unref'd Node worker. The worker selects an adapter and executes the provider to completion.</p>
+          </div>
+          <div class="hidden lg:grid place-items-center text-4xl font-black">→</div>
+          <div class="border-2 border-ink bg-mint p-6">
+            <span class="font-mono text-[10px] font-semibold">03 / REMEMBER</span>
+            <h3 class="font-display text-3xl font-bold mt-2">SQLite summary</h3>
+            <p class="mt-3 text-sm leading-relaxed">Session ID, provider, model, status, latest response/error, and timestamps survive. The event history and execution process do not.</p>
+          </div>
+        </div>
+
+        <div class="mt-12 grid lg:grid-cols-2 gap-6 reveal">
+          <div class="border-2 border-ink bg-ink text-cream p-6 lg:p-8">
+            <p class="font-mono text-xs text-mint font-semibold">WHAT EXISTS</p>
+            <ul class="mt-5 space-y-3 text-sm">
+              <li class="flex gap-3"><span class="text-mint">●</span> Experimental feature flag and profile catalog</li>
+              <li class="flex gap-3"><span class="text-mint">●</span> Six provider adapters behind a common run interface</li>
+              <li class="flex gap-3"><span class="text-mint">●</span> Provider session continuation where supported</li>
+              <li class="flex gap-3"><span class="text-mint">●</span> Background execution and persisted latest state</li>
+              <li class="flex gap-3"><span class="text-mint">●</span> Model-facing delegation skill using the CLI</li>
+              <li class="flex gap-3"><span class="text-mint">●</span> Profiles and provider availability exposed during workspace discovery</li>
+            </ul>
+          </div>
+          <div class="border-2 border-ink bg-paper p-6 lg:p-8">
+            <p class="font-mono text-xs text-signal font-semibold">WHAT IS MISSING</p>
+            <ul class="mt-5 space-y-3 text-sm">
+              <li class="flex gap-3"><span class="text-signal">×</span> Typed MCP tools to start, inspect, message, and cancel agents</li>
+              <li class="flex gap-3"><span class="text-signal">×</span> Streaming run events and append-only execution history</li>
+              <li class="flex gap-3"><span class="text-signal">×</span> Dependency graph, concurrency limits, deadlines, and budgets</li>
+              <li class="flex gap-3"><span class="text-signal">×</span> Provider-neutral, enforceable permission policy</li>
+              <li class="flex gap-3"><span class="text-signal">×</span> Managed worker reconciliation and cancellation</li>
+              <li class="flex gap-3"><span class="text-signal">×</span> Worktree manager, profile revision pinning, and agent-run UI</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="comparison" class="border-b-2 border-ink">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="max-w-4xl reveal">
+          <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">03 / CAPABILITY GAP</p>
+          <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">The difference is orchestration, not intelligence.</h2>
+        </div>
+
+        <div class="mt-12 overflow-x-auto border-2 border-ink shadow-hard-sm reveal">
+          <table class="w-full min-w-[900px] border-collapse text-sm">
+            <thead class="bg-ink text-cream font-mono text-xs uppercase tracking-wide">
+              <tr><th class="p-4 text-left w-[21%]">Capability</th><th class="p-4 text-left w-[28%]">Claude workflows</th><th class="p-4 text-left w-[28%]">DevSpace today</th><th class="p-4 text-left">Priority</th></tr>
+            </thead>
+            <tbody>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Execution model</th><td class="p-4 border-t-2 border-r-2 border-ink">Restricted JS orchestration program</td><td class="p-4 border-t-2 border-r-2 border-ink">Detached, run-to-completion workers</td><td class="p-4 border-t-2 border-ink bg-mint font-mono text-xs font-semibold">FOUNDATION</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Agent definitions</th><td class="p-4 border-t-2 border-r-2 border-ink">Agent types plus per-call options</td><td class="p-4 border-t-2 border-r-2 border-ink">Markdown profiles + raw providers</td><td class="p-4 border-t-2 border-ink">Keep; version profiles</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Model-facing API</th><td class="p-4 border-t-2 border-r-2 border-ink">Typed <code class="font-mono">agent()</code> primitive</td><td class="p-4 border-t-2 border-r-2 border-ink">Model writes shell commands</td><td class="p-4 border-t-2 border-ink bg-signal text-cream font-mono text-xs font-semibold">P0</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Events</th><td class="p-4 border-t-2 border-r-2 border-ink">Live progress + journal</td><td class="p-4 border-t-2 border-r-2 border-ink">Latest response/error only</td><td class="p-4 border-t-2 border-ink bg-signal text-cream font-mono text-xs font-semibold">P0</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Persistence</th><td class="p-4 border-t-2 border-r-2 border-ink">Workflow calls and replay metadata</td><td class="p-4 border-t-2 border-r-2 border-ink">Session summary row</td><td class="p-4 border-t-2 border-ink bg-mint font-mono text-xs font-semibold">P0</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Resume</th><td class="p-4 border-t-2 border-r-2 border-ink">Call-prefix replay; agent sessions</td><td class="p-4 border-t-2 border-r-2 border-ink">Provider-dependent continuation</td><td class="p-4 border-t-2 border-ink">Normalize semantics</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Concurrency</th><td class="p-4 border-t-2 border-r-2 border-ink">Bounded scheduler queue</td><td class="p-4 border-t-2 border-r-2 border-ink">Uncoordinated process starts</td><td class="p-4 border-t-2 border-ink bg-signal text-cream font-mono text-xs font-semibold">P0</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Cancellation</th><td class="p-4 border-t-2 border-r-2 border-ink">Harness-controlled</td><td class="p-4 border-t-2 border-r-2 border-ink">No public agent cancellation</td><td class="p-4 border-t-2 border-ink bg-signal text-cream font-mono text-xs font-semibold">P0</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Permissions</th><td class="p-4 border-t-2 border-r-2 border-ink">Harness policy + optional isolation</td><td class="p-4 border-t-2 border-r-2 border-ink">Inconsistent provider behavior</td><td class="p-4 border-t-2 border-ink bg-signal text-cream font-mono text-xs font-semibold">SECURITY P0</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Write isolation</th><td class="p-4 border-t-2 border-r-2 border-ink">Optional per-agent worktree</td><td class="p-4 border-t-2 border-r-2 border-ink">Shared workspace</td><td class="p-4 border-t-2 border-ink">P1</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Structured results</th><td class="p-4 border-t-2 border-r-2 border-ink">JSON Schema validation</td><td class="p-4 border-t-2 border-r-2 border-ink">Unstructured final text</td><td class="p-4 border-t-2 border-ink">P1</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Observability</th><td class="p-4 border-t-2 border-r-2 border-ink">Phases, labels, progress tree</td><td class="p-4 border-t-2 border-r-2 border-ink">CLI status summary</td><td class="p-4 border-t-2 border-ink">P1</td></tr>
+              <tr class="matrix-row"><th class="p-4 text-left border-t-2 border-r-2 border-ink bg-paper">Workflow DAG</th><td class="p-4 border-t-2 border-r-2 border-ink">Programmed via pipelines/parallelism</td><td class="p-4 border-t-2 border-r-2 border-ink">None</td><td class="p-4 border-t-2 border-ink">P2, after runtime core</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="approaches" class="border-b-2 border-ink bg-ink text-cream">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="grid lg:grid-cols-12 gap-10 items-end reveal">
+          <div class="lg:col-span-8">
+            <p class="font-mono text-xs font-semibold text-mint tracking-[.18em]">04 / DESIGN OPTIONS</p>
+            <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">Five ways to make agents programmable.</h2>
+          </div>
+          <p class="lg:col-span-4 text-cream/70 leading-relaxed">They are not mutually exclusive. The critical decision is which layer becomes the source of truth.</p>
+        </div>
+
+        <div class="mt-12 flex flex-wrap gap-2 reveal" role="tablist" aria-label="Architecture approaches">
+          <button class="tab border border-cream/50 px-4 py-2 font-mono text-xs" role="tab" aria-selected="false" data-tab="bash">A / Bash + CLI</button>
+          <button class="tab border border-cream/50 px-4 py-2 font-mono text-xs" role="tab" aria-selected="false" data-tab="mcp">B / Typed MCP</button>
+          <button class="tab border border-cream/50 px-4 py-2 font-mono text-xs" role="tab" aria-selected="false" data-tab="ts">C / TypeScript API</button>
+          <button class="tab border border-cream/50 px-4 py-2 font-mono text-xs" role="tab" aria-selected="false" data-tab="runtime">D / JS runtime</button>
+          <button class="tab border border-mint bg-mint text-ink px-4 py-2 font-mono text-xs" role="tab" aria-selected="true" data-tab="hybrid">E / Hybrid</button>
+        </div>
+
+        <div class="mt-5 reveal">
+          <article class="tab-panel hidden border-2 border-cream/50 bg-cream text-ink p-6 lg:p-10" data-panel="bash">
+            <div class="grid lg:grid-cols-3 gap-8">
+              <div><p class="font-mono text-xs text-signal font-semibold">A / BOOTSTRAP</p><h3 class="font-display text-4xl font-black mt-2">Model-generated Bash</h3><p class="mt-4">Let the model compose <code class="font-mono">devspace agents run/show</code> commands and use ordinary process tools.</p></div>
+              <div><h4 class="font-mono text-xs font-semibold">GOOD</h4><ul class="mt-3 space-y-2 text-sm"><li>✓ Already works</li><li>✓ Human-debuggable commands</li><li>✓ No new protocol required</li><li>✓ Flexible for experimentation</li></ul></div>
+              <div><h4 class="font-mono text-xs font-semibold">LIMIT</h4><ul class="mt-3 space-y-2 text-sm"><li>× Fragile text parsing and quoting</li><li>× Opaque intent to host policy/UI</li><li>× No typed events or cancellation</li><li>× Encourages polling and shell glue</li><li>× Broad shell capability exceeds agent task need</li></ul></div>
+            </div>
+          </article>
+          <article class="tab-panel hidden border-2 border-cream/50 bg-cream text-ink p-6 lg:p-10" data-panel="mcp">
+            <div class="grid lg:grid-cols-3 gap-8">
+              <div><p class="font-mono text-xs text-signal font-semibold">B / MODEL API</p><h3 class="font-display text-4xl font-black mt-2">First-class MCP tools</h3><p class="mt-4">Give models narrow, typed operations such as <code class="font-mono">start_agent</code>, <code class="font-mono">read_agent_events</code>, and <code class="font-mono">cancel_agent</code>.</p></div>
+              <div><h4 class="font-mono text-xs font-semibold">GOOD</h4><ul class="mt-3 space-y-2 text-sm"><li>✓ Typed validation</li><li>✓ Fine-grained approval</li><li>✓ Native UI rendering</li><li>✓ Auditable model intent</li><li>✓ No shell parsing</li></ul></div>
+              <div><h4 class="font-mono text-xs font-semibold">LIMIT</h4><ul class="mt-3 space-y-2 text-sm"><li>× Tools alone do not create a scheduler</li><li>× Model context can fill with polling/events</li><li>× Requires a durable service underneath</li></ul></div>
+            </div>
+          </article>
+          <article class="tab-panel hidden border-2 border-cream/50 bg-cream text-ink p-6 lg:p-10" data-panel="ts">
+            <div class="grid lg:grid-cols-3 gap-8">
+              <div><p class="font-mono text-xs text-signal font-semibold">C / INTERNAL API</p><h3 class="font-display text-4xl font-black mt-2">Direct TypeScript service</h3><p class="mt-4">Expose a reusable application service to the CLI, MCP server, UI, and tests.</p></div>
+              <div><h4 class="font-mono text-xs font-semibold">GOOD</h4><ul class="mt-3 space-y-2 text-sm"><li>✓ One source of lifecycle truth</li><li>✓ Strong typing and testability</li><li>✓ Natural access to adapters and DB</li><li>✓ Surfaces can remain thin</li></ul></div>
+              <div><h4 class="font-mono text-xs font-semibold">LIMIT</h4><ul class="mt-3 space-y-2 text-sm"><li>× Not directly programmable by a model</li><li>× API design must account for streaming and restart recovery</li></ul></div>
+            </div>
+          </article>
+          <article class="tab-panel hidden border-2 border-cream/50 bg-cream text-ink p-6 lg:p-10" data-panel="runtime">
+            <div class="grid lg:grid-cols-3 gap-8">
+              <div><p class="font-mono text-xs text-signal font-semibold">D / WORKFLOW LANGUAGE</p><h3 class="font-display text-4xl font-black mt-2">Restricted JavaScript runtime</h3><p class="mt-4">Let the model author workflow scripts with injected primitives modeled after <code class="font-mono">agent()</code>, <code class="font-mono">pipeline()</code>, and <code class="font-mono">parallel()</code>.</p></div>
+              <div><h4 class="font-mono text-xs font-semibold">GOOD</h4><ul class="mt-3 space-y-2 text-sm"><li>✓ Deterministic control flow</li><li>✓ Expressive loops and aggregation</li><li>✓ Compact orchestration context</li><li>✓ Reusable workflows</li></ul></div>
+              <div><h4 class="font-mono text-xs font-semibold">LIMIT</h4><ul class="mt-3 space-y-2 text-sm"><li>× Largest security/runtime surface</li><li>× Replay semantics are subtle</li><li>× Premature without events, cancellation, and scheduler</li><li>× VM restriction is not OS sandboxing</li></ul></div>
+            </div>
+          </article>
+          <article class="tab-panel border-2 border-mint bg-mint text-ink p-6 lg:p-10" data-panel="hybrid">
+            <div class="grid lg:grid-cols-3 gap-8">
+              <div><p class="font-mono text-xs text-signal font-semibold">E / RECOMMENDED</p><h3 class="font-display text-4xl font-black mt-2">One service, many surfaces</h3><p class="mt-4">Build lifecycle, events, policy, and scheduling once. Wrap it with MCP and CLI now; add the workflow runtime after the foundation is trustworthy.</p></div>
+              <div><h4 class="font-mono text-xs font-semibold">NOW</h4><ul class="mt-3 space-y-2 text-sm"><li>1. Durable orchestration service</li><li>2. Handle-based provider adapters</li><li>3. Typed MCP agent tools</li><li>4. CLI delegates to the same service</li></ul></div>
+              <div><h4 class="font-mono text-xs font-semibold">LATER</h4><ul class="mt-3 space-y-2 text-sm"><li>5. Scheduler and worktrees</li><li>6. Structured artifacts</li><li>7. Restricted workflow runtime</li><li>8. Journaled replay where valuable</li></ul></div>
+            </div>
+          </article>
+        </div>
+
+        <div class="mt-10 border-y border-cream/40 py-8 grid lg:grid-cols-[auto_1fr] gap-6 items-center reveal">
+          <div class="font-display text-3xl font-black text-mint">Verdict on the Bash hypothesis</div>
+          <p class="text-lg leading-relaxed text-cream/80"><strong class="text-cream">Your bias is useful for bootstrapping.</strong> A capable model can absolutely author the CLI commands. But shell should remain a compatibility and human-operations surface—not the canonical protocol—because DevSpace cannot reliably inspect, authorize, stream, cancel, recover, or visualize orchestration hidden inside arbitrary Bash.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b-2 border-ink bg-cyan">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="grid lg:grid-cols-12 gap-10">
+          <div class="lg:col-span-4 reveal">
+            <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">05 / TARGET ARCHITECTURE</p>
+            <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">Separate surfaces from truth.</h2>
+            <p class="mt-7 text-lg leading-relaxed">CLI, MCP, UI, and workflows should all submit commands to the same service and consume the same event stream.</p>
+          </div>
+          <div class="lg:col-span-8 reveal">
+            <div class="border-2 border-ink bg-cream shadow-hard p-5 lg:p-8">
+              <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 font-mono text-xs font-semibold text-center">
+                <div class="border-2 border-ink bg-paper p-4">CLI</div>
+                <div class="border-2 border-ink bg-mint p-4">MCP TOOLS</div>
+                <div class="border-2 border-ink bg-paper p-4">UI</div>
+                <div class="border-2 border-ink bg-signal text-cream p-4">WORKFLOW VM</div>
+              </div>
+              <div class="flow-arrow"></div>
+              <div class="border-4 border-ink bg-ink text-cream p-6 text-center">
+                <p class="font-mono text-xs text-mint font-semibold">ORCHESTRATION SERVICE</p>
+                <p class="font-display text-3xl lg:text-4xl font-black mt-2">commands · policy · scheduler · lifecycle</p>
+              </div>
+              <div class="flow-arrow"></div>
+              <div class="grid lg:grid-cols-3 gap-3">
+                <div class="border-2 border-ink bg-paper p-5"><p class="font-mono text-xs font-semibold">EVENT STORE</p><p class="text-sm mt-2">Append-only events + materialized run state</p></div>
+                <div class="border-2 border-ink bg-paper p-5"><p class="font-mono text-xs font-semibold">AGENT ADAPTERS</p><p class="text-sm mt-2">Streaming handles + cancellation + resume</p></div>
+                <div class="border-2 border-ink bg-paper p-5"><p class="font-mono text-xs font-semibold">ISOLATION</p><p class="text-sm mt-2">Worktrees + environment and permission policy</p></div>
+              </div>
+              <div class="flow-arrow"></div>
+              <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 font-mono text-[10px] text-center">
+                <span class="border border-ink p-2">CODEX</span><span class="border border-ink p-2">CLAUDE</span><span class="border border-ink p-2">OPENCODE</span><span class="border border-ink p-2">PI</span><span class="border border-ink p-2">CURSOR</span><span class="border border-ink p-2">COPILOT</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-14 grid lg:grid-cols-2 gap-6 reveal">
+          <div class="border-2 border-ink bg-ink text-cream p-6 lg:p-8 overflow-x-auto">
+            <p class="font-mono text-xs text-mint font-semibold mb-5">ADAPTER CONTRACT</p>
+            <pre class="font-mono text-xs sm:text-sm leading-6 min-w-[490px]"><code>interface AgentRunHandle {
+  id: string
+  events(): AsyncIterable&lt;AgentRunEvent&gt;
+  send(message: AgentMessage): Promise&lt;void&gt;
+  cancel(reason?: string): Promise&lt;void&gt;
+  wait(): Promise&lt;AgentRunResult&gt;
+  dispose(): Promise&lt;void&gt;
+}
+
+interface LocalAgentAdapter {
+  start(input: LocalAgentRunInput):
+    Promise&lt;AgentRunHandle&gt;
+  resume?(input: LocalAgentResumeInput):
+    Promise&lt;AgentRunHandle&gt;
+}</code></pre>
+          </div>
+          <div class="border-2 border-ink bg-cream p-6 lg:p-8 overflow-x-auto">
+            <p class="font-mono text-xs text-signal font-semibold mb-5">MODEL-FACING MCP SURFACE</p>
+            <pre class="font-mono text-xs sm:text-sm leading-8"><code>list_agent_profiles
+start_agent
+get_agent
+list_agents
+send_agent_message
+cancel_agent
+read_agent_events</code></pre>
+            <p class="mt-5 border-t-2 border-ink pt-4 text-sm leading-relaxed">Start narrow. Each tool should express one intent, carry typed policy fields, return stable IDs, and be independently approvable and renderable.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b-2 border-ink bg-cream">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="max-w-5xl reveal">
+          <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">06 / DATA MODEL</p>
+          <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">Events first. Summaries second.</h2>
+          <p class="mt-7 text-lg leading-relaxed max-w-3xl">A mutable session row tells you where a run ended. An append-only event history tells you what happened, enables live UI, supports recovery, and provides an audit trail.</p>
+        </div>
+        <div class="mt-12 grid sm:grid-cols-2 lg:grid-cols-4 gap-5 reveal">
+          <article class="border-2 border-ink bg-paper p-5 shadow-hard-sm"><span class="font-mono text-xs font-semibold">workflow_runs</span><p class="mt-3 text-sm">Owner, definition revision, status, budget, timestamps, parent run.</p></article>
+          <article class="border-2 border-ink bg-mint p-5 shadow-hard-sm"><span class="font-mono text-xs font-semibold">workflow_tasks</span><p class="mt-3 text-sm">Dependencies, phase, attempt, deadline, isolation, input.</p></article>
+          <article class="border-2 border-ink bg-cyan p-5 shadow-hard-sm"><span class="font-mono text-xs font-semibold">agent_runs</span><p class="mt-3 text-sm">Profile hash, provider session, policy, worker lease, result.</p></article>
+          <article class="border-2 border-ink bg-signal text-cream p-5 shadow-hard-sm"><span class="font-mono text-xs font-semibold">run_events</span><p class="mt-3 text-sm">Sequence, event type, payload, actor, timestamp, correlation.</p></article>
+        </div>
+        <div class="mt-10 border-2 border-ink bg-paper p-6 lg:p-8 reveal">
+          <p class="font-mono text-xs font-semibold mb-5">EXAMPLE EVENT VOCABULARY</p>
+          <div class="flex flex-wrap gap-2 font-mono text-[11px]">
+            <span class="border border-ink px-3 py-2 bg-cream">run.created</span><span class="border border-ink px-3 py-2 bg-cream">task.queued</span><span class="border border-ink px-3 py-2 bg-mint">agent.started</span><span class="border border-ink px-3 py-2 bg-cyan">agent.output.delta</span><span class="border border-ink px-3 py-2 bg-cyan">agent.tool.requested</span><span class="border border-ink px-3 py-2 bg-paper">agent.message</span><span class="border border-ink px-3 py-2 bg-signal text-cream">agent.failed</span><span class="border border-ink px-3 py-2 bg-mint">agent.completed</span><span class="border border-ink px-3 py-2 bg-paper">run.cancelled</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b-2 border-ink bg-paper">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="grid lg:grid-cols-12 gap-10">
+          <div class="lg:col-span-4 reveal">
+            <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">07 / SAFETY MODEL</p>
+            <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">Isolation is not permission.</h2>
+          </div>
+          <div class="lg:col-span-8 grid sm:grid-cols-2 gap-5 reveal">
+            <article class="border-2 border-ink bg-cream p-6"><h3 class="font-display text-3xl font-bold">Capability policy</h3><p class="mt-3 text-sm leading-relaxed">Define provider-neutral modes—read-only, workspace-write, full access, network, secrets—and translate them per adapter. Fail closed when a provider cannot enforce the requested policy.</p></article>
+            <article class="border-2 border-ink bg-mint p-6"><h3 class="font-display text-3xl font-bold">Worktree isolation</h3><p class="mt-3 text-sm leading-relaxed">Use separate Git worktrees for concurrent writers to avoid collisions and simplify review. This protects repository state, not the host OS or credentials.</p></article>
+            <article class="border-2 border-ink bg-cyan p-6"><h3 class="font-display text-3xl font-bold">Environment policy</h3><p class="mt-3 text-sm leading-relaxed">Do not pass the entire parent environment by default. Construct an allowlisted environment and explicitly broker secrets only when a run policy allows them.</p></article>
+            <article class="border-2 border-ink bg-signal text-cream p-6"><h3 class="font-display text-3xl font-bold">Prompt boundaries</h3><p class="mt-3 text-sm leading-relaxed">Treat source files, web pages, tool output, and prior-agent text as untrusted data. Label provenance and avoid interpolating untrusted results into privileged instructions.</p></article>
+          </div>
+        </div>
+        <div class="mt-10 border-2 border-ink bg-ink text-cream p-6 lg:p-8 reveal">
+          <p class="font-mono text-xs text-mint font-semibold">CURRENT SECURITY DEBT TO FIX BEFORE BROAD ORCHESTRATION</p>
+          <div class="mt-5 grid md:grid-cols-3 gap-6 text-sm leading-relaxed">
+            <p>Claude runs with bypassed permission checks and currently ignores the requested write mode.</p>
+            <p>Cursor/Copilot ACP permission requests are automatically accepted rather than adjudicated by a DevSpace policy.</p>
+            <p>Read-only intent in profiles is prompt-level guidance, while detached workers inherit a broad host environment.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="roadmap" class="border-b-2 border-ink">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="grid lg:grid-cols-12 gap-10">
+          <div class="lg:col-span-4 reveal">
+            <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">08 / BUILD ORDER</p>
+            <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">Earn the workflow runtime.</h2>
+            <p class="mt-7 text-lg leading-relaxed">Do not begin by cloning <code class="font-mono text-[.85em]">pipeline()</code>. First make a single agent run observable, controllable, recoverable, and policy-bound.</p>
+          </div>
+          <div class="lg:col-span-8 relative rail space-y-5 reveal">
+            <article class="relative pl-12"><span class="absolute left-0 top-0 size-9 bg-signal text-cream border-2 border-ink grid place-items-center font-mono font-bold z-10">0</span><div class="border-2 border-ink bg-signal text-cream p-5"><p class="font-mono text-xs font-semibold">SECURITY GATE</p><h3 class="font-display text-3xl font-bold mt-1">Normalize permissions before scaling execution</h3><p class="text-sm mt-2">Define capability policy, adapter conformance, environment filtering, and fail-closed behavior.</p></div></article>
+            <article class="relative pl-12"><span class="absolute left-0 top-0 size-9 bg-mint border-2 border-ink grid place-items-center font-mono font-bold z-10">1</span><div class="border-2 border-ink bg-cream p-5"><p class="font-mono text-xs font-semibold">FOUNDATION</p><h3 class="font-display text-3xl font-bold mt-1">Durable runs + append-only events</h3><p class="text-sm mt-2">Add workflow/task/agent-run records, event sequence numbers, status projections, and immutable profile content hashes.</p></div></article>
+            <article class="relative pl-12"><span class="absolute left-0 top-0 size-9 bg-cyan border-2 border-ink grid place-items-center font-mono font-bold z-10">2</span><div class="border-2 border-ink bg-cream p-5"><p class="font-mono text-xs font-semibold">RUNTIME</p><h3 class="font-display text-3xl font-bold mt-1">Streaming adapter handles + supervisor</h3><p class="text-sm mt-2">Refactor adapters to start/send/cancel/wait. Replace untracked detached workers with leases, heartbeats, process handles, and restart reconciliation.</p></div></article>
+            <article class="relative pl-12"><span class="absolute left-0 top-0 size-9 bg-paper border-2 border-ink grid place-items-center font-mono font-bold z-10">3</span><div class="border-2 border-ink bg-cream p-5"><p class="font-mono text-xs font-semibold">SURFACES</p><h3 class="font-display text-3xl font-bold mt-1">Typed MCP tools; thin CLI wrapper</h3><p class="text-sm mt-2">Expose catalog, start, inspect, events, message, and cancel. Keep existing commands but route them through the shared service.</p></div></article>
+            <article class="relative pl-12"><span class="absolute left-0 top-0 size-9 bg-paper border-2 border-ink grid place-items-center font-mono font-bold z-10">4</span><div class="border-2 border-ink bg-cream p-5"><p class="font-mono text-xs font-semibold">ORCHESTRATION</p><h3 class="font-display text-3xl font-bold mt-1">Scheduler + dependency graph + worktrees</h3><p class="text-sm mt-2">Add bounded concurrency, deadlines, retries, cancellation propagation, conflict-aware isolation, and structured artifacts.</p></div></article>
+            <article class="relative pl-12"><span class="absolute left-0 top-0 size-9 bg-ink text-cream border-2 border-ink grid place-items-center font-mono font-bold z-10">5</span><div class="border-2 border-ink bg-mint p-5"><p class="font-mono text-xs font-semibold">DYNAMIC WORKFLOWS</p><h3 class="font-display text-3xl font-bold mt-1">Restricted JS + injected orchestration primitives</h3><p class="text-sm mt-2">Implement <code class="font-mono">agent()</code>, then <code class="font-mono">parallel()</code>/<code class="font-mono">pipeline()</code>, budgets, phases, schemas, nesting limits, and carefully scoped replay.</p></div></article>
+            <article class="relative pl-12"><span class="absolute left-0 top-0 size-9 bg-ink text-cream border-2 border-ink grid place-items-center font-mono font-bold z-10">6</span><div class="border-2 border-ink bg-cream p-5"><p class="font-mono text-xs font-semibold">EXPERIENCE</p><h3 class="font-display text-3xl font-bold mt-1">Agent timeline + workflow DAG UI</h3><p class="text-sm mt-2">Render profiles, parent/child runs, live events, approvals, artifacts, costs, worktrees, retries, and recovery actions.</p></div></article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b-2 border-ink bg-mint">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-24">
+        <div class="grid lg:grid-cols-12 gap-10 items-start">
+          <div class="lg:col-span-5 reveal">
+            <p class="font-mono text-xs font-semibold text-signal tracking-[.18em]">09 / COPY SELECTIVELY</p>
+            <h2 class="font-display text-5xl lg:text-7xl font-black leading-[.9] mt-4">Take the pattern. Not every implementation detail.</h2>
+          </div>
+          <div class="lg:col-span-7 grid sm:grid-cols-2 gap-4 reveal">
+            <div class="border-2 border-ink bg-cream p-6">
+              <h3 class="font-display text-3xl font-bold">Copy</h3>
+              <ul class="mt-4 space-y-3 text-sm"><li>✓ Code-owned control flow</li><li>✓ Fresh context per worker</li><li>✓ Schema-validated handoffs</li><li>✓ Bounded concurrency</li><li>✓ Explicit phases and labels</li><li>✓ Worktree option for writers</li><li>✓ Budget-aware loops</li></ul>
+            </div>
+            <div class="border-2 border-ink bg-signal text-cream p-6">
+              <h3 class="font-display text-3xl font-bold">Reconsider</h3>
+              <ul class="mt-4 space-y-3 text-sm"><li>△ Same-session-only replay as the only recovery model</li><li>△ In-process VM as a strong security boundary</li><li>△ Prefix replay for side-effect-heavy workflows</li><li>△ Provider-specific permission escape hatches</li><li>△ Unstructured text as the default task artifact</li><li>△ Building workflow syntax before lifecycle correctness</li></ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="bg-cream">
+      <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-20 lg:py-28">
+        <div class="border-4 border-ink shadow-hard bg-paper p-7 lg:p-12 reveal">
+          <div class="grid lg:grid-cols-12 gap-10">
+            <div class="lg:col-span-4">
+              <p class="font-mono text-xs font-semibold text-signal">FINAL POSITION</p>
+              <h2 class="font-display text-5xl lg:text-6xl font-black leading-[.9] mt-3">DevSpace should become the harness.</h2>
+            </div>
+            <div class="lg:col-span-8 grid sm:grid-cols-2 gap-7 text-base leading-relaxed">
+              <p><strong>Let the model decide the work graph:</strong> which configured profile to use, what prompt to send, which tasks can run concurrently, how to verify results, and when to stop.</p>
+              <p><strong>Let DevSpace own execution mechanics:</strong> IDs, policy, scheduling, event capture, cancellation, provider translation, isolation, recovery, and durable state.</p>
+              <p><strong>Keep CLI available:</strong> excellent for humans, debugging, scripts, and compatibility. Route it through the same service rather than letting it become a second runtime.</p>
+              <p><strong>Add dynamic workflows last:</strong> once <code class="font-mono">startAgent()</code> is trustworthy, wrapping it in <code class="font-mono">agent()</code>, <code class="font-mono">pipeline()</code>, and <code class="font-mono">parallel()</code> becomes a tractable language-design problem.</p>
+            </div>
+          </div>
+          <div class="mt-10 pt-6 border-t-2 border-ink flex flex-col sm:flex-row gap-4 justify-between font-mono text-xs">
+            <span>DECISION: HYBRID, SERVICE-FIRST</span>
+            <span>CLI → MCP → SCHEDULER → WORKFLOW VM</span>
+          </div>
+        </div>
+
+        <aside class="mt-12 text-xs leading-relaxed text-ink/65 max-w-5xl reveal">
+          <p><strong>Evidence note.</strong> Public workflow semantics are supplemented here by local inspection of the installed Claude Code build and official bundled workflow examples. Details such as the apparent Node VM, journal format, and cache-key implementation should be treated as locally evidenced implementation behavior—not as a guaranteed public compatibility contract.</p>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <footer class="border-t-2 border-ink bg-ink text-cream">
+    <div class="mx-auto max-w-[1480px] px-4 lg:px-8 py-7 flex flex-col sm:flex-row justify-between gap-3 font-mono text-[10px] sm:text-xs">
+      <span>DEVSPACE ARCHITECTURE EXPLORATION</span>
+      <span>CLAUDE WORKFLOWS × LOCAL CODING AGENTS</span>
+    </div>
+  </footer>
+
+  <script>
+    const tabs = [...document.querySelectorAll('.tab')];
+    const panels = [...document.querySelectorAll('.tab-panel')];
+
+    function selectTab(name) {
+      tabs.forEach((tab) => {
+        const active = tab.dataset.tab === name;
+        tab.setAttribute('aria-selected', String(active));
+        tab.classList.toggle('bg-mint', active);
+        tab.classList.toggle('text-ink', active);
+        tab.classList.toggle('border-mint', active);
+      });
+      panels.forEach((panel) => panel.classList.toggle('hidden', panel.dataset.panel !== name));
+    }
+
+    tabs.forEach((tab) => tab.addEventListener('click', () => selectTab(tab.dataset.tab)));
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.08 });
+
+    document.querySelectorAll('.reveal').forEach((element) => observer.observe(element));
+  </script>
+</body>
+</html>

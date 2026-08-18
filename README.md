@@ -1,0 +1,185 @@
+# DevSpace Ultra
+
+**DevSpace Ultra** is an MIT-licensed distribution of DevSpace with an elastic ChatGPT Classic multi-agent runtime layer.
+
+It keeps the original DevSpace local MCP workspace capabilities — local files, code search, editing, terminal execution, artifacts, skills, and secure self-hosting — and adds a production-oriented Chat Swarm control plane for running multiple independent ChatGPT Classic worker conversations on one computer.
+
+> Upstream project: [Waishnav/devspace](https://github.com/Waishnav/devspace). DevSpace Ultra preserves the upstream MIT license and attribution and adds the Ultra runtime/orchestration layer.
+
+## What Ultra adds
+
+- **Elastic worker pool** — the main agent can scale workers up or down according to the current workload instead of using a fixed worker count.
+- **Live Swarm resize** — backend capacity can grow or shrink without replacing the orchestrator or losing completed work. Shrink is safety-first and refuses to evict busy/tail workers.
+- **Independent ChatGPT Classic runtimes** — on Windows, worker packages use isolated package identities, profiles, sessions, and conversations.
+- **Same-worker context continuity** — a worker can be reopened at its exact saved ChatGPT conversation and continue with the worker token held by that conversation.
+- **Zero-copy bootstrap** — workers can be launched, minimized, sent into a configured `sub-agents` ChatGPT Project, joined to a Swarm, and parked without manual invite-code copy/paste.
+- **Backend-first routing** — normal work is always dispatched through the DevSpace Chat Swarm backend. UI/CDP automation is lifecycle/bootstrap/recovery only.
+- **Recovery** — detects missing runtimes, interrupted connections, stale worker loops, and blocking UI notices; can reopen the exact worker conversation and resume it.
+- **Update compatibility manager** — detects ChatGPT Classic version drift, supports a canary runtime, profile backup, rolling worker update, exact-conversation restore, verification, and rollback.
+- **Configurable runtime reservation** — operators can reserve any runtime numbers for standalone/private use; no runtime number is reserved by default in the public package.
+
+## One-click install
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/main/install.ps1 | iex
+```
+
+### macOS / Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/main/install.sh | bash
+```
+
+Or install directly from GitHub with npm:
+
+```bash
+npm install -g github:enwong93-sketch/devspace-ultra#main
+```
+
+Then initialize and run:
+
+```bash
+devspace-ultra init
+devspace-ultra serve
+```
+
+`devspace` remains available as a compatibility alias.
+
+## Minimum requirements and compatibility
+
+### DevSpace core
+
+- Windows 10/11 x64, macOS, or a mainstream Linux distribution supported by Node/native dependencies
+- Node.js `>=22.19 <27` (Node 22 LTS recommended)
+- npm (included with Node.js)
+- Git for installation directly from this GitHub repository
+- Network access for the initial install and for the ChatGPT/MCP connection path you configure
+- Tailscale is optional; DevSpace Ultra does not require it
+
+### ChatGPT Classic elastic desktop workers
+
+- Windows 10/11 x64 only for automatic isolated desktop runtime cloning/recovery
+- ChatGPT Classic Windows Desktop app installed and signed in
+- A ChatGPT account able to use the worker conversations
+- RAM sized to the worker count: **16 GB is a practical starting point for 2–4 workers; 32 GB+ is recommended for larger pools.** These are operational recommendations, not hard limits.
+- No GPU is required by DevSpace Ultra or the ChatGPT Classic worker runtimes themselves
+
+macOS/Linux users still receive the DevSpace coding/MCP core and Chat Swarm backend, but **do not currently receive the Windows package-identity worker-cloning path**.
+
+## Platform support
+
+| Capability | Windows | macOS | Linux |
+|---|---:|---:|---:|
+| Base DevSpace MCP workspace | ✅ | ✅ | ✅ |
+| Chat Swarm backend / routing | ✅ | ✅ | ✅ |
+| Manual/browser worker conversations | ✅ | ✅ | ✅ |
+| Elastic backend worker-slot resize | ✅ | ✅ | ✅ |
+| Automatic isolated ChatGPT Classic desktop runtime cloning | ✅ | — | — |
+| Automatic desktop worker recovery by package/profile identity | ✅ | — | — |
+| ChatGPT Classic canary/rolling package update manager | ✅ | — | — |
+
+DevSpace Ultra installs and runs the base DevSpace/Chat Swarm layer on supported Node platforms. The Windows-only rows depend on Windows AppX package identity and the current ChatGPT Classic desktop distribution model. Ultra feature-detects those capabilities rather than pretending they exist on platforms where the same desktop package mechanism is unavailable.
+
+## Production flow
+
+A normal main-agent session can operate at this level:
+
+```text
+assess workload
+  -> choose desiredWorkers
+  -> elastic scale runtime + Swarm capacity
+  -> dispatch independent or targeted tasks
+  -> collect / synthesize
+  -> shrink idle tail workers when no longer needed
+```
+
+The main agent does not have to keep all workers open. Existing worker conversations are reused whenever possible.
+
+### Runtime lifecycle tools
+
+The Ultra server registers runtime tools such as:
+
+- `chat_swarm_runtime_status`
+- `chat_swarm_runtime_ensure`
+- `chat_swarm_runtime_scale`
+- `chat_swarm_runtime_recover`
+- `chat_swarm_runtime_autojoin`
+- `chat_swarm_runtime_setup`
+- `chat_swarm_runtime_stop`
+- `chat_swarm_elastic_scale`
+- `chat_swarm_update_status`
+- `chat_swarm_update_rollout`
+
+The Chat Swarm backend includes:
+
+- create / join / status
+- dispatch / collect / cancel
+- long parked worker waits and submit/repark
+- targeted or first-available routing
+- idempotent `taskKey` retries
+- persistence across DevSpace restart
+- worker recycle fallback
+- safe live capacity resize
+
+## Elastic scaling policy
+
+Ultra deliberately separates **runtime capacity** from **task routing**.
+
+- The main agent may choose a small worker count for simple work and expand for parallelizable work.
+- `reservedWorkers` can exclude any operator-chosen runtime numbers from elastic production scaling; the public default is an empty reservation list.
+- Scaling down only removes safe idle tail capacity; it does not interrupt a busy worker merely to reach a number immediately.
+- Existing worker conversations and saved context are preferred over creating throwaway conversations.
+- Normal tasks are never typed into worker UI by the controller. They travel through the shared Chat Swarm backend.
+
+## `sub-agents` Project routing
+
+When configured with a ChatGPT Project URL, new worker conversations are created inside the `sub-agents` Project instead of cluttering the general chat list. Project-scoped conversation URLs are persisted and accepted by the recovery path.
+
+## Update safety
+
+`chat-swarm-classic-update-manager.ps1` is designed around a canary-first rollout:
+
+1. detect primary ChatGPT Classic version and worker drift;
+2. prepare a free canary runtime from the new primary package;
+3. restore a known authenticated seed profile;
+4. verify the canary renderer/login/composer and run a real worker task at the orchestration layer;
+5. update production workers one at a time;
+6. back up profile/session state before each worker update;
+7. reopen the exact saved conversation and verify the worker after update;
+8. rollback the affected worker if verification fails.
+
+If there is no version drift, no rollout is needed.
+
+## Security model
+
+DevSpace Ultra inherits DevSpace's self-hosted MCP model. Keep the server bound and exposed only through a transport you control, use authentication, and avoid exposing the local MCP endpoint directly to the public Internet.
+
+Worker tokens and orchestrator tokens are not intentionally written to normal controller logs. Runtime state stores package/profile/conversation mappings, not raw Swarm tokens.
+
+See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
+
+## Verification
+
+Distribution-level verification:
+
+```bash
+npm run verify:ultra
+```
+
+The Chat Swarm regression covers multi-worker fan-out, targeted routing, submit/repark, sparse wake-up, retry idempotency, persistence, close wake-up, recycle safety, and resize invariants.
+
+Windows lifecycle testing additionally covers isolated runtime startup, minimized CDP control, worker recovery, long lease soak, same-conversation continuity, and elastic provisioning.
+
+## Documentation
+
+- [Classic operator guide](docs/chat-swarm-classic-operator.md)
+- [Productization and verification record](docs/chat-swarm-classic-productization.md)
+- [Contributing](CONTRIBUTING.md)
+
+## License
+
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+DevSpace Ultra is an independent community fork/distribution and is not an official OpenAI product. ChatGPT and OpenAI product names are trademarks of their respective owners.

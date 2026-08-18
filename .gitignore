@@ -1,0 +1,32 @@
+node_modules/
+*.log
+*.tgz
+*.bak*
+*.backup
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+coverage/
+dist/*.map
+
+# Local DevSpace / Chat Swarm state and sensitive runtime data
+.local/
+.devspace/
+chat-swarm-state.json
+controller-state.json
+update-backups/
+auth-seed/
+ChatGPT-Classic-Worker-Session-Backups/
+ChatGPT-Classic-Worker-Runtimes/
+
+# Developer-only handoff/restart helpers (must never be published)
+restart-devspace.ps1
+docs/DEVSPACE-ULTRA-HANDOFF-2026-08-18.md
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp

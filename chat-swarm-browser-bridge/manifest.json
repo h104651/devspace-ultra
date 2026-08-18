@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Chat Swarm Wake Bridge",
+  "version": "0.1.9",
+  "description": "Manually binds the current ChatGPT tab as a DevSpace Chat Swarm browser worker and wakes it only when work is available.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Chat Swarm Wake Bridge",
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://*/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
