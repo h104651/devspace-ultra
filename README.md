@@ -18,6 +18,24 @@ It keeps the original DevSpace local MCP workspace capabilities — local files,
 - **Update compatibility manager** — detects ChatGPT Classic version drift, supports a canary runtime, profile backup, rolling worker update, exact-conversation restore, verification, and rollback.
 - **Configurable runtime reservation** — operators can reserve any runtime numbers for standalone/private use; no runtime number is reserved by default in the public package.
 
+### Browser Control
+
+DevSpace Ultra 0.2.0 adds a local-first **DevSpace Browser Control** layer.
+
+After a one-time local Chrome extension setup, any DevSpace-connected orchestrator or subagent can:
+
+- discover user-approved existing Chrome tabs;
+- claim one tab with an exclusive lease so two agents cannot race the same page;
+- show a compact bottom-right **AGENT CLAIMED THIS TAB** control strip plus a visible black agent pointer/click pulse while control is active;
+- open and claim a new managed work tab;
+- inspect a semantic accessibility snapshot with stable short refs such as `e1`, `e2`;
+- click, fill, type, press keys, scroll, hover, drag, select, check, navigate, and wait;
+- capture screenshots plus console/network/download diagnostics;
+- opt into a separate Developer mode for supported CDP commands;
+- release/expire claims safely, with automatic detach and recovery after Chrome restart.
+
+The default tab policy is **selected tabs only**. Programmatic password-field filling is blocked; users enter credentials directly in Chrome, so agents can reuse an authenticated session without receiving the password. Every MCP-connected orchestrator or worker conversation receives the same `browser_control_*` tool surface and can claim a different tab concurrently. See the [Browser Control setup guide](browser-control-bridge/README.md) and [Browser Control architecture](docs/browser-control-architecture.md).
+
 ## One-click install
 
 ### Windows (PowerShell)
@@ -158,6 +176,8 @@ DevSpace Ultra inherits DevSpace's self-hosted MCP model. Keep the server bound 
 
 Worker tokens and orchestrator tokens are not intentionally written to normal controller logs. Runtime state stores package/profile/conversation mappings, not raw Swarm tokens.
 
+Browser Control uses one-time pairing plus exclusive per-tab claims. DevSpace persists only hashes of bridge/claim tokens and keeps live tab URLs/titles memory-only; the extension defaults to explicitly shared tabs rather than exposing the whole Chrome profile.
+
 See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 
 ## Verification
@@ -176,6 +196,7 @@ Windows lifecycle testing additionally covers isolated runtime startup, minimize
 
 - [Classic operator guide](docs/chat-swarm-classic-operator.md)
 - [Productization and verification record](docs/chat-swarm-classic-productization.md)
+- [Browser Control architecture and local verification](docs/browser-control-architecture.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License

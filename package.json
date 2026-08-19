@@ -1,7 +1,7 @@
 {
   "name": "devspace-ultra",
-  "version": "0.1.0",
-  "description": "DevSpace Ultra: DevSpace plus elastic ChatGPT Classic multi-agent runtime orchestration.",
+  "version": "0.2.0",
+  "description": "DevSpace Ultra: elastic ChatGPT Classic multi-agent orchestration plus local-first Chrome Browser Control.",
   "type": "module",
   "main": "dist/server.js",
   "engines": {
@@ -18,6 +18,7 @@
     "!docs/DEVSPACE-ULTRA-HANDOFF-2026-08-18.md",
     "examples",
     "chat-swarm-browser-bridge",
+    "browser-control-bridge",
     "scripts",
     "skills",
     "README.md",
@@ -38,7 +39,9 @@
     "dev": "node scripts/dev-server.mjs",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "start": "node dist/cli.js serve",
-    "verify:ultra": "node --check dist/chat-swarm.js && node --check dist/chat-swarm-classic-runtime.js && node --check dist/server.js && node --check scripts/chat-swarm-classic-cdp-bootstrap.mjs && node dist/chat-swarm.test.js",
+    "verify:browser-control": "node --check dist/browser-control.js && node --check browser-control-bridge/background.js && node --check browser-control-bridge/popup.js && node dist/browser-control.test.js",
+    "verify:browser-control:live": "node scripts/browser-control-live-gate.mjs",
+    "verify:ultra": "node --check dist/chat-swarm.js && node --check dist/chat-swarm-classic-runtime.js && node --check dist/browser-control.js && node --check dist/server.js && node --check scripts/chat-swarm-classic-cdp-bootstrap.mjs && node --check scripts/browser-control-live-gate.mjs && node --check browser-control-bridge/background.js && node --check browser-control-bridge/popup.js && node dist/chat-swarm.test.js && node dist/browser-control.test.js",
     "test": "npm run verify:ultra",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -49,7 +52,10 @@
     "multi-agent",
     "devspace",
     "windows",
-    "local-first"
+    "local-first",
+    "browser-control",
+    "computer-use",
+    "chrome"
   ],
   "author": "enwong93-sketch and DevSpace Ultra contributors",
   "license": "MIT",
