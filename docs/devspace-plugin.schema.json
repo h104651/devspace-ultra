@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/enwong93-sketch/devspace-ultra/blob/main/docs/devspace-plugin.schema.json",
+  "title": "DevSpace Ultra Universal Capability Plugin",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 180,
+      "description": "Stable package identifier. If omitted, DevSpace derives one from compatible plugin/package metadata or the directory name."
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 180 },
+    "version": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "source": { "type": "string", "maxLength": 4096 },
+    "skills": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Optional skill directories. SKILL.md files are also discovered automatically in the bounded package tree."
+    },
+    "instructions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Optional additional instruction/resources to expose through capability_read."
+    },
+    "mcpServers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/mcpServer" }
+    },
+    "tools": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/commandTool" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/commandToolBody" }
+        }
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "environmentMap": {
+      "type": "object",
+      "additionalProperties": { "type": ["string", "number", "boolean"] }
+    },
+    "mcpServer": {
+      "type": "object",
+      "properties": {
+        "description": { "type": "string" },
+        "type": { "enum": ["stdio", "streamable-http", "http", "sse"] },
+        "transport": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "object", "additionalProperties": true }
+          ]
+        },
+        "command": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string" },
+        "connectTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+        "startup_timeout_sec": { "type": "number", "minimum": 1, "maximum": 300 },
+        "env": { "$ref": "#/$defs/environmentMap" },
+        "requiredEnv": { "type": "array", "items": { "type": "string" } },
+        "url": { "type": "string" },
+        "headers": {
+          "oneOf": [
+            { "$ref": "#/$defs/environmentMap" },
+            { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+          ]
+        },
+        "variables": { "type": "object", "additionalProperties": true }
+      },
+      "anyOf": [
+        { "required": ["command"] },
+        { "required": ["url"] }
+      ],
+      "additionalProperties": true
+    },
+    "commandToolBody": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "description": { "type": "string" },
+        "command": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string" },
+        "env": { "$ref": "#/$defs/environmentMap" },
+        "requiredEnv": { "type": "array", "items": { "type": "string" } },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+        "input": { "enum": ["json-stdin", "none"] },
+        "inputSchema": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "commandTool": {
+      "allOf": [
+        { "$ref": "#/$defs/commandToolBody" },
+        {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 220 }
+          }
+        }
+      ]
+    }
+  }
+}

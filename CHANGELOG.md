@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 — 2026-08-20
+
+### Added
+
+- Shared **Unified Agent Capability Runtime** instantiated once per DevSpace backend and exposed identically to orchestrator and worker MCP sessions.
+- User-level plugin store at `~/.devspace/plugins` with managed packages, metadata-only registry, enable/disable, Git update, and safe managed uninstall lifecycle.
+- Twelve progressive-disclosure `capability_*` agent tools for compact catalog/search, inspection, install, trust/enable, disable, update, uninstall, refresh, resource reading, stateful MCP instance claims, and tool invocation.
+- Multi-format discovery for Agent Skills (`SKILL.md`), agent instruction files, DevSpace universal manifests, Claude-style and Codex-style plugin roots/components, MCP client configs, nested `*.mcp.json` profiles, and official MCP Registry `server.json` metadata/remotes.
+- Shared MCP client proxy supporting stdio, Streamable HTTP, and legacy SSE transports, with bounded connect/call timeouts, connection deduplication across agents, progressive discovery/use of MCP tools/prompts/resources, and isolated exclusive stateful instances for project-bound MCPs such as Blender.
+- Explicit command-tool adapter format using shell-free process execution, JSON stdin, bounded output, plugin-confined cwd, and execution timeouts.
+- GitHub/Git/local-directory installation without package install hooks; newly downloaded executable code remains disabled/untrusted until explicitly trusted.
+- Secret-safe MCP configuration using environment-variable names rather than persisted values, including official MCP Registry URL variables and header descriptors; remote transports reject non-HTTP(S) URLs.
+- Plugin skills join normal `open_workspace` skill discovery only after the plugin is enabled and trusted; resource/cwd resolution blocks lexical and symlink escapes from the plugin root.
+- Nested/monorepo plugin discovery so one Git repository can contain multiple plugin roots and reusable MCP profiles.
+- Stateful MCP `instanceId` leases with private in-memory instance tokens, ephemeral per-instance environment overrides, isolated MCP processes, same-instance exclusion, and serialized same-template cold-start to avoid package-manager/cache races.
+- Windows stdio compatibility preserves the minimal `COMSPEC`/`PATHEXT`/`WINDIR` process context needed by package managers such as `uv` without inheriting the full parent environment.
+
+### Verified for release
+
+- Deterministic fixture exercises install-without-execution, trust gate, two independent MCP-session catalogs, compact search, Agent Skill discovery, bounded/symlink-safe instruction reads, shared MCP connection dedupe/refresh invalidation, real stdio MCP tools/prompts/resources, command tools, official Registry metadata/remotes, secret non-persistence, disable/re-enable, and uninstall.
+- Real GitHub install gate clones the current `oceanbase/powermem` repository into an isolated temporary plugin store, detects its nested Claude plugin/Agent Skills/instructions/MCP profile, performs no plugin execution, and removes the package cleanly afterward.
+- Codex plugin compatibility gate scans every local `.codex-plugin/plugin.json`, fails on unknown manifest fields/missing declared paths, and currently passes 71/71 manifests across bundled, curated, remote-curated, personal, staging, archived, and source-tree packages. Skills/MCP are directly reusable; platform App connector IDs and Codex lifecycle hooks are preserved as explicit host dependencies rather than silently emulated.
+- Real dual-Blender gate uses the user's installed Blender 5.1 extension plus Blender Lab MCP v1.0.0 through the Capability Runtime: two isolated Blender processes/projects expose the same complete 26-tool catalog, accept simultaneous project-specific calls, and pass cross-project marker isolation plus high-level object/datablock summary checks.
+
 ## 0.2.0 — 2026-08-19
 
 ### Added

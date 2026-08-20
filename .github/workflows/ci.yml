@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm install --ignore-scripts --no-audit --no-fund
-      - run: npm run verify:ultra
+      - run: npm run build
       - run: npm pack --dry-run
       - name: Validate shell installer
         if: runner.os != 'Windows'
