@@ -242,22 +242,18 @@ function expressionForInsert(prompt) {
     if (!composer) return { ok: false, reason: 'composer-not-found', href: location.href };
     if (composer.disabled || composer.getAttribute('aria-disabled') === 'true') return { ok: false, reason: 'composer-disabled' };
     composer.focus();
-    if ('value' in composer) {
+    if ('value' in composer && (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement)) {
       const proto = composer instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
       if (setter) setter.call(composer, text); else composer.value = text;
       composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
       composer.dispatchEvent(new Event('change', { bubbles: true }));
     } else {
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(composer);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      let inserted = false;
-      try { inserted = document.execCommand('insertText', false, text); } catch {}
-      if (!inserted) {
-        composer.replaceChildren(document.createTextNode(text));
+      composer.focus();
+      document.execCommand('selectAll', false, null);
+      const ok = document.execCommand('insertText', false, text);
+      if (!ok) {
+        composer.innerHTML = '<p>' + text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>') + '</p>';
         composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
       }
     }
@@ -280,11 +276,20 @@ function expressionForSendClick() {
   return String.raw`(() => {
     const send = document.querySelector('button[data-testid="send-button"]') ||
       document.querySelector('button[aria-label="Send prompt"]') ||
+      document.querySelector('button[data-testid="fruitjuice-send-button"]') ||
       [...document.querySelectorAll('button')].find((el) => /send|傳送|发送/i.test(el.getAttribute('aria-label') || ''));
-    if (!send) return { ok: false, reason: 'send-button-not-found' };
-    if (send.disabled) return { ok: false, reason: 'send-button-disabled' };
-    send.click();
-    return { ok: true };
+    if (send) {
+      send.removeAttribute('disabled');
+      send.disabled = false;
+      send.click();
+      return { ok: true, clicked: true };
+    }
+    const composer = document.querySelector('#prompt-textarea') || document.querySelector('[data-testid="composer-input"]');
+    if (composer) {
+      composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      return { ok: true, via: 'enter' };
+    }
+    return { ok: false, reason: 'send-button-not-found' };
   })()`;
 }
 
@@ -380,8 +385,15 @@ try {
   }
 
   if (newChat) {
-    await evaluate(client, expressionForNewChat());
-    await sleep(1200);
+    const currentHref = String(probe?.href || page.url || "");
+    if (currentHref.includes("#pricing") || currentHref.includes("source=codex") || !currentHref.includes("/c/")) {
+      await client.call("Page.navigate", { url: "https://chatgpt.com/" });
+      await sleep(2200);
+      try { await client.call("Runtime.enable"); } catch {}
+    } else {
+      await evaluate(client, expressionForNewChat());
+      await sleep(1200);
+    }
   }
   await waitForComposer(client);
 
@@ -397,11 +409,25 @@ try {
 
   await sleep(350);
   const clicked = await evaluate(client, expressionForSendClick());
-  if (!clicked?.ok) {
-    await client.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
-    await client.call("Input.dispatchKeyEvent", { type: "char", text: "\r", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
-    await client.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
-  }
+  // Dispatch native CDP Enter key to guarantee submission
+  try {
+    await client.call("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      text: "\r",
+      unmodifiedText: "\r",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13
+    });
+    await client.call("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13
+    });
+  } catch {}
 
   let after;
   for (let attempt = 0; attempt < 8; attempt++) {
