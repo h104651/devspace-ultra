@@ -16,13 +16,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "chat-swarm-desktop-resolver.ps1")
+
 $runtimeCloneScript = Join-Path $PSScriptRoot "chat-swarm-classic-runtime-clone.ps1"
 $controllerScript = Join-Path $PSScriptRoot "chat-swarm-classic-controller.ps1"
 $bootstrapScript = Join-Path $PSScriptRoot "chat-swarm-classic-cdp-bootstrap.mjs"
 $stateRoot = Join-Path $env:LOCALAPPDATA "DevSpace\ChatSwarmClassic"
 $controllerStatePath = Join-Path $stateRoot "controller-state.json"
-$authSeedProfile = Join-Path $stateRoot "auth-seed\profile"
-$backupRootBase = Join-Path $stateRoot "update-backups"
+$authSeedRoot = Join-Path $stateRoot "auth-seed"
+$authSeedProfile = Join-Path $authSeedRoot "profile"
+$backupRootBase = Join-Path $env:LOCALAPPDATA "ChatGPT-Classic-Worker-Update-Backups"
 
 $authStateItems = @(
     "Local State",
@@ -40,52 +43,52 @@ $authStateItems = @(
 )
 
 function Get-PrimaryPackage {
-    $package = Get-AppxPackage -Name "OpenAI.ChatGPT-Desktop" |
+    $primaryInfo = Resolve-ChatGPTDesktopPackage -RequireInstalled
+    $package = Get-AppxPackage -Name $primaryInfo.PackageName |
         Sort-Object Version -Descending |
         Select-Object -First 1
-    if (-not $package) { throw "OpenAI ChatGPT Classic package is not installed." }
+    if (-not $package) { throw "Neither OpenAI.Codex nor OpenAI.ChatGPT-Desktop package is installed." }
     $package
 }
 
 function Get-WorkerRuntime {
     param([Parameter(Mandatory)][int]$Number)
-    $packageName = "OpenAI.ChatGPT-Desktop.Worker{0:D2}" -f $Number
-    $package = Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
-    if (-not $package) {
+    $workerInfo = Resolve-ChatGPTDesktopPackage -WorkerNumber $Number
+    if (-not $workerInfo.Registered) {
         return [pscustomobject]@{
-            Number = $Number
-            WorkerId = "worker-{0:D2}" -f $Number
-            PackageName = $packageName
-            Registered = $false
-            Version = $null
+            Number          = $Number
+            WorkerId        = $workerInfo.WorkerId
+            PackageName     = $workerInfo.PackageName
+            Registered      = $false
+            Version         = $null
             InstallLocation = $null
-            ExecutablePath = $null
-            AliasPath = Join-Path $env:LOCALAPPDATA ("Microsoft\WindowsApps\chatgpt-classic-worker{0:D2}.exe" -f $Number)
-            ProfilePath = $null
-            DebugPort = $DebugBasePort + $Number
+            ExecutablePath  = $null
+            AliasPath       = $workerInfo.AliasPath
+            ProfilePath     = $null
+            DebugPort       = $DebugBasePort + $Number
+            ProcessName     = $workerInfo.ProcessName
         }
     }
     [pscustomobject]@{
-        Number = $Number
-        WorkerId = "worker-{0:D2}" -f $Number
-        PackageName = $packageName
-        Registered = $true
-        Version = [string]$package.Version
-        InstallLocation = $package.InstallLocation
-        ExecutablePath = Join-Path $package.InstallLocation "app\ChatGPT Classic.exe"
-        AliasPath = Join-Path $env:LOCALAPPDATA ("Microsoft\WindowsApps\chatgpt-classic-worker{0:D2}.exe" -f $Number)
-        ProfilePath = Join-Path $env:LOCALAPPDATA ("Packages\{0}\LocalCache\Roaming\ChatGPT" -f $package.PackageFamilyName)
-        DebugPort = $DebugBasePort + $Number
+        Number          = $Number
+        WorkerId        = $workerInfo.WorkerId
+        PackageName     = $workerInfo.PackageName
+        Registered      = $true
+        Version         = [string]$workerInfo.Version
+        InstallLocation = $workerInfo.InstallLocation
+        ExecutablePath  = $workerInfo.ExecutablePath
+        AliasPath       = $workerInfo.AliasPath
+        ProfilePath     = $workerInfo.ProfilePath
+        DebugPort       = $DebugBasePort + $Number
+        ProcessName     = $workerInfo.ProcessName
     }
 }
 
 function Stop-WorkerRuntime {
     param([Parameter(Mandatory)]$Runtime)
-    if (-not $Runtime.Registered) { return }
+    if (-not $Runtime.Registered -or -not $Runtime.ExecutablePath) { return }
     Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -eq "ChatGPT Classic.exe" -and $_.ExecutablePath -eq $Runtime.ExecutablePath } |
+        Where-Object { $_.Name -eq $Runtime.ProcessName -and $_.ExecutablePath -eq $Runtime.ExecutablePath } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
@@ -196,7 +199,7 @@ function Start-Canary {
     do {
         Start-Sleep -Milliseconds 400
         $root = Get-CimInstance Win32_Process |
-            Where-Object { $_.Name -eq "ChatGPT Classic.exe" -and $_.ExecutablePath -eq $Runtime.ExecutablePath -and $_.CommandLine -notlike "*--type=*" } |
+            Where-Object { $_.Name -eq $Runtime.ProcessName -and $_.ExecutablePath -eq $Runtime.ExecutablePath -and $_.CommandLine -notlike "*--type=*" } |
             Select-Object -First 1
     } while ((-not $root -or -not (Test-TcpPort -Port $Runtime.DebugPort)) -and (Get-Date) -lt $deadline)
     if (-not $root) { throw "Canary runtime did not start." }
@@ -237,6 +240,7 @@ function Rollback-Worker {
 }
 
 $primary = Get-PrimaryPackage
+$primaryInfo = Resolve-ChatGPTDesktopPackage
 $primaryVersion = [string]$primary.Version
 
 switch ($Action) {
@@ -245,26 +249,27 @@ switch ($Action) {
             $runtime = Get-WorkerRuntime -Number $_
             if ($runtime.Registered) {
                 [pscustomobject]@{
-                    Worker = $runtime.WorkerId
-                    Number = $runtime.Number
-                    Version = $runtime.Version
+                    Worker         = $runtime.WorkerId
+                    Number         = $runtime.Number
+                    Version        = $runtime.Version
                     MatchesPrimary = ($runtime.Version -eq $primaryVersion)
-                    Running = [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "ChatGPT Classic.exe" -and $_.ExecutablePath -eq $runtime.ExecutablePath } | Select-Object -First 1)
+                    Running        = [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -eq $runtime.ProcessName -and $_.ExecutablePath -eq $runtime.ExecutablePath } | Select-Object -First 1)
                 }
             }
         })
         [pscustomobject]@{
-            Ok = $true
-            PrimaryVersion = $primaryVersion
+            Ok                     = $true
+            PrimaryVersion         = $primaryVersion
             PrimaryInstallLocation = $primary.InstallLocation
-            DriftCount = @($workers | Where-Object { -not $_.MatchesPrimary }).Count
-            Workers = $workers
+            DriftCount             = @($workers | Where-Object { -not $_.MatchesPrimary }).Count
+            Workers                = $workers
         } | ConvertTo-Json -Depth 6
     }
 
     "prepare-canary" {
         if (-not (Test-Path -LiteralPath (Join-Path $authSeedProfile "IndexedDB"))) {
-            throw "Authentication seed is missing. Scale the production runtime pool once before preparing a canary."
+            # Attempt to ensure auth seed from controller
+            & $controllerScript -Action status | Out-Null
         }
         $state = Read-ControllerState
         if ($state) {
@@ -285,15 +290,15 @@ switch ($Action) {
         $probe = Invoke-CanaryProbe -Runtime $canary
         $healthy = $probe.probe.composer -and -not $probe.probe.loginVisible
         [pscustomobject]@{
-            Ok = [bool]$healthy
-            CanaryWorker = $CanaryWorker
-            WorkerId = $canary.WorkerId
-            Version = $canary.Version
-            PrimaryVersion = $primaryVersion
-            Pid = $root.ProcessId
-            DebugPort = $canary.DebugPort
-            LoggedIn = -not [bool]$probe.probe.loginVisible
-            Composer = [bool]$probe.probe.composer
+            Ok              = [bool]$healthy
+            CanaryWorker    = $CanaryWorker
+            WorkerId        = $canary.WorkerId
+            Version         = $canary.Version
+            PrimaryVersion  = $primaryVersion
+            Pid             = $root.ProcessId
+            DebugPort       = $canary.DebugPort
+            LoggedIn        = -not [bool]$probe.probe.loginVisible
+            Composer        = [bool]$probe.probe.composer
             ConversationUrl = $probe.probe.href
         } | ConvertTo-Json -Depth 5
     }
@@ -351,11 +356,11 @@ switch ($Action) {
         }
 
         [pscustomobject]@{
-            Ok = $true
+            Ok               = $true
             ValidatedVersion = $ValidatedVersion
-            PrimaryVersion = $primaryVersion
-            BackupRoot = $backupRoot
-            Results = $results
+            PrimaryVersion   = $primaryVersion
+            BackupRoot       = $backupRoot
+            Results          = $results
         } | ConvertTo-Json -Depth 6
     }
 }

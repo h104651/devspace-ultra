@@ -13,6 +13,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "chat-swarm-desktop-resolver.ps1")
+
 function Save-Utf8Xml {
     param(
         [Parameter(Mandatory)] [xml]$Document,
@@ -40,26 +43,19 @@ function Remove-XmlNodes {
     }
 }
 
-$sourcePackage = Get-AppxPackage -Name "OpenAI.ChatGPT-Desktop" |
-    Sort-Object Version -Descending |
-    Select-Object -First 1
-
-if (-not $sourcePackage) {
-    throw "OpenAI ChatGPT Classic package is not installed for the current user."
-}
-
-$sourceRoot = $sourcePackage.InstallLocation
-$sourceVersion = [string]$sourcePackage.Version
+$sourceInfo = Resolve-ChatGPTDesktopPackage -RequireInstalled
+$sourceRoot = $sourceInfo.InstallLocation
+$sourceVersion = [string]$sourceInfo.Version
 $runtimeRoot = Join-Path $env:LOCALAPPDATA ("ChatGPT-Classic-Worker-Runtimes\" + $sourceVersion)
 $results = @()
 
 for ($offset = 0; $offset -lt $Count; $offset++) {
     $number = $FirstWorker + $offset
-    $workerId = "worker-{0:D2}" -f $number
-    $suffix = "Worker{0:D2}" -f $number
-    $packageName = "OpenAI.ChatGPT-Desktop.$suffix"
+    $workerInfo = Resolve-ChatGPTDesktopPackage -WorkerNumber $number
+    $workerId = $workerInfo.WorkerId
+    $packageName = $workerInfo.PackageName
     $displayName = "ChatGPT Worker {0:D2}" -f $number
-    $aliasName = "chatgpt-classic-worker{0:D2}.exe" -f $number
+    $aliasName = $workerInfo.AliasName
     $cloneRoot = Join-Path $runtimeRoot $workerId
     $manifestPath = Join-Path $cloneRoot "AppxManifest.xml"
 
@@ -116,9 +112,37 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
         $defaultTile = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/uap:VisualElements/uap:DefaultTile", $ns)
         if ($defaultTile) { $defaultTile.SetAttribute("ShortName", $displayName) }
 
+        # Check or inject windows.appExecutionAlias
         $executionAlias = $manifest.SelectSingleNode("//uap3:Extension[@Category='windows.appExecutionAlias']//desktop:ExecutionAlias", $ns)
-        if (-not $executionAlias) { throw "Clone manifest is missing the ChatGPT app execution alias." }
-        $executionAlias.SetAttribute("Alias", $aliasName)
+        if ($executionAlias) {
+            $executionAlias.SetAttribute("Alias", $aliasName)
+        } else {
+            # Inject execution alias into Application/Extensions
+            $appNode = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application", $ns)
+            if (-not $appNode) { throw "Clone manifest is missing Application node." }
+            
+            $extensionsNode = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions", $ns)
+            if (-not $extensionsNode) {
+                $extensionsNode = $manifest.CreateElement("Extensions", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+                [void]$appNode.AppendChild($extensionsNode)
+            }
+
+            $uap3Ns = "http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+            $desktopNs = "http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+
+            $extElement = $manifest.CreateElement("uap3", "Extension", $uap3Ns)
+            $extElement.SetAttribute("Category", "windows.appExecutionAlias")
+            $extElement.SetAttribute("Executable", $sourceInfo.ExecutableRelative)
+            $extElement.SetAttribute("EntryPoint", "Windows.FullTrustApplication")
+
+            $appAliasElement = $manifest.CreateElement("uap3", "AppExecutionAlias", $uap3Ns)
+            $desktopAliasElement = $manifest.CreateElement("desktop", "ExecutionAlias", $desktopNs)
+            $desktopAliasElement.SetAttribute("Alias", $aliasName)
+
+            [void]$appAliasElement.AppendChild($desktopAliasElement)
+            [void]$extElement.AppendChild($appAliasElement)
+            [void]$extensionsNode.AppendChild($extElement)
+        }
 
         # Worker clones must not compete with the primary ChatGPT installation
         # for chatgpt:// links, Windows startup, or Copilot-key app extension.
