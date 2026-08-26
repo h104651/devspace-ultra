@@ -30,3 +30,5 @@ jobs:
         run: npm run build
       - name: Unit, integration, protocol and security tests
         run: npm test
+      - name: Cloudflare deploy dry-run
+        run: npx --yes wrangler deploy --dry-run
