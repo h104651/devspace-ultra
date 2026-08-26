@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
+import { AddressInfo } from 'net';
 import { GatewayServer } from '../../src/gateway/server';
 import { LocalAgentClient } from '../../src/local-agent/client';
 
@@ -12,9 +13,12 @@ export async function runGatewayFlowIntegrationTests(): Promise<{ passed: number
     fs.rmSync(testDir, { recursive: true, force: true });
   }
 
-  const port = 50000 + Math.floor(Math.random() * 10000);
+  // Port 0 lets the OS atomically allocate an unused ephemeral port. This
+  // avoids the race inherent in choosing a random high port and then binding
+  // it later, which caused intermittent EADDRINUSE failures in CI.
   const server = new GatewayServer({
-    port,
+    port: 0,
+    host: '127.0.0.1',
     storageDir: testDir,
     masterSecret: 'test-secret'
   });
@@ -23,10 +27,17 @@ export async function runGatewayFlowIntegrationTests(): Promise<{ passed: number
 
   try {
     await server.start();
+    const address = server.httpServer.address() as AddressInfo | null;
+    assert.ok(address && typeof address.port === 'number' && address.port > 0, 'Gateway should expose its OS-assigned port');
+    const port = address.port;
 
     // 1. Register Client and Device
     const { token: clientToken } = server.authManager.registerClient('ChatGPT User', ['admin']);
     const { deviceId, token: deviceToken } = server.authManager.registerDevice('Windows Worker 1', 'windows', ['local:read', 'local:write', 'local:git_status']);
+
+    // Keep the client registration exercised even though this integration path
+    // submits directly through the router below.
+    assert.ok(clientToken);
 
     // 2. Start Outbound Local Agent
     agent = new LocalAgentClient({
