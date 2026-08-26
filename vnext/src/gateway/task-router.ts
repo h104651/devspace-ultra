@@ -58,4 +58,38 @@ export class TaskRouter {
     if (idempKey) await this.idempotencyStore.setDurable(idempKey, currentTask);
     return response;
   }
+
+  public cancelTask(
+    taskId: string,
+    reason: string,
+    callerScopes: string[],
+    actorId: string
+  ): { taskId: string; status: string; cancelled: boolean } {
+    if (!ScopeChecker.hasScope(callerScopes, 'tasks:cancel')) {
+      this.auditLogger.log({
+        actor: actorId,
+        actorType: 'client',
+        action: 'TASK_CANCEL_DENIED',
+        taskId,
+        result: 'DENY',
+        details: { callerScopes }
+      });
+      throw new Error("AUTH_FORBIDDEN: Required scope 'tasks:cancel' not granted");
+    }
+
+    const task = this.taskStore.getTask(taskId);
+    if (!task) throw new Error(`TASK_NOT_FOUND: ${taskId}`);
+
+    const cancelled = this.taskStore.cancelTask(taskId, reason);
+    const current = this.taskStore.getTask(taskId) || task;
+    this.auditLogger.log({
+      actor: actorId,
+      actorType: 'client',
+      action: 'TASK_CANCEL',
+      taskId,
+      result: cancelled ? 'SUCCESS' : 'DENY',
+      details: { reason, status: current.status }
+    });
+    return { taskId, status: current.status, cancelled };
+  }
 }
