@@ -302,13 +302,10 @@ export class DurableChatSwarmCompat {
     return !Number.isFinite(offeredAt) || Date.now() - offeredAt >= WORKER_OFFER_LEASE_MS;
   }
 
-  private claimForWorker(swarm: CompatSwarm, worker: CompatWorker): { task: CompatTask; replay: boolean } | undefined {
+  private reserveAvailableTask(swarm: CompatSwarm, worker: CompatWorker): CompatTask | undefined {
     if (worker.inFlightTaskId) {
-      const current = swarm.tasks[worker.inFlightTaskId];
-      if (current?.status === 'claimed' && current.workerId === worker.id) {
-        worker.lastSeenAt = nowIso();
-        return { task: current, replay: true };
-      }
+      const inFlight = swarm.tasks[worker.inFlightTaskId];
+      if (inFlight?.status === 'claimed' && inFlight.workerId === worker.id) return inFlight;
       worker.inFlightTaskId = undefined;
     }
 
@@ -324,16 +321,37 @@ export class DurableChatSwarmCompat {
     }
     if (!task) return undefined;
 
-    task.status = 'claimed';
-    task.workerId = worker.id;
-    task.claimedAt = nowIso();
-    task.executionStartedAt = undefined;
-    task.offeredWorkerId = undefined;
-    task.offeredAt = undefined;
-    worker.inFlightTaskId = task.taskId;
+    if (!task.targetWorkerId && task.offeredWorkerId !== worker.id) {
+      task.offeredWorkerId = worker.id;
+      task.offeredAt = nowIso();
+      this.touch(swarm);
+    }
+    return task;
+  }
+
+  private claimForWorker(swarm: CompatSwarm, worker: CompatWorker): { task: CompatTask; replay: boolean } | undefined {
+    if (worker.inFlightTaskId) {
+      const current = swarm.tasks[worker.inFlightTaskId];
+      if (current?.status === 'claimed' && current.workerId === worker.id) {
+        worker.lastSeenAt = nowIso();
+        return { task: current, replay: true };
+      }
+      worker.inFlightTaskId = undefined;
+    }
+
+    const reserved = this.reserveAvailableTask(swarm, worker);
+    if (!reserved || reserved.status !== 'queued') return undefined;
+
+    reserved.status = 'claimed';
+    reserved.workerId = worker.id;
+    reserved.claimedAt = nowIso();
+    reserved.executionStartedAt = undefined;
+    reserved.offeredWorkerId = undefined;
+    reserved.offeredAt = undefined;
+    worker.inFlightTaskId = reserved.taskId;
     worker.lastSeenAt = nowIso();
     this.touch(swarm);
-    return { task, replay: false };
+    return { task: reserved, replay: false };
   }
 
   async create(input: { name?: string; workerSlots?: number }): Promise<any> {
@@ -415,6 +433,34 @@ export class DurableChatSwarmCompat {
       worker.lastSeenAt = worker.dockLastSeenAt;
       this.touch(swarm);
       return { ok: true, swarmId: swarm.id, workerId: worker.id, dockOnline: worker.dockOnline };
+    });
+  }
+
+  async workerEvent(workerToken: string): Promise<any> {
+    return this.mutate(async state => {
+      const { swarm, worker } = await this.findWorker(state, workerToken);
+      worker.dockOnline = true;
+      worker.dockLastSeenAt = nowIso();
+      worker.lastSeenAt = worker.dockLastSeenAt;
+      if (swarm.state !== 'active') return { type: 'closed', swarmId: swarm.id, workerId: worker.id };
+
+      if (worker.inFlightTaskId) {
+        const inFlight = swarm.tasks[worker.inFlightTaskId];
+        if (inFlight?.status === 'claimed' && inFlight.workerId === worker.id) {
+          return { type: 'busy', swarmId: swarm.id, workerId: worker.id, taskId: inFlight.taskId };
+        }
+        worker.inFlightTaskId = undefined;
+      }
+
+      const task = this.reserveAvailableTask(swarm, worker);
+      if (!task) return { type: 'parked', swarmId: swarm.id, workerId: worker.id };
+      return {
+        type: 'task_available',
+        swarmId: swarm.id,
+        workerId: worker.id,
+        taskId: task.taskId,
+        targeted: Boolean(task.targetWorkerId)
+      };
     });
   }
 
@@ -869,6 +915,7 @@ export class DurableChatSwarmCompat {
   async browserEvent(browserWakeToken: string): Promise<any> {
     return this.mutate(async state => {
       const { swarm, worker } = await this.findBrowserWorker(state, browserWakeToken);
+      worker.browserOnline = true;
       worker.browserLastSeenAt = nowIso();
       if (swarm.state !== 'active') return { type: 'closed', swarmId: swarm.id, workerId: worker.id };
       if (worker.inFlightTaskId) {
@@ -877,23 +924,8 @@ export class DurableChatSwarmCompat {
         worker.inFlightTaskId = undefined;
       }
 
-      const queued = Object.values(swarm.tasks)
-        .filter(task => task.status === 'queued')
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-      let task = queued.find(item => item.targetWorkerId === worker.id);
-      if (!task) {
-        task = queued.find(item => {
-          if (item.targetWorkerId) return false;
-          return !item.offeredWorkerId || item.offeredWorkerId === worker.id || this.offerExpired(item);
-        });
-      }
+      const task = this.reserveAvailableTask(swarm, worker);
       if (!task) return { type: 'parked', swarmId: swarm.id, workerId: worker.id };
-
-      if (!task.targetWorkerId && task.offeredWorkerId !== worker.id) {
-        task.offeredWorkerId = worker.id;
-        task.offeredAt = nowIso();
-        this.touch(swarm);
-      }
       return {
         type: 'task_available',
         swarmId: swarm.id,
