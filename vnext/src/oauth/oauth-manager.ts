@@ -149,8 +149,11 @@ export class OAuthManager {
   private sanitizeScopes(scope?: string): string[] {
     if (!scope) return [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
     const requested = scope.split(/[\s,]+/).filter(Boolean);
-    const granted = requested.filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
-    return granted.length > 0 ? granted : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
+    const granted = [...new Set(requested.filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s)))];
+    if (granted.length === 0) {
+      throw new Error('INVALID_SCOPE: no requested OAuth scopes are supported');
+    }
+    return granted;
   }
 
   public async createAuthorizationCode(params: {
@@ -245,8 +248,6 @@ export class OAuthManager {
     const granted = (val.payload.scopes || []).filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
     const finalScopes = granted.length > 0 ? granted : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
 
-    // Refresh-token rotation: revoke the token that was just redeemed before
-    // returning its replacement.
     this.authManager.revokeToken(val.payload.tokenId);
     await this.storage.revokeToken(val.payload.tokenId);
 
