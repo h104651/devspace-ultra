@@ -37,6 +37,16 @@ export interface Env {
 }
 
 const DEFAULT_PUBLIC_BASE_URL = 'https://devspace-ultra-gateway.abdul-hsu.workers.dev';
+const KAGGLE_POLLS_STORAGE_KEY = 'devspace:kaggle-polls:v1';
+const DEFAULT_KAGGLE_POLL_MS = 15000;
+
+interface PendingKagglePoll {
+  taskId: string;
+  kernelSlug: string;
+  dueAt: number;
+}
+
+type PendingKagglePolls = Record<string, PendingKagglePoll>;
 
 export class GatewayDurableObject {
   private storage: CloudflareSqliteStorageAdapter;
@@ -92,7 +102,14 @@ export class GatewayDurableObject {
     };
     this.artifactStore = new ArtifactStore(undefined, 50 * 1024 * 1024, this.storage, persistArtifactPayload);
 
-    this.kaggleBackend = new KaggleBackend(this.taskStore, this.artifactStore, this.kaggleHttpClient as any);
+    this.kaggleBackend = new KaggleBackend(
+      this.taskStore,
+      this.artifactStore,
+      this.kaggleHttpClient as any,
+      undefined,
+      DEFAULT_KAGGLE_POLL_MS,
+      { schedule: (taskId, kernelSlug, delayMs) => this.scheduleKagglePoll(taskId, kernelSlug, delayMs) }
+    );
     this.swarmOrchestrator = new SwarmOrchestrator(this.taskStore);
     this.taskRouter = new TaskRouter(this.taskStore, this.idempotencyStore, this.kaggleBackend, this.swarmOrchestrator, this.killSwitch, this.auditLogger);
 
@@ -132,6 +149,76 @@ export class GatewayDurableObject {
     } catch (err) {
       console.error('Failed to hydrate artifact metadata:', err);
     }
+    try {
+      await this.rearmKaggleAlarm();
+    } catch (err) {
+      console.error('Failed to rearm durable Kaggle poll alarm:', err);
+    }
+  }
+
+  private async readPendingKagglePolls(): Promise<PendingKagglePolls> {
+    if (typeof this.ctx.storage?.get !== 'function') return {};
+    const stored = await this.ctx.storage.get(KAGGLE_POLLS_STORAGE_KEY);
+    if (!stored) return {};
+    if (typeof stored === 'string') {
+      try { return JSON.parse(stored) as PendingKagglePolls; } catch { return {}; }
+    }
+    return stored as PendingKagglePolls;
+  }
+
+  private async writePendingKagglePolls(polls: PendingKagglePolls): Promise<void> {
+    if (typeof this.ctx.storage?.put !== 'function') return;
+    await this.ctx.storage.put(KAGGLE_POLLS_STORAGE_KEY, polls);
+  }
+
+  private async scheduleKagglePoll(taskId: string, kernelSlug: string, delayMs = DEFAULT_KAGGLE_POLL_MS): Promise<void> {
+    // Durable Object alarms survive instance eviction. In local unit shims where
+    // alarm APIs do not exist, KaggleBackend's own local timer remains the fallback.
+    if (typeof this.ctx.storage?.put !== 'function' || typeof this.ctx.storage?.setAlarm !== 'function') return;
+    const polls = await this.readPendingKagglePolls();
+    polls[taskId] = {
+      taskId,
+      kernelSlug,
+      dueAt: Date.now() + Math.max(1000, delayMs)
+    };
+    await this.writePendingKagglePolls(polls);
+    await this.rearmKaggleAlarm(polls);
+  }
+
+  private async rearmKaggleAlarm(polls?: PendingKagglePolls): Promise<void> {
+    if (typeof this.ctx.storage?.setAlarm !== 'function') return;
+    const current = polls || await this.readPendingKagglePolls();
+    const entries = Object.values(current);
+    if (entries.length === 0) {
+      if (typeof this.ctx.storage?.deleteAlarm === 'function') await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    const earliest = Math.min(...entries.map(item => item.dueAt));
+    await this.ctx.storage.setAlarm(Math.max(Date.now() + 1000, earliest));
+  }
+
+  async alarm(): Promise<void> {
+    await this.ready;
+    const polls = await this.readPendingKagglePolls();
+    const now = Date.now();
+    const due = Object.values(polls).filter(item => item.dueAt <= now + 250);
+
+    for (const item of due) {
+      try {
+        const stillRunning = await this.kaggleBackend.pollKaggleTask(item.taskId, item.kernelSlug, false);
+        if (stillRunning) {
+          polls[item.taskId] = { ...item, dueAt: Date.now() + DEFAULT_KAGGLE_POLL_MS };
+        } else {
+          delete polls[item.taskId];
+        }
+      } catch (err: any) {
+        console.error(`Durable Kaggle poll failed for ${item.taskId}:`, err?.message || String(err));
+        polls[item.taskId] = { ...item, dueAt: Date.now() + DEFAULT_KAGGLE_POLL_MS };
+      }
+    }
+
+    await this.writePendingKagglePolls(polls);
+    await this.rearmKaggleAlarm(polls);
   }
 
   private corsHeaders(): Record<string, string> {
