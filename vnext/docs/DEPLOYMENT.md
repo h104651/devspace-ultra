@@ -1,58 +1,161 @@
-# DevSpace Ultra — Zero-Cost Cloud Deployment Guide
+# DevSpace Ultra vNext — Cloudflare Production Deployment
 
-## 1. Overview
+## Production architecture
 
-DevSpace Ultra Gateway can be deployed for **$0 / month** on modern free-tier container and Node.js hosting platforms (Fly.io, Render, Railway, Hugging Face Spaces, or a free VPS).
+The supported production topology is:
 
-The Windows Desktop Local Agent and Kaggle GPU Backend connect to this public Gateway over outbound HTTPS / WebSockets.
-
----
-
-## 2. Option A: Fly.io Deployment (Recommended)
-
-### Dockerfile
-```dockerfile
-FROM node:20-slim
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --production
-COPY dist/ ./dist/
-COPY .env.example ./.env
-EXPOSE 4000
-CMD ["node", "dist/cli/gateway-cli.js"]
+```text
+ChatGPT
+  -> HTTPS/OAuth/MCP
+Cloudflare Worker (workers.dev)
+  -> GatewayDurableObject
+     -> Durable Object SQLite for task/auth/audit metadata
+     -> R2 for large artifacts
+     -> Kaggle HTTP API via fetch()
+     -> outbound-only WebSocket Local Agent on Windows
+     -> durable Chat Swarm / Browser Wake Bridge state
 ```
 
-### Deploying
-```bash
-fly launch --name devspace-ultra-gateway --port 4000
-fly secrets set MASTER_SECRET=$(openssl rand -hex 32)
-fly secrets set KAGGLE_USERNAME=your_user KAGGLE_KEY=your_key
-fly deploy
+Do **not** deploy the vNext gateway through Tailscale Funnel, Cloudflare Quick Tunnel, Fly.io, Render, Railway, or an inbound Windows port. The old Quick Tunnel is legacy fallback only and must remain available until the new ChatGPT connector passes real end-to-end validation.
+
+Free-tier usage can keep fixed infrastructure cost at or near zero for light workloads, but this is not a permanent cost guarantee; Cloudflare/Kaggle quotas and pricing can change.
+
+## Required Cloudflare resources
+
+`wrangler.toml` expects:
+
+- Worker name: `devspace-ultra-gateway`
+- Durable Object binding: `GATEWAY_DO`
+- Durable Object SQLite class: `GatewayDurableObject`
+- R2 binding: `ARTIFACTS_R2`
+- R2 bucket: `devspace-ultra-artifacts`
+- `nodejs_compat`
+
+Create the R2 bucket once if it does not already exist:
+
+```powershell
+npx wrangler r2 bucket create devspace-ultra-artifacts
 ```
 
----
+Do not recreate or delete an existing production bucket during routine deployment.
 
-## 3. Option B: Render / Railway (Free Tier)
+## Required production secrets
 
-1. Create a **Web Service** pointing to your GitHub repository.
-2. Build Command: `npm install && npm run build`
-3. Start Command: `npm run gateway`
-4. Set Environment Variables:
-   * `PORT`: `4000`
-   * `MASTER_SECRET`: `<generated-secret>`
-   * `STORAGE_DIR`: `/tmp/devspace-storage` (or persistent volume)
-   * `KAGGLE_USERNAME`: `<username>`
-   * `KAGGLE_KEY`: `<api_key>`
+Set secrets with Wrangler; never commit them to GitHub, `wrangler.toml`, logs, screenshots, or chat messages.
 
----
-
-## 4. Option C: Local LAN / Self-Hosted VPS
-
-If you host the gateway on a VPS or local home server:
-```bash
-npm run gateway
+```powershell
+npx wrangler secret put MASTER_SECRET
+npx wrangler secret put KAGGLE_API_TOKEN
 ```
-Then configure your Local Agent's `GATEWAY_URL` to point to the server's domain or IP:
-```env
-GATEWAY_URL=wss://gateway.yourdomain.com/ws/agent
+
+`MASTER_SECRET` must be at least 32 characters and should be high entropy.
+
+`KAGGLE_API_TOKEN` should contain the Kaggle credential JSON expected by the gateway. `KAGGLE_USERNAME` + `KAGGLE_KEY` are supported as an alternative, but production should use Cloudflare Secrets rather than checked-in configuration.
+
+The Worker has a safe default public base URL for the current deployment. If a different production hostname is used, configure `PUBLIC_BASE_URL` to the exact HTTPS origin and verify all OAuth metadata/resources use the same origin.
+
+## Build, test, dry-run, deploy
+
+Run from the `vnext` directory:
+
+```powershell
+npm install
+npm run build
+npm test
+npx wrangler deploy --dry-run
+npx wrangler deploy
 ```
+
+Deployment must not proceed if TypeScript or tests fail.
+
+The repository CI on `feature/vnext-remote-gateway` must also be green before deployment.
+
+## Production endpoint checks
+
+Expected public endpoint:
+
+```text
+https://devspace-ultra-gateway.abdul-hsu.workers.dev
+```
+
+Check the minimal public health endpoint:
+
+```powershell
+Invoke-RestMethod https://devspace-ultra-gateway.abdul-hsu.workers.dev/health
+```
+
+Expected response:
+
+```json
+{"ok":true}
+```
+
+OAuth discovery must return HTTP 200:
+
+```text
+/.well-known/oauth-authorization-server
+/.well-known/oauth-protected-resource
+/.well-known/oauth-protected-resource/mcp
+```
+
+The MCP resource itself must reject an unauthenticated request with HTTP 401 and a `WWW-Authenticate` header pointing at the protected-resource metadata. Do not weaken `/mcp` to anonymous access for smoke testing.
+
+## ChatGPT OAuth connector
+
+Create the new connector in parallel with the legacy connector.
+
+```text
+Name: DevSpace Ultra vNext
+Server URL: https://devspace-ultra-gateway.abdul-hsu.workers.dev/mcp
+Authentication: OAuth
+Advanced OAuth settings: leave default
+```
+
+The gateway supports OAuth discovery, public PKCE S256 clients, Dynamic Client Registration for ChatGPT compatibility, refresh-token rotation, resource binding, and least-privilege scopes.
+
+The normal ChatGPT OAuth grant must not contain `admin:*`.
+
+After authorization, ChatGPT must successfully discover the tool catalog and call at least:
+
+- `kaggle_run`, `kaggle_status`, `kaggle_logs`, `kaggle_result`
+- `remote_task_submit`, `remote_task_status`
+- core `chat_swarm_*` tools
+
+## Windows Local Agent
+
+The Windows agent initiates the connection. Do not expose an inbound Windows port.
+
+Target WebSocket URL:
+
+```text
+wss://devspace-ultra-gateway.abdul-hsu.workers.dev/ws/agent
+```
+
+Use a device credential scoped only to the Local Agent. Device secrets remain on the Windows host and must not be copied into ChatGPT OAuth configuration.
+
+## Browser Chat Swarm
+
+The Cloudflare-native compatibility endpoints are:
+
+```text
+/chat-swarm/browser-bind
+/chat-swarm/browser-bind-invite
+/chat-swarm/browser-direct-join
+/chat-swarm/browser-claim
+/chat-swarm/browser-events
+/chat-swarm/worker-events
+```
+
+Browser wake tokens and worker tokens are separate private credentials. Browser/Worker event streams use those credentials and do not require a public inbound Windows listener.
+
+## Cutover rule
+
+Do not remove the legacy `DevSpace Ultra` connector and do not stop the old Quick Tunnel until all of the following have passed from an actual ChatGPT conversation:
+
+1. OAuth authorization and tool refresh.
+2. `kaggle_*` private CPU smoke task through the new connector.
+3. `remote_task_*` local safe task through the outbound Windows Agent.
+4. Browser/Worker Chat Swarm smoke flow.
+5. Required legacy workflows have either been migrated or explicitly retained on the old connector.
+
+Only after those checks pass may the old connector/tunnel be retired.
