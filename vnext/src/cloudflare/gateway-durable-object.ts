@@ -40,7 +40,8 @@ export interface Env {
 const DEFAULT_PUBLIC_BASE_URL = 'https://devspace-ultra-gateway.abdul-hsu.workers.dev';
 const KAGGLE_POLLS_STORAGE_KEY = 'devspace:kaggle-polls:v1';
 const DEFAULT_KAGGLE_POLL_MS = 15000;
-const BROWSER_EVENT_POLL_MS = 1500;
+const SWARM_EVENT_POLL_MS = 1500;
+const SWARM_CHECKPOINT_WAIT_MS = 25000;
 
 interface PendingKagglePoll {
   taskId: string;
@@ -234,7 +235,7 @@ export class GatewayDurableObject {
     return {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Authorization, Content-Type, Accept, WWW-Authenticate, MCP-Protocol-Version, Mcp-Method, Mcp-Name, X-Chat-Swarm-Browser-Token',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type, Accept, WWW-Authenticate, MCP-Protocol-Version, Mcp-Method, Mcp-Name, X-Chat-Swarm-Browser-Token, X-Chat-Swarm-Worker-Token',
       'Access-Control-Expose-Headers': 'MCP-Protocol-Version, WWW-Authenticate',
       'Access-Control-Max-Age': '86400'
     };
@@ -253,6 +254,72 @@ export class GatewayDurableObject {
       { ok: false, error: error instanceof Error ? error.message : String(error) },
       { status, headers: { ...this.corsHeaders(), 'Cache-Control': 'no-store' } }
     );
+  }
+
+  private eventStream(
+    eventSource: () => Promise<any>,
+    onCancel?: () => Promise<any> | void
+  ): Response {
+    const encoder = new TextEncoder();
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let closed = false;
+    let running = false;
+    let lastSerialized = '';
+    let lastSentAt = 0;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const stop = () => {
+          if (closed) return;
+          closed = true;
+          if (timer) clearInterval(timer);
+          try { controller.close(); } catch {}
+        };
+
+        const emit = async () => {
+          if (closed || running) return;
+          running = true;
+          try {
+            const event = await eventSource();
+            const serialized = JSON.stringify(event);
+            const now = Date.now();
+            if (serialized !== lastSerialized || now - lastSentAt >= 15000) {
+              controller.enqueue(encoder.encode(`data: ${serialized}\n\n`));
+              lastSerialized = serialized;
+              lastSentAt = now;
+            } else {
+              controller.enqueue(encoder.encode(': keepalive\n\n'));
+            }
+            if (event.type === 'closed') stop();
+          } catch {
+            try {
+              controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: 'bridge_state_unavailable' })}\n\n`));
+            } catch {}
+            stop();
+          } finally {
+            running = false;
+          }
+        };
+
+        void emit();
+        timer = setInterval(() => void emit(), SWARM_EVENT_POLL_MS);
+      },
+      cancel() {
+        closed = true;
+        if (timer) clearInterval(timer);
+        if (onCancel) void onCancel();
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        ...this.corsHeaders(),
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-store, no-cache',
+        'X-Accel-Buffering': 'no'
+      }
+    });
   }
 
   private async handleBrowserBridge(request: Request, url: URL): Promise<Response | undefined> {
@@ -309,75 +376,29 @@ export class GatewayDurableObject {
     if (url.pathname === '/chat-swarm/browser-events' && request.method === 'GET') {
       const token = request.headers.get('X-Chat-Swarm-Browser-Token') || '';
       if (!token) return this.browserBridgeError(new Error('Browser wake token is required.'));
-
       try {
-        // Validate before committing to a streaming response so bad tokens get a
-        // normal 401 instead of an HTTP 200 stream that immediately fails.
         await this.chatSwarmCompat.browserEvent(token);
       } catch (err) {
         return this.browserBridgeError(err);
       }
+      return this.eventStream(
+        () => this.chatSwarmCompat.browserEvent(token),
+        () => this.chatSwarmCompat.setBrowserOnline(token, false).catch(() => undefined)
+      );
+    }
 
-      const encoder = new TextEncoder();
-      const compat = this.chatSwarmCompat;
-      let timer: ReturnType<typeof setInterval> | undefined;
-      let closed = false;
-      let running = false;
-      let lastSerialized = '';
-      let lastSentAt = 0;
-
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          const stop = () => {
-            if (closed) return;
-            closed = true;
-            if (timer) clearInterval(timer);
-            try { controller.close(); } catch {}
-          };
-
-          const emit = async () => {
-            if (closed || running) return;
-            running = true;
-            try {
-              const event = await compat.browserEvent(token);
-              const serialized = JSON.stringify(event);
-              const now = Date.now();
-              if (serialized !== lastSerialized || now - lastSentAt >= 15000) {
-                controller.enqueue(encoder.encode(`data: ${serialized}\n\n`));
-                lastSerialized = serialized;
-                lastSentAt = now;
-              } else {
-                controller.enqueue(encoder.encode(': keepalive\n\n'));
-              }
-              if (event.type === 'closed') stop();
-            } catch (err) {
-              try {
-                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: 'bridge_state_unavailable' })}\n\n`));
-              } catch {}
-              stop();
-            } finally {
-              running = false;
-            }
-          };
-
-          void emit();
-          timer = setInterval(() => void emit(), BROWSER_EVENT_POLL_MS);
-        },
-        cancel() {
-          closed = true;
-          if (timer) clearInterval(timer);
-        }
-      });
-
-      return new Response(stream, {
-        status: 200,
-        headers: {
-          ...this.corsHeaders(),
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-store, no-cache',
-          'X-Accel-Buffering': 'no'
-        }
-      });
+    if (url.pathname === '/chat-swarm/worker-events' && request.method === 'GET') {
+      const token = request.headers.get('X-Chat-Swarm-Worker-Token') || '';
+      if (!token) return this.browserBridgeError(new Error('Worker token is required.'));
+      try {
+        await this.chatSwarmCompat.workerEvent(token);
+      } catch (err) {
+        return this.browserBridgeError(err);
+      }
+      return this.eventStream(
+        () => this.chatSwarmCompat.workerEvent(token),
+        () => this.chatSwarmCompat.setDockOnline(token, false).catch(() => undefined)
+      );
     }
 
     return undefined;
@@ -558,7 +579,6 @@ export class GatewayDurableObject {
         if (!(request.headers.get('Accept') || '').includes('text/event-stream')) {
           return new Response(null, { status: 405, headers: { ...this.corsHeaders(), 'Allow': 'POST' } });
         }
-        // Legacy compatibility only. MCP 2026-07-28 itself is POST-only/stateless.
         return new Response(`event: endpoint\r\ndata: ${this.baseUrl}/mcp\r\n\r\n`, {
           status: 200,
           headers: { ...this.corsHeaders(), 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
@@ -782,23 +802,23 @@ export class GatewayDurableObject {
 
       { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: tools.CHAT_SWARM_CREATE_SCHEMA },
       { name: 'chat_swarm_join', description: 'Join an existing Chat Swarm worker slot using its invite code', inputSchema: tools.CHAT_SWARM_JOIN_SCHEMA },
-      { name: 'chat_swarm_dock', description: 'Enable browser wake binding for an existing worker token', inputSchema: tools.CHAT_SWARM_DOCK_SCHEMA },
+      { name: 'chat_swarm_dock', description: 'Mount the persistent Worker Dock stream for an existing worker token', inputSchema: tools.CHAT_SWARM_DOCK_SCHEMA },
       { name: 'chat_swarm_join_browser', description: 'Join a Chat Swarm and prepare the browser wake bridge binding marker', inputSchema: tools.CHAT_SWARM_JOIN_BROWSER_SCHEMA },
       { name: 'chat_swarm_status', description: 'Return durable Chat Swarm roster, capacity and task counts', inputSchema: tools.CHAT_SWARM_STATUS_SCHEMA },
       { name: 'chat_swarm_resize', description: 'Resize an active Chat Swarm without interrupting protected workers', inputSchema: tools.CHAT_SWARM_RESIZE_SCHEMA },
       { name: 'chat_swarm_dispatch', description: 'Atomically dispatch a batch of idempotent Chat Swarm tasks', inputSchema: tools.CHAT_SWARM_DISPATCH_SCHEMA },
       { name: 'chat_swarm_claim', description: 'Claim one immediately available task for an existing worker token', inputSchema: tools.CHAT_SWARM_CLAIM_SCHEMA },
       { name: 'chat_swarm_ack', description: 'Acknowledge that a claimed worker task actually resumed execution', inputSchema: tools.CHAT_SWARM_ACK_SCHEMA },
-      { name: 'chat_swarm_next', description: 'Wait briefly for and claim the next task for a worker token', inputSchema: tools.CHAT_SWARM_NEXT_SCHEMA },
-      { name: 'chat_swarm_recover', description: 'Recover an interrupted worker wait and try to claim work again', inputSchema: tools.CHAT_SWARM_RECOVER_SCHEMA },
-      { name: 'chat_swarm_submit_once', description: 'Submit one browser-woken worker result without re-parking in the same call', inputSchema: tools.CHAT_SWARM_SUBMIT_ONCE_SCHEMA },
-      { name: 'chat_swarm_submit', description: 'Submit a worker result to durable Chat Swarm state', inputSchema: tools.CHAT_SWARM_SUBMIT_SCHEMA },
+      { name: 'chat_swarm_next', description: 'Park for one bounded worker checkpoint and claim work when it arrives', inputSchema: tools.CHAT_SWARM_NEXT_SCHEMA },
+      { name: 'chat_swarm_recover', description: 'Recover an interrupted worker wait with one bounded checkpoint', inputSchema: tools.CHAT_SWARM_RECOVER_SCHEMA },
+      { name: 'chat_swarm_submit_once', description: 'Submit one browser/dock-woken worker result without re-parking', inputSchema: tools.CHAT_SWARM_SUBMIT_ONCE_SCHEMA },
+      { name: 'chat_swarm_submit', description: 'Submit a worker result and immediately re-park for the next bounded checkpoint', inputSchema: tools.CHAT_SWARM_SUBMIT_SCHEMA },
       { name: 'chat_swarm_collect', description: 'Collect selected Chat Swarm task results with optional bounded waiting', inputSchema: tools.CHAT_SWARM_COLLECT_SCHEMA },
       { name: 'chat_swarm_cancel', description: 'Cancel queued or claimed Chat Swarm tasks', inputSchema: tools.CHAT_SWARM_CANCEL_SCHEMA },
       { name: 'chat_swarm_recycle_worker', description: 'Recycle a dead worker and safely requeue unacknowledged work', inputSchema: tools.CHAT_SWARM_RECYCLE_WORKER_SCHEMA },
       { name: 'chat_swarm_leave', description: 'Leave a Chat Swarm worker slot and requeue safe in-flight work', inputSchema: tools.CHAT_SWARM_LEAVE_SCHEMA },
       { name: 'chat_swarm_close', description: 'Close a Chat Swarm and optionally cancel pending work', inputSchema: tools.CHAT_SWARM_CLOSE_SCHEMA },
-      { name: 'chat_swarm_wake_bridge', description: 'Report the Cloudflare Browser Wake Bridge endpoint status', inputSchema: tools.CHAT_SWARM_WAKE_BRIDGE_SCHEMA },
+      { name: 'chat_swarm_wake_bridge', description: 'Report Cloudflare Browser Wake Bridge and Worker Dock stream endpoint status', inputSchema: tools.CHAT_SWARM_WAKE_BRIDGE_SCHEMA },
       { name: 'chat_swarm_runtime_status', description: 'Query connected outbound Windows agent/runtime status', inputSchema: tools.CHAT_SWARM_RUNTIME_STATUS_SCHEMA },
 
       { name: 'swarm_dispatch', description: 'Dispatch simplified vNext swarm task', inputSchema: tools.SWARM_DISPATCH_SCHEMA },
@@ -824,15 +844,17 @@ export class GatewayDurableObject {
       case 'chat_swarm_join':
         return { handled: true, result: await this.chatSwarmCompat.join(args || {}) };
       case 'chat_swarm_dock': {
-        const binding = await this.chatSwarmCompat.enableBrowserWake(args.workerToken);
+        const status = await this.chatSwarmCompat.status(args.workerToken);
+        await this.chatSwarmCompat.setDockOnline(args.workerToken, true);
         return {
           handled: true,
           result: {
-            ...binding,
-            browserBindCode: binding.bindCode,
-            browserBindExpiresAt: binding.expiresAt,
-            marker: `[[CHAT_SWARM_BIND:${binding.bindCode}]]`,
-            browserEventsUrl: `${this.baseUrl}/chat-swarm/browser-events`
+            ok: true,
+            swarmId: status.swarmId,
+            workerId: status.workerId,
+            workerToken: args.workerToken,
+            dockStreamUrl: `${this.baseUrl}/chat-swarm/worker-events`,
+            workerDock: true
           }
         };
       }
@@ -861,12 +883,19 @@ export class GatewayDurableObject {
       case 'chat_swarm_ack':
         return { handled: true, result: await this.chatSwarmCompat.acknowledge(args) };
       case 'chat_swarm_next':
-        return { handled: true, result: await this.chatSwarmCompat.next(args) };
+        return {
+          handled: true,
+          result: await this.chatSwarmCompat.next({ workerToken: args.workerToken, waitMs: args.waitMs ?? SWARM_CHECKPOINT_WAIT_MS })
+        };
       case 'chat_swarm_recover':
-        return { handled: true, result: await this.chatSwarmCompat.next({ workerToken: args.workerToken, waitMs: args.waitMs ?? 30000 }) };
+        return {
+          handled: true,
+          result: await this.chatSwarmCompat.next({ workerToken: args.workerToken, waitMs: Math.min(args.waitMs ?? SWARM_CHECKPOINT_WAIT_MS, SWARM_CHECKPOINT_WAIT_MS) })
+        };
       case 'chat_swarm_submit_once':
+        return { handled: true, result: await this.chatSwarmCompat.submit({ ...args, waitForNextMs: 0 }) };
       case 'chat_swarm_submit':
-        return { handled: true, result: await this.chatSwarmCompat.submit(args) };
+        return { handled: true, result: await this.chatSwarmCompat.submit({ ...args, waitForNextMs: SWARM_CHECKPOINT_WAIT_MS }) };
       case 'chat_swarm_collect':
         return { handled: true, result: await this.chatSwarmCompat.collect(args) };
       case 'chat_swarm_cancel':
@@ -887,7 +916,8 @@ export class GatewayDurableObject {
             bindUrl: `${this.baseUrl}/chat-swarm/browser-bind`,
             directJoinUrl: `${this.baseUrl}/chat-swarm/browser-direct-join`,
             claimUrl: `${this.baseUrl}/chat-swarm/browser-claim`,
-            eventsUrl: `${this.baseUrl}/chat-swarm/browser-events`
+            eventsUrl: `${this.baseUrl}/chat-swarm/browser-events`,
+            workerEventsUrl: `${this.baseUrl}/chat-swarm/worker-events`
           }
         };
       case 'chat_swarm_runtime_status':
