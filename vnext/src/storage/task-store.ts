@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { CreateTaskOptions, DurableTask, TaskStatus } from '../types/task';
+import { CreateTaskOptions, DurableTask, TaskStatus, TaskArtifactSummary } from '../types/task';
 import { ScopeChecker } from '../security/scope-checker';
 import { IStorageAdapter } from './storage-adapter.interface';
 
@@ -215,11 +215,11 @@ export class TaskStore {
     this.saveTask(task);
   }
 
-  public addArtifact(taskId: string, artifactId: string): void {
+  public addArtifact(taskId: string, artifact: TaskArtifactSummary): void {
     const task = this.tasks.get(taskId);
     if (!task) return;
-    if (!task.artifacts.includes(artifactId)) {
-      task.artifacts.push(artifactId);
+    if (!task.artifacts.some(existing => existing.id === artifact.id)) {
+      task.artifacts.push(artifact);
       this.saveTask(task);
     }
   }
