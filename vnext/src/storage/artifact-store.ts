@@ -144,8 +144,9 @@ export class ArtifactStore {
     return metadata;
   }
 
-  public getArtifactMetadata(artifactId: string): ArtifactMetadata | undefined {
-    return this.artifacts.get(artifactId);
+  public getArtifactMetadata(artifact: string | { id: string }): ArtifactMetadata | undefined {
+    const artifactId = typeof artifact === 'string' ? artifact : artifact?.id;
+    return artifactId ? this.artifacts.get(artifactId) : undefined;
   }
 
   public getTaskArtifacts(taskId: string): ArtifactMetadata[] {
@@ -166,5 +167,12 @@ export class ArtifactStore {
       return undefined;
     }
     return fs.readFileSync(meta.storedPath);
+  }
+
+  // Compatibility alias retained for the legacy/local Express gateway. The
+  // Cloudflare path reads payloads from R2 directly, while local file-backed
+  // runtimes historically called getArtifactContent().
+  public getArtifactContent(artifactId: string): Buffer | undefined {
+    return this.readArtifactContent(artifactId);
   }
 }
