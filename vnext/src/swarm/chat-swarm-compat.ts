@@ -3,32 +3,47 @@ export type CompatTaskStatus = 'queued' | 'claimed' | 'completed' | 'failed' | '
 export interface CompatTask {
   taskId: string;
   taskKey?: string;
-  title: string;
   prompt: string;
   status: CompatTaskStatus;
   targetWorkerId?: string;
   workerId?: string;
   result?: string;
   error?: string;
+  cancelReason?: string;
   createdAt: string;
   claimedAt?: string;
   executionStartedAt?: string;
   completedAt?: string;
+  offeredWorkerId?: string;
+  offeredAt?: string;
 }
 
 export interface CompatWorker {
   id: string;
+  slot: number;
   label: string;
   active: boolean;
   tokenHash: string;
   joinedAt: string;
   lastSeenAt: string;
   inFlightTaskId?: string;
+  desktopWakeMarker?: string;
+  joinInviteCode?: string;
+  browserPageFingerprint?: string;
   browserBindHash?: string;
   browserBindExpiresAt?: string;
   browserWakeTokenHash?: string;
   browserOnline?: boolean;
   browserLastSeenAt?: string;
+  dockOnline?: boolean;
+  dockLastSeenAt?: string;
+  progressHeartbeat?: boolean;
+  progressHeartbeatLastSeenAt?: string;
+  checkpointCount?: number;
+  lastCheckpointAt?: string;
+  recycledAt?: string;
+  recycleReason?: string;
+  leftAt?: string;
 }
 
 export interface CompatSwarm {
@@ -41,8 +56,10 @@ export interface CompatSwarm {
   revision: number;
   createdAt: string;
   updatedAt: string;
+  closedAt?: string;
   workers: Record<string, CompatWorker>;
   tasks: Record<string, CompatTask>;
+  taskKeys: Record<string, string>;
 }
 
 interface CompatState {
@@ -59,7 +76,9 @@ const STATE_KEY = 'devspace:chat-swarm-compat:v1';
 const MAX_WORKERS = 32;
 const MAX_BATCH_TASKS = 64;
 const MAX_RESULT_CHARS = 200_000;
+const MAX_PROMPT_CHARS = 100_000;
 const BROWSER_BIND_TTL_MS = 10 * 60_000;
+const WORKER_OFFER_LEASE_MS = 60_000;
 const MAX_WAIT_MS = 25_000;
 
 function nowIso(): string {
@@ -128,6 +147,12 @@ export class DurableChatSwarmCompat {
   private mutate<T>(operation: (state: CompatState) => Promise<T>): Promise<T> {
     const run = this.mutationQueue.then(async () => {
       const state = await this.load();
+      for (const swarm of Object.values(state.swarms)) {
+        swarm.taskKeys ||= {};
+        for (const worker of Object.values(swarm.workers || {})) {
+          worker.slot ||= Number(worker.id?.match(/worker-(\d{2})/)?.[1] || 0);
+        }
+      }
       const result = await operation(state);
       await this.save(state);
       return result;
@@ -137,7 +162,7 @@ export class DurableChatSwarmCompat {
   }
 
   private touch(swarm: CompatSwarm): void {
-    swarm.revision += 1;
+    swarm.revision = Number.isInteger(swarm.revision) ? swarm.revision + 1 : 1;
     swarm.updatedAt = nowIso();
   }
 
@@ -145,8 +170,62 @@ export class DurableChatSwarmCompat {
     return Object.values(swarm.workers).filter(worker => worker.active);
   }
 
+  private publicTask(task: CompatTask): CompatTask {
+    return {
+      taskId: task.taskId,
+      taskKey: task.taskKey,
+      prompt: task.prompt,
+      status: task.status,
+      targetWorkerId: task.targetWorkerId,
+      workerId: task.workerId,
+      result: task.result,
+      error: task.error,
+      cancelReason: task.cancelReason,
+      createdAt: task.createdAt,
+      claimedAt: task.claimedAt,
+      executionStartedAt: task.executionStartedAt,
+      completedAt: task.completedAt
+    };
+  }
+
+  private summary(swarm: CompatSwarm, role: 'orchestrator' | 'worker', worker?: CompatWorker): any {
+    const workers = this.activeWorkers(swarm).sort((a, b) => a.slot - b.slot);
+    return {
+      ok: true,
+      swarmId: swarm.id,
+      name: swarm.name,
+      state: swarm.state,
+      role,
+      workerId: worker?.id,
+      workerSlots: swarm.workerSlots,
+      activeWorkers: workers.length,
+      workers: workers.map(item => ({
+        workerId: item.id,
+        label: item.label,
+        slot: item.slot,
+        joinedAt: item.joinedAt,
+        lastSeenAt: item.lastSeenAt,
+        inFlightTaskId: item.inFlightTaskId,
+        browserOnline: Boolean(item.browserOnline),
+        browserLastSeenAt: item.browserLastSeenAt,
+        dockOnline: Boolean(item.dockOnline),
+        dockLastSeenAt: item.dockLastSeenAt,
+        progressHeartbeat: Boolean(item.progressHeartbeat),
+        progressHeartbeatLastSeenAt: item.progressHeartbeatLastSeenAt,
+        checkpointCount: Number(item.checkpointCount || 0),
+        lastCheckpointAt: item.lastCheckpointAt
+      })),
+      taskCounts: taskCounts(swarm),
+      revision: swarm.revision,
+      createdAt: swarm.createdAt,
+      updatedAt: swarm.updatedAt,
+      closedAt: swarm.closedAt
+    };
+  }
+
   private async findSwarmByInvite(state: CompatState, inviteCode: string): Promise<CompatSwarm | undefined> {
-    const hash = await sha256(String(inviteCode || '').trim().toUpperCase());
+    const normalized = String(inviteCode || '').trim().toUpperCase();
+    const hash = await sha256(normalized);
     return Object.values(state.swarms).find(swarm => swarm.inviteHash === hash);
   }
 
@@ -174,132 +253,222 @@ export class DurableChatSwarmCompat {
         if (worker.active && worker.browserWakeTokenHash === hash) return { swarm, worker };
       }
     }
-    throw new Error('Invalid browser wake token.');
+    throw new Error('Invalid or inactive browser wake token.');
   }
 
-  private nextWorkerId(swarm: CompatSwarm): string {
-    for (let index = 1; index <= swarm.workerSlots; index++) {
-      const id = `worker-${String(index).padStart(2, '0')}`;
-      if (!swarm.workers[id]?.active) return id;
-    }
+  private nextFreeSlot(swarm: CompatSwarm): number {
+    const used = new Set(this.activeWorkers(swarm).map(worker => worker.slot));
+    for (let slot = 1; slot <= swarm.workerSlots; slot++) if (!used.has(slot)) return slot;
     throw new Error('No free worker slot is available.');
   }
 
-  private claimForWorker(swarm: CompatSwarm, worker: CompatWorker): CompatTask | undefined {
+  private async addWorker(
+    swarm: CompatSwarm,
+    inviteCode: string,
+    label?: string,
+    browserPageFingerprint?: string
+  ): Promise<{ worker: CompatWorker; workerToken: string }> {
+    if (swarm.state !== 'active') throw new Error('Invite code is invalid or the swarm is closed.');
+    const active = this.activeWorkers(swarm);
+    if (active.length >= swarm.workerSlots) throw new Error(`This swarm already has all ${swarm.workerSlots} worker slots filled.`);
+    const requestedLabel = String(label || '').trim();
+    if (requestedLabel && active.some(worker => worker.label === requestedLabel)) {
+      throw new Error(`Worker label ${requestedLabel} is already in use.`);
+    }
+    const slot = this.nextFreeSlot(swarm);
+    const workerId = `worker-${String(slot).padStart(2, '0')}`;
+    const workerToken = randomToken();
+    const joinedAt = nowIso();
+    const worker: CompatWorker = {
+      id: workerId,
+      slot,
+      label: requestedLabel || workerId,
+      active: true,
+      tokenHash: await sha256(workerToken),
+      joinedAt,
+      lastSeenAt: joinedAt,
+      desktopWakeMarker: `[[CHAT_SWARM_DESKTOP:${randomToken(12)}]]`,
+      joinInviteCode: inviteCode.trim().toUpperCase(),
+      browserPageFingerprint
+    };
+    swarm.workers[workerId] = worker;
+    this.touch(swarm);
+    return { worker, workerToken };
+  }
+
+  private offerExpired(task: CompatTask): boolean {
+    if (!task.offeredWorkerId) return true;
+    const offeredAt = Date.parse(task.offeredAt || '');
+    return !Number.isFinite(offeredAt) || Date.now() - offeredAt >= WORKER_OFFER_LEASE_MS;
+  }
+
+  private claimForWorker(swarm: CompatSwarm, worker: CompatWorker): { task: CompatTask; replay: boolean } | undefined {
     if (worker.inFlightTaskId) {
       const current = swarm.tasks[worker.inFlightTaskId];
-      if (current?.status === 'claimed') return current;
+      if (current?.status === 'claimed' && current.workerId === worker.id) {
+        worker.lastSeenAt = nowIso();
+        return { task: current, replay: true };
+      }
       worker.inFlightTaskId = undefined;
     }
 
     const queued = Object.values(swarm.tasks)
       .filter(task => task.status === 'queued')
-      .filter(task => !task.targetWorkerId || task.targetWorkerId === worker.id)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    const task = queued[0];
+    let task = queued.find(item => item.targetWorkerId === worker.id);
+    if (!task) {
+      task = queued.find(item => {
+        if (item.targetWorkerId) return false;
+        return !item.offeredWorkerId || item.offeredWorkerId === worker.id || this.offerExpired(item);
+      });
+    }
     if (!task) return undefined;
 
     task.status = 'claimed';
     task.workerId = worker.id;
     task.claimedAt = nowIso();
+    task.executionStartedAt = undefined;
+    task.offeredWorkerId = undefined;
+    task.offeredAt = undefined;
     worker.inFlightTaskId = task.taskId;
     worker.lastSeenAt = nowIso();
     this.touch(swarm);
-    return task;
+    return { task, replay: false };
   }
 
   async create(input: { name?: string; workerSlots?: number }): Promise<any> {
-    const workerSlots = Math.max(1, Math.min(MAX_WORKERS, Math.trunc(input.workerSlots ?? 9)));
+    const workerSlots = Math.trunc(input.workerSlots ?? 9);
+    if (!Number.isInteger(workerSlots) || workerSlots < 1 || workerSlots > MAX_WORKERS) {
+      throw new Error(`workerSlots must be between 1 and ${MAX_WORKERS}.`);
+    }
     const inviteCode = randomHex(6).toUpperCase();
     const orchestratorToken = randomToken();
     return this.mutate(async state => {
-      const id = `swarm-${randomHex(8)}`;
+      const id = `swarm_${randomHex(8)}`;
       const createdAt = nowIso();
       state.swarms[id] = {
         id,
-        name: String(input.name || 'DevSpace Chat Swarm').slice(0, 80),
+        name: String(input.name || `Chat Swarm ${id.slice(-6)}`).trim().slice(0, 80),
         state: 'active',
         inviteHash: await sha256(inviteCode),
         orchestratorTokenHash: await sha256(orchestratorToken),
         workerSlots,
-        revision: 1,
+        revision: 0,
         createdAt,
         updatedAt: createdAt,
         workers: {},
-        tasks: {}
+        tasks: {},
+        taskKeys: {}
       };
-      return { ok: true, swarmId: id, inviteCode, orchestratorToken, workerSlots };
+      return {
+        ok: true,
+        swarmId: id,
+        inviteCode,
+        orchestratorToken,
+        workerSlots,
+        instruction: `Open ${workerSlots} worker conversations and join them with inviteCode ${inviteCode}.`
+      };
     });
   }
 
   async join(input: { inviteCode: string; label?: string }): Promise<any> {
-    const workerToken = randomToken();
     return this.mutate(async state => {
       const swarm = await this.findSwarmByInvite(state, input.inviteCode);
-      if (!swarm || swarm.state !== 'active') throw new Error('Invite code is invalid or the swarm is closed.');
-      if (this.activeWorkers(swarm).length >= swarm.workerSlots) throw new Error('Swarm worker capacity is full.');
-      const workerId = this.nextWorkerId(swarm);
-      const joinedAt = nowIso();
-      swarm.workers[workerId] = {
-        id: workerId,
-        label: String(input.label || workerId).slice(0, 80),
-        active: true,
-        tokenHash: await sha256(workerToken),
-        joinedAt,
-        lastSeenAt: joinedAt
+      if (!swarm) throw new Error('Invite code is invalid or the swarm is closed.');
+      const joined = await this.addWorker(swarm, input.inviteCode, input.label);
+      return {
+        ok: true,
+        swarmId: swarm.id,
+        workerId: joined.worker.id,
+        label: joined.worker.label,
+        workerToken: joined.workerToken,
+        desktopWakeMarker: joined.worker.desktopWakeMarker,
+        instruction: 'Keep this workerToken private. Use chat_swarm_next to wait for work and submit results only through chat_swarm_submit.'
       };
-      this.touch(swarm);
-      return { ok: true, swarmId: swarm.id, workerId, label: swarm.workers[workerId].label, workerToken };
     });
   }
 
   async status(token: string): Promise<any> {
-    const state = await this.load();
-    let swarm: CompatSwarm | undefined;
-    const hash = await sha256(token);
-    swarm = Object.values(state.swarms).find(item => item.orchestratorTokenHash === hash);
-    if (!swarm) {
-      swarm = Object.values(state.swarms).find(item => Object.values(item.workers).some(worker => worker.active && worker.tokenHash === hash));
-    }
-    if (!swarm) throw new Error('Invalid swarm token.');
-    return {
-      ok: true,
-      swarmId: swarm.id,
-      name: swarm.name,
-      state: swarm.state,
-      workerSlots: swarm.workerSlots,
-      activeWorkers: this.activeWorkers(swarm).length,
-      workers: this.activeWorkers(swarm).map(worker => ({
-        workerId: worker.id,
-        label: worker.label,
-        inFlightTaskId: worker.inFlightTaskId,
-        browserOnline: !!worker.browserOnline,
-        lastSeenAt: worker.lastSeenAt
-      })),
-      taskCounts: taskCounts(swarm),
-      revision: swarm.revision,
-      updatedAt: swarm.updatedAt
-    };
+    return this.mutate(async state => {
+      const hash = await sha256(token);
+      const orchestrator = Object.values(state.swarms).find(item => item.orchestratorTokenHash === hash);
+      if (orchestrator) return this.summary(orchestrator, 'orchestrator');
+
+      const { swarm, worker } = await this.findWorker(state, token);
+      worker.lastSeenAt = nowIso();
+      if (worker.inFlightTaskId) {
+        const task = swarm.tasks[worker.inFlightTaskId];
+        if (task?.status === 'claimed' && task.workerId === worker.id && !task.executionStartedAt) {
+          task.executionStartedAt = worker.lastSeenAt;
+        }
+      }
+      this.touch(swarm);
+      return this.summary(swarm, 'worker', worker);
+    });
+  }
+
+  async setDockOnline(workerToken: string, online: boolean): Promise<any> {
+    return this.mutate(async state => {
+      const { swarm, worker } = await this.findWorker(state, workerToken);
+      worker.dockOnline = Boolean(online);
+      worker.dockLastSeenAt = nowIso();
+      worker.lastSeenAt = worker.dockLastSeenAt;
+      this.touch(swarm);
+      return { ok: true, swarmId: swarm.id, workerId: worker.id, dockOnline: worker.dockOnline };
+    });
   }
 
   async resize(input: { orchestratorToken: string; workerSlots: number }): Promise<any> {
     return this.mutate(async state => {
       const swarm = await this.findOrchestrator(state, input.orchestratorToken);
       if (swarm.state !== 'active') throw new Error('Swarm is closed.');
-      const target = Math.max(0, Math.min(MAX_WORKERS, Math.trunc(input.workerSlots)));
-      const active = this.activeWorkers(swarm);
-      if (target < active.length) {
-        const removeCount = active.length - target;
-        const removable = active
-          .filter(worker => !worker.inFlightTaskId && !Object.values(swarm.tasks).some(task => task.status === 'queued' && task.targetWorkerId === worker.id))
-          .sort((a, b) => b.id.localeCompare(a.id));
-        if (removable.length < removeCount) throw new Error('Cannot shrink swarm while protected workers still have active or targeted work.');
-        for (const worker of removable.slice(0, removeCount)) worker.active = false;
+      const target = Math.trunc(input.workerSlots);
+      if (!Number.isInteger(target) || target < 0 || target > MAX_WORKERS) {
+        throw new Error(`workerSlots must be between 0 and ${MAX_WORKERS}.`);
       }
       const previousWorkerSlots = swarm.workerSlots;
+      const active = this.activeWorkers(swarm);
+      if (target >= active.length) {
+        swarm.workerSlots = target;
+        this.touch(swarm);
+        return { ok: true, swarmId: swarm.id, previousWorkerSlots, workerSlots: target, activeWorkers: active.length, removedWorkers: [] };
+      }
+
+      const removalCount = active.length - target;
+      const victims = [...active].sort((a, b) => b.slot - a.slot).slice(0, removalCount);
+      const protectedIds = new Set<string>();
+      for (const worker of active) if (worker.inFlightTaskId) protectedIds.add(worker.id);
+      for (const task of Object.values(swarm.tasks)) {
+        if (['queued', 'claimed'].includes(task.status) && task.targetWorkerId) protectedIds.add(task.targetWorkerId);
+      }
+      const blocked = victims.filter(worker => protectedIds.has(worker.id)).map(worker => worker.id);
+      if (blocked.length) {
+        throw new Error(`Cannot shrink swarm to ${target} workers while required tail workers are busy or targeted: ${blocked.join(', ')}.`);
+      }
+
+      const victimIds = new Set(victims.map(worker => worker.id));
+      for (const task of Object.values(swarm.tasks)) {
+        if (task.status === 'queued' && task.offeredWorkerId && victimIds.has(task.offeredWorkerId)) {
+          task.offeredWorkerId = undefined;
+          task.offeredAt = undefined;
+        }
+      }
+      for (const worker of victims) {
+        worker.active = false;
+        worker.inFlightTaskId = undefined;
+        worker.browserOnline = false;
+        worker.dockOnline = false;
+      }
       swarm.workerSlots = target;
       this.touch(swarm);
-      return { ok: true, swarmId: swarm.id, previousWorkerSlots, workerSlots: target };
+      return {
+        ok: true,
+        swarmId: swarm.id,
+        previousWorkerSlots,
+        workerSlots: target,
+        activeWorkers: target,
+        removedWorkers: victims.map(worker => ({ workerId: worker.id, label: worker.label, slot: worker.slot }))
+      };
     });
   }
 
@@ -310,30 +479,38 @@ export class DurableChatSwarmCompat {
     return this.mutate(async state => {
       const swarm = await this.findOrchestrator(state, input.orchestratorToken);
       if (swarm.state !== 'active') throw new Error('Swarm is closed.');
-      const results: CompatTask[] = [];
       const seenKeys = new Set<string>();
+
       for (const spec of input.tasks) {
         if (!spec?.prompt || typeof spec.prompt !== 'string') throw new Error('Each task requires a prompt.');
+        if (spec.prompt.length > MAX_PROMPT_CHARS) throw new Error(`Task prompt exceeds ${MAX_PROMPT_CHARS} characters.`);
         if (spec.taskKey && seenKeys.has(spec.taskKey)) throw new Error(`Duplicate taskKey '${spec.taskKey}' in dispatch batch.`);
         if (spec.taskKey) seenKeys.add(spec.taskKey);
-        if (spec.targetWorkerId && !swarm.workers[spec.targetWorkerId]?.active) throw new Error(`Target worker '${spec.targetWorkerId}' is not active.`);
-        const replay = spec.taskKey ? Object.values(swarm.tasks).find(task => task.taskKey === spec.taskKey) : undefined;
+        if (spec.targetWorkerId && !swarm.workers[spec.targetWorkerId]?.active) {
+          throw new Error(`Target worker '${spec.targetWorkerId}' is not active.`);
+        }
+      }
+
+      const results: CompatTask[] = [];
+      for (const spec of input.tasks) {
+        const replayId = spec.taskKey ? swarm.taskKeys[spec.taskKey] : undefined;
+        const replay = replayId ? swarm.tasks[replayId] : undefined;
         if (replay) {
-          results.push(replay);
+          results.push(this.publicTask(replay));
           continue;
         }
-        const taskId = `task-${randomHex(8)}`;
+        const taskId = `task_${randomHex(8)}`;
         const task: CompatTask = {
           taskId,
           taskKey: spec.taskKey,
-          title: String(spec.title || spec.taskTitle || 'Chat Swarm task').slice(0, 200),
-          prompt: spec.prompt.slice(0, 200_000),
+          prompt: spec.prompt,
           status: 'queued',
           targetWorkerId: spec.targetWorkerId,
           createdAt: nowIso()
         };
         swarm.tasks[taskId] = task;
-        results.push(task);
+        if (spec.taskKey) swarm.taskKeys[spec.taskKey] = taskId;
+        results.push(this.publicTask(task));
       }
       this.touch(swarm);
       return { ok: true, swarmId: swarm.id, tasks: results };
@@ -346,11 +523,26 @@ export class DurableChatSwarmCompat {
     while (true) {
       const result = await this.mutate(async state => {
         const { swarm, worker } = await this.findWorker(state, input.workerToken);
-        if (swarm.state !== 'active') return { state: 'closed', swarmId: swarm.id };
-        const task = this.claimForWorker(swarm, worker);
-        return task ? { state: 'task', swarmId: swarm.id, workerId: worker.id, task } : { state: 'idle', swarmId: swarm.id, workerId: worker.id };
+        if (swarm.state !== 'active') return { state: 'closed', swarmId: swarm.id, workerId: worker.id };
+        const claimed = this.claimForWorker(swarm, worker);
+        if (claimed) {
+          return {
+            state: 'task',
+            swarmId: swarm.id,
+            workerId: worker.id,
+            task: this.publicTask(claimed.task),
+            replay: claimed.replay
+          };
+        }
+        worker.lastSeenAt = nowIso();
+        return { state: 'idle', swarmId: swarm.id, workerId: worker.id };
       });
-      if (result.state !== 'idle' || Date.now() >= deadline) return result;
+      if (result.state !== 'idle' || Date.now() >= deadline) {
+        if (result.state === 'idle') {
+          return { ...result, waitedMs: waitMs, checkpoint: waitMs > 0 };
+        }
+        return result;
+      }
       await new Promise(resolve => setTimeout(resolve, Math.min(1000, Math.max(1, deadline - Date.now()))));
     }
   }
@@ -359,23 +551,33 @@ export class DurableChatSwarmCompat {
     return this.mutate(async state => {
       const { swarm, worker } = await this.findWorker(state, input.workerToken);
       const task = swarm.tasks[input.taskId];
-      if (!task || task.workerId !== worker.id || task.status !== 'claimed') throw new Error('Task is not claimed by this worker.');
-      task.executionStartedAt = nowIso();
+      if (!task) throw new Error(`Unknown task ${input.taskId}.`);
+      if (task.workerId !== worker.id || task.status !== 'claimed') throw new Error(`Task ${input.taskId} is not claimed by ${worker.id}.`);
+      if (!task.executionStartedAt) task.executionStartedAt = nowIso();
       worker.lastSeenAt = nowIso();
       this.touch(swarm);
-      return { ok: true, swarmId: swarm.id, workerId: worker.id, taskId: task.taskId };
+      return { ok: true, swarmId: swarm.id, workerId: worker.id, taskId: task.taskId, executionStartedAt: task.executionStartedAt };
     });
   }
 
-  async submit(input: { workerToken: string; taskId: string; status?: 'completed' | 'failed'; result?: string; error?: string }): Promise<any> {
-    return this.mutate(async state => {
+  async submit(input: {
+    workerToken: string;
+    taskId: string;
+    status?: 'completed' | 'failed';
+    result?: string;
+    error?: string;
+    waitForNextMs?: number;
+  }): Promise<any> {
+    const submitted = await this.mutate(async state => {
       const { swarm, worker } = await this.findWorker(state, input.workerToken);
       const task = swarm.tasks[input.taskId];
-      if (!task || task.workerId !== worker.id) throw new Error('Task is not owned by this worker.');
+      if (!task) throw new Error(`Unknown task ${input.taskId}.`);
+      if (task.status === 'cancelled') throw new Error(`Task ${input.taskId} was cancelled and cannot accept a result.`);
       if (task.status === 'completed' || task.status === 'failed') {
-        return { ok: true, duplicate: true, swarmId: swarm.id, workerId: worker.id, taskId: task.taskId, status: task.status };
+        if (task.workerId !== worker.id) throw new Error(`Task ${input.taskId} was already completed by another worker.`);
+        return { ok: true, duplicate: true, submitted: this.publicTask(task) };
       }
-      if (task.status === 'cancelled') throw new Error('Task was cancelled and can no longer be submitted.');
+      if (task.status !== 'claimed' || task.workerId !== worker.id) throw new Error(`Task ${input.taskId} is not claimed by ${worker.id}.`);
       const resultText = String(input.result ?? '');
       if (resultText.length > MAX_RESULT_CHARS) throw new Error(`Result exceeds ${MAX_RESULT_CHARS} characters.`);
       task.status = input.status === 'failed' ? 'failed' : 'completed';
@@ -385,8 +587,13 @@ export class DurableChatSwarmCompat {
       worker.inFlightTaskId = undefined;
       worker.lastSeenAt = nowIso();
       this.touch(swarm);
-      return { ok: true, duplicate: false, swarmId: swarm.id, workerId: worker.id, taskId: task.taskId, status: task.status, completedAt: task.completedAt };
+      return { ok: true, duplicate: false, submitted: this.publicTask(task) };
     });
+
+    if ((input.waitForNextMs ?? 0) !== 0) {
+      submitted.next = await this.next({ workerToken: input.workerToken, waitMs: input.waitForNextMs });
+    }
+    return submitted;
   }
 
   async collect(input: { orchestratorToken: string; taskIds?: string[]; waitFor?: 'none' | 'any' | 'all'; waitMs?: number }): Promise<any> {
@@ -397,53 +604,89 @@ export class DurableChatSwarmCompat {
       const state = await this.load();
       const swarm = await this.findOrchestrator(state, input.orchestratorToken);
       const ids = input.taskIds?.length ? input.taskIds : Object.keys(swarm.tasks);
-      const tasks = ids.map(id => swarm.tasks[id]).filter(Boolean);
+      const tasks = ids.map(id => {
+        const task = swarm.tasks[id];
+        if (!task) throw new Error(`Unknown task ${id}.`);
+        return task;
+      });
       const terminal = tasks.filter(task => ['completed', 'failed', 'cancelled'].includes(task.status)).length;
-      const done = waitFor === 'none' || (waitFor === 'any' && terminal > 0) || (waitFor === 'all' && terminal === tasks.length);
-      if (done || Date.now() >= deadline) return { ok: true, swarmId: swarm.id, tasks, terminal, total: tasks.length };
+      const satisfied = waitFor === 'none' || (waitFor === 'any' && terminal > 0) || (waitFor === 'all' && terminal === tasks.length);
+      if (satisfied || Date.now() >= deadline) {
+        return {
+          ok: true,
+          swarmId: swarm.id,
+          waitFor,
+          complete: tasks.every(task => ['completed', 'failed', 'cancelled'].includes(task.status)),
+          tasks: tasks.map(task => this.publicTask(task))
+        };
+      }
       await new Promise(resolve => setTimeout(resolve, Math.min(1000, Math.max(1, deadline - Date.now()))));
     }
   }
 
-  async cancel(input: { orchestratorToken: string; taskIds: string[] }): Promise<any> {
+  async cancel(input: { orchestratorToken: string; taskIds: string[]; reason?: string }): Promise<any> {
     return this.mutate(async state => {
       const swarm = await this.findOrchestrator(state, input.orchestratorToken);
       const changed: CompatTask[] = [];
       for (const taskId of input.taskIds || []) {
         const task = swarm.tasks[taskId];
-        if (!task || ['completed', 'failed', 'cancelled'].includes(task.status)) continue;
+        if (!task) throw new Error(`Unknown task ${taskId}.`);
+        if (['completed', 'failed', 'cancelled'].includes(task.status)) continue;
         task.status = 'cancelled';
+        task.cancelReason = input.reason;
         task.completedAt = nowIso();
-        if (task.workerId && swarm.workers[task.workerId]?.inFlightTaskId === task.taskId) swarm.workers[task.workerId].inFlightTaskId = undefined;
-        changed.push(task);
+        if (task.workerId && swarm.workers[task.workerId]?.inFlightTaskId === task.taskId) {
+          swarm.workers[task.workerId].inFlightTaskId = undefined;
+        }
+        task.offeredWorkerId = undefined;
+        task.offeredAt = undefined;
+        changed.push(this.publicTask(task));
       }
-      this.touch(swarm);
+      if (changed.length) this.touch(swarm);
       return { ok: true, swarmId: swarm.id, tasks: changed };
     });
   }
 
-  async recycleWorker(input: { orchestratorToken: string; workerId: string; force?: boolean }): Promise<any> {
+  async recycleWorker(input: { orchestratorToken: string; workerId: string; force?: boolean; reason?: string }): Promise<any> {
     return this.mutate(async state => {
       const swarm = await this.findOrchestrator(state, input.orchestratorToken);
+      if (swarm.state !== 'active') throw new Error('Swarm is closed.');
       const worker = swarm.workers[input.workerId];
-      if (!worker?.active) throw new Error('Worker is not active.');
+      if (!worker) throw new Error(`Unknown worker ${input.workerId}.`);
+      if (!worker.active) return { ok: true, swarmId: swarm.id, workerId: worker.id, state: 'recycled', duplicate: true };
+
       let requeuedTask: CompatTask | undefined;
       if (worker.inFlightTaskId) {
         const task = swarm.tasks[worker.inFlightTaskId];
-        if (task?.executionStartedAt && !input.force) throw new Error('Worker has acknowledged active execution; force=true is required to recycle it.');
-        if (task && task.status === 'claimed') {
+        if (task?.status === 'claimed' && task.workerId === worker.id) {
+          if (task.executionStartedAt && !input.force) {
+            throw new Error(`Worker ${worker.id} has task ${task.taskId} with execution already started; refuse recycle without force.`);
+          }
           task.status = 'queued';
           task.workerId = undefined;
           task.claimedAt = undefined;
           task.executionStartedAt = undefined;
-          requeuedTask = task;
+          task.offeredWorkerId = undefined;
+          task.offeredAt = undefined;
+          requeuedTask = this.publicTask(task);
         }
       }
       worker.active = false;
       worker.inFlightTaskId = undefined;
       worker.browserOnline = false;
+      worker.dockOnline = false;
+      worker.recycledAt = nowIso();
+      worker.recycleReason = input.reason;
       this.touch(swarm);
-      return { ok: true, swarmId: swarm.id, workerId: worker.id, requeuedTask };
+      return {
+        ok: true,
+        swarmId: swarm.id,
+        workerId: worker.id,
+        state: 'recycled',
+        duplicate: false,
+        forced: Boolean(input.force),
+        requeuedTask
+      };
     });
   }
 
@@ -452,39 +695,56 @@ export class DurableChatSwarmCompat {
       const { swarm, worker } = await this.findWorker(state, workerToken);
       if (worker.inFlightTaskId) {
         const task = swarm.tasks[worker.inFlightTaskId];
-        if (task?.status === 'claimed' && swarm.state === 'active') {
-          task.status = 'queued';
+        if (task?.status === 'claimed') {
+          task.status = swarm.state === 'active' ? 'queued' : 'cancelled';
           task.workerId = undefined;
           task.claimedAt = undefined;
           task.executionStartedAt = undefined;
+          task.offeredWorkerId = undefined;
+          task.offeredAt = undefined;
+          if (task.status === 'cancelled') task.completedAt = nowIso();
+        }
+      }
+      for (const task of Object.values(swarm.tasks)) {
+        if (task.status === 'queued' && task.offeredWorkerId === worker.id) {
+          task.offeredWorkerId = undefined;
+          task.offeredAt = undefined;
         }
       }
       worker.active = false;
       worker.inFlightTaskId = undefined;
       worker.browserOnline = false;
+      worker.dockOnline = false;
+      worker.leftAt = nowIso();
       this.touch(swarm);
-      return { ok: true, swarmId: swarm.id, workerId: worker.id };
+      return { ok: true, swarmId: swarm.id, workerId: worker.id, state: 'left' };
     });
   }
 
   async close(input: { orchestratorToken: string; cancelPending?: boolean }): Promise<any> {
     return this.mutate(async state => {
       const swarm = await this.findOrchestrator(state, input.orchestratorToken);
+      if (swarm.state === 'closed') return { ok: true, swarmId: swarm.id, state: 'closed', duplicate: true };
       swarm.state = 'closed';
+      swarm.closedAt = nowIso();
       if (input.cancelPending !== false) {
         for (const task of Object.values(swarm.tasks)) {
           if (task.status === 'queued' || task.status === 'claimed') {
             task.status = 'cancelled';
+            task.cancelReason = 'swarm closed';
             task.completedAt = nowIso();
+            task.offeredWorkerId = undefined;
+            task.offeredAt = undefined;
           }
         }
+        for (const worker of Object.values(swarm.workers)) worker.inFlightTaskId = undefined;
       }
       for (const worker of Object.values(swarm.workers)) {
-        worker.inFlightTaskId = undefined;
         worker.browserOnline = false;
+        worker.dockOnline = false;
       }
       this.touch(swarm);
-      return { ok: true, swarmId: swarm.id, state: swarm.state };
+      return { ok: true, swarmId: swarm.id, state: 'closed', duplicate: false };
     });
   }
 
@@ -508,11 +768,12 @@ export class DurableChatSwarmCompat {
       for (const swarm of Object.values(state.swarms)) {
         for (const worker of Object.values(swarm.workers)) {
           if (!worker.active || worker.browserBindHash !== hash) continue;
-          if (Date.parse(worker.browserBindExpiresAt || '') < Date.now()) throw new Error('Browser bind code expired.');
+          const expiresAt = Date.parse(worker.browserBindExpiresAt || '');
+          if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) throw new Error('Browser bind code expired.');
           worker.browserWakeTokenHash = await sha256(browserWakeToken);
           worker.browserBindHash = undefined;
           worker.browserBindExpiresAt = undefined;
-          worker.browserOnline = true;
+          worker.browserOnline = false;
           worker.browserLastSeenAt = nowIso();
           this.touch(swarm);
           return { ok: true, swarmId: swarm.id, workerId: worker.id, browserWakeToken };
@@ -534,7 +795,7 @@ export class DurableChatSwarmCompat {
       worker.browserWakeTokenHash = await sha256(browserWakeToken);
       worker.browserBindHash = undefined;
       worker.browserBindExpiresAt = undefined;
-      worker.browserOnline = true;
+      worker.browserOnline = false;
       worker.browserLastSeenAt = nowIso();
       this.touch(swarm);
       return { ok: true, swarmId: swarm.id, workerId: worker.id, browserWakeToken, compatibilityBind: true };
@@ -542,17 +803,54 @@ export class DurableChatSwarmCompat {
   }
 
   async joinBrowserDirect(input: { inviteCode: string; label?: string; pageKey: string }): Promise<any> {
-    const joined = await this.join({ inviteCode: input.inviteCode, label: input.label });
+    const fingerprint = (await sha256(String(input.pageKey || '').trim())).slice(0, 16);
+    if (!String(input.pageKey || '').trim()) throw new Error('Browser page key is required.');
     const browserWakeToken = randomToken();
-    await this.mutate(async state => {
-      const { swarm, worker } = await this.findWorker(state, joined.workerToken);
+    return this.mutate(async state => {
+      const swarm = await this.findSwarmByInvite(state, input.inviteCode);
+      if (!swarm || swarm.state !== 'active') throw new Error('Invite code is invalid or the swarm is closed.');
+      let worker = Object.values(swarm.workers).find(item => item.active && item.browserPageFingerprint === fingerprint);
+      let workerToken: string;
+      let directBrowserJoin = false;
+
+      if (!worker) {
+        const joined = await this.addWorker(swarm, input.inviteCode, input.label, fingerprint);
+        worker = joined.worker;
+        workerToken = joined.workerToken;
+        directBrowserJoin = true;
+      } else {
+        workerToken = randomToken();
+        worker.tokenHash = await sha256(workerToken);
+        worker.lastSeenAt = nowIso();
+      }
+
       worker.browserWakeTokenHash = await sha256(browserWakeToken);
-      worker.browserOnline = true;
+      worker.browserBindHash = undefined;
+      worker.browserBindExpiresAt = undefined;
+      worker.browserOnline = false;
       worker.browserLastSeenAt = nowIso();
       this.touch(swarm);
-      return undefined;
+      return {
+        ok: true,
+        swarmId: swarm.id,
+        workerId: worker.id,
+        label: worker.label,
+        workerToken,
+        browserWakeToken,
+        browserMode: true,
+        directBrowserJoin
+      };
     });
-    return { ...joined, browserWakeToken, browserMode: true };
+  }
+
+  async setBrowserOnline(browserWakeToken: string, online: boolean): Promise<any> {
+    return this.mutate(async state => {
+      const { swarm, worker } = await this.findBrowserWorker(state, browserWakeToken);
+      worker.browserOnline = Boolean(online);
+      worker.browserLastSeenAt = nowIso();
+      this.touch(swarm);
+      return { ok: true, swarmId: swarm.id, workerId: worker.id, browserOnline: worker.browserOnline };
+    });
   }
 
   async browserClaim(browserWakeToken: string): Promise<any> {
@@ -561,20 +859,48 @@ export class DurableChatSwarmCompat {
       worker.browserOnline = true;
       worker.browserLastSeenAt = nowIso();
       if (swarm.state !== 'active') return { state: 'closed', swarmId: swarm.id, workerId: worker.id };
-      const task = this.claimForWorker(swarm, worker);
-      return task ? { state: 'task', swarmId: swarm.id, workerId: worker.id, task } : { state: 'idle', swarmId: swarm.id, workerId: worker.id };
+      const claimed = this.claimForWorker(swarm, worker);
+      return claimed
+        ? { state: 'task', swarmId: swarm.id, workerId: worker.id, task: this.publicTask(claimed.task), replay: claimed.replay }
+        : { state: 'idle', swarmId: swarm.id, workerId: worker.id };
     });
   }
 
   async browserEvent(browserWakeToken: string): Promise<any> {
-    const state = await this.load();
-    const { swarm, worker } = await this.findBrowserWorker(state, browserWakeToken);
-    if (swarm.state !== 'active') return { type: 'closed', swarmId: swarm.id, workerId: worker.id };
-    if (worker.inFlightTaskId) return { type: 'busy', swarmId: swarm.id, workerId: worker.id, taskId: worker.inFlightTaskId };
-    const available = Object.values(swarm.tasks)
-      .find(task => task.status === 'queued' && (!task.targetWorkerId || task.targetWorkerId === worker.id));
-    return available
-      ? { type: 'task_available', swarmId: swarm.id, workerId: worker.id, taskId: available.taskId }
-      : { type: 'parked', swarmId: swarm.id, workerId: worker.id };
+    return this.mutate(async state => {
+      const { swarm, worker } = await this.findBrowserWorker(state, browserWakeToken);
+      worker.browserLastSeenAt = nowIso();
+      if (swarm.state !== 'active') return { type: 'closed', swarmId: swarm.id, workerId: worker.id };
+      if (worker.inFlightTaskId) {
+        const inFlight = swarm.tasks[worker.inFlightTaskId];
+        if (inFlight?.status === 'claimed') return { type: 'busy', swarmId: swarm.id, workerId: worker.id, taskId: inFlight.taskId };
+        worker.inFlightTaskId = undefined;
+      }
+
+      const queued = Object.values(swarm.tasks)
+        .filter(task => task.status === 'queued')
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      let task = queued.find(item => item.targetWorkerId === worker.id);
+      if (!task) {
+        task = queued.find(item => {
+          if (item.targetWorkerId) return false;
+          return !item.offeredWorkerId || item.offeredWorkerId === worker.id || this.offerExpired(item);
+        });
+      }
+      if (!task) return { type: 'parked', swarmId: swarm.id, workerId: worker.id };
+
+      if (!task.targetWorkerId && task.offeredWorkerId !== worker.id) {
+        task.offeredWorkerId = worker.id;
+        task.offeredAt = nowIso();
+        this.touch(swarm);
+      }
+      return {
+        type: 'task_available',
+        swarmId: swarm.id,
+        workerId: worker.id,
+        taskId: task.taskId,
+        targeted: Boolean(task.targetWorkerId)
+      };
+    });
   }
 }
