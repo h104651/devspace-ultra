@@ -11,8 +11,10 @@ export interface KagglePollScheduler {
   schedule(taskId: string, kernelSlug: string, delayMs: number): Promise<void> | void;
 }
 
+type KaggleClientLike = IKaggleClient | KaggleClient;
+
 export class KaggleBackend {
-  private client: IKaggleClient;
+  private client: KaggleClientLike;
   private taskStore: TaskStore;
   private artifactStore: ArtifactStore;
   private workDirBase: string;
@@ -23,7 +25,7 @@ export class KaggleBackend {
   constructor(
     taskStore: TaskStore,
     artifactStore: ArtifactStore,
-    client?: IKaggleClient,
+    client?: KaggleClientLike,
     storageDir?: string,
     pollIntervalMs = 15000,
     pollScheduler?: KagglePollScheduler
@@ -42,7 +44,7 @@ export class KaggleBackend {
     }
   }
 
-  public getClient(): IKaggleClient { return this.client; }
+  public getClient(): KaggleClientLike { return this.client; }
 
   public async submitKaggleTask(task: DurableTask<KaggleTaskPayload>): Promise<{ taskId: string; kernelSlug: string; status: string }> {
     const payload = task.payload;
