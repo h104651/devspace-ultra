@@ -223,52 +223,70 @@ export class GatewayServer {
       if (!task) return res.status(404).json({ error: 'TASK_NOT_FOUND' });
       res.json(task);
     });
+
+    this.app.post('/api/tasks/:taskId/cancel', this.authenticate('tasks:cancel'), (req, res) => {
+      const auth: TokenPayload = (req as any).auth;
+      try {
+        const result = this.taskRouter.cancelTask(req.params.taskId, req.body.reason || 'User requested', auth.scopes, auth.subjectId);
+        res.json(result);
+      } catch (err: any) {
+        res.status(err.message?.includes('AUTH_FORBIDDEN') ? 403 : 400).json({ error: err.message });
+      }
+    });
+
     this.app.get('/api/tasks/:taskId/logs', this.authenticate('tasks:read'), (req, res) => {
       const task = this.taskStore.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: 'TASK_NOT_FOUND' });
-      const limit = parseInt(req.query.limit as string) || 100;
-      res.json({ taskId: task.taskId, totalLines: task.logs.length, lines: task.logs.slice(-limit) });
+      const limit = parseInt(req.query.limit as string) || 1000;
+      res.json({ taskId: task.taskId, logs: task.logs.slice(-limit) });
     });
-    this.app.get('/api/tasks/:taskId/artifacts', this.authenticate('artifacts:read'), (req, res) => res.json({ taskId: req.params.taskId, artifacts: this.artifactStore.getTaskArtifacts(req.params.taskId) }));
+
+    this.app.get('/api/tasks/:taskId/artifacts', this.authenticate('artifacts:read'), (req, res) => {
+      const task = this.taskStore.getTask(req.params.taskId);
+      if (!task) return res.status(404).json({ error: 'TASK_NOT_FOUND' });
+      res.json({ taskId: task.taskId, artifacts: task.artifacts.map(id => this.artifactStore.getArtifactMetadata(id)).filter(Boolean) });
+    });
+
     this.app.get('/api/artifacts/:artifactId', this.authenticate('artifacts:read'), (req, res) => {
       const meta = this.artifactStore.getArtifactMetadata(req.params.artifactId);
       if (!meta) return res.status(404).json({ error: 'ARTIFACT_NOT_FOUND' });
-      const content = this.artifactStore.readArtifactContent(req.params.artifactId);
-      if (!content) return res.status(404).json({ error: 'ARTIFACT_CONTENT_NOT_FOUND' });
+      const content = this.artifactStore.getArtifactContent(req.params.artifactId);
+      if (content === undefined) return res.status(404).json({ error: 'ARTIFACT_PAYLOAD_UNAVAILABLE' });
       res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
       res.setHeader('Content-Disposition', `attachment; filename="${meta.name.replace(/"/g, '')}"`);
       res.send(content);
     });
-    this.app.post('/api/tasks/:taskId/cancel', this.authenticate('tasks:submit'), (req, res) => {
-      const success = this.taskStore.cancelTask(req.params.taskId, req.body.reason || 'Cancelled via API');
-      return success ? res.json({ taskId: req.params.taskId, status: 'cancelled' }) : res.status(400).json({ error: 'TASK_CANCEL_FAILED' });
-    });
-    this.app.get('/api/devices', this.authenticate('admin:*'), (_req, res) => res.json({ devices: this.authManager.listDevices(), connected: this.connectionManager.getConnectedAgents() }));
-    this.app.post('/api/kill-switch', this.authenticate('admin:killswitch'), (req, res) => {
-      const { action, reason, deviceId, clientId } = req.body;
-      if (action === 'EMERGENCY_STOP') this.killSwitch.triggerGlobalEmergencyStop(reason);
-      else if (action === 'CLEAR_STOP') this.killSwitch.resetGlobalEmergencyStop();
-      else if (action === 'REVOKE_DEVICE' && deviceId) { this.killSwitch.revokeDevice(deviceId, reason); this.authManager.revokeDevice(deviceId, reason); }
-      else if (action === 'REVOKE_CLIENT' && clientId) this.killSwitch.revokeClient(clientId, reason);
-      res.json({ status: 'OK', killSwitchState: this.killSwitch.getState() });
-    });
-    this.app.get('/api/audit', this.authenticate('admin:*'), (req, res) => res.json({ logs: this.auditLogger.getRecentLogs(parseInt(req.query.limit as string) || 100) }));
   }
 
   private setupWebSocket() {
-    this.wss.on('connection', (socket: any, req: any) => this.connectionManager.handleConnection(socket, req.socket.remoteAddress || 'unknown'));
+    this.wss.on('connection', ws => {
+      this.connectionManager.handleConnection(ws);
+    });
   }
 
   public async start(): Promise<void> {
-    const port = this.config.port || 4000;
+    const port = this.config.port ?? 4000;
     const host = this.config.host || '0.0.0.0';
     this.leaseMonitor.start();
-    return new Promise(resolve => this.httpServer.listen(port, host, resolve));
+    return new Promise((resolve, reject) => {
+      const onError = (error: Error) => {
+        this.httpServer.off('listening', onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        this.httpServer.off('error', onError);
+        resolve();
+      };
+      this.httpServer.once('error', onError);
+      this.httpServer.once('listening', onListening);
+      this.httpServer.listen(port, host);
+    });
   }
 
   public async stop(): Promise<void> {
     this.leaseMonitor.stop();
     this.wss.close();
+    if (!this.httpServer.listening) return;
     return new Promise(resolve => this.httpServer.close(() => resolve()));
   }
 }
