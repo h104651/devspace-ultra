@@ -5,19 +5,32 @@ import { CloudflareKaggleHttpClient } from '../../src/kaggle/http-client';
 import { GatewayDurableObject } from '../../src/cloudflare/gateway-durable-object';
 import { AuthManager } from '../../src/security/auth-manager';
 
-// In-memory SQLite simulator for local test runner
 class MockSqlStorage implements SqlStorage {
   private tables: Map<string, Map<string, any>> = new Map();
+
+  private mapTask(row: any[]) {
+    return {
+      taskId: row[0], taskKey: row[1], idempotencyKey: row[2], clientRequestId: row[3],
+      backend: row[4], capability: row[5], requiredScope: row[6], status: row[7],
+      priority: row[8], payloadJson: row[9], retryPolicyJson: row[10], leaseJson: row[11],
+      resultJson: row[12], errorJson: row[13], artifactsJson: row[14], logsJson: row[15],
+      metadataJson: row[16], startedAt: row[17], completedAt: row[18], createdAt: row[19], updatedAt: row[20]
+    };
+  }
+
+  private mapArtifact(row: any[]) {
+    return {
+      id: row[0], taskId: row[1], name: row[2], type: row[3], sizeBytes: row[4],
+      sha256: row[5], mimeType: row[6], preview: row[7], createdAt: row[8]
+    };
+  }
 
   exec(query: string, ...params: any[]): { toArray(): any[]; one(): any; raw(): any } {
     const q = query.trim().toUpperCase();
 
-    if (q.startsWith('CREATE TABLE')) {
+    if (q.startsWith('CREATE TABLE') || q.startsWith('CREATE INDEX') || q.startsWith('ALTER TABLE')) {
       const match = query.match(/CREATE TABLE IF NOT EXISTS\s+([a-zA-Z0-9_]+)/i);
-      if (match) {
-        const tableName = match[1];
-        if (!this.tables.has(tableName)) this.tables.set(tableName, new Map());
-      }
+      if (match && !this.tables.has(match[1])) this.tables.set(match[1], new Map());
       return { toArray: () => [], one: () => null, raw: () => [] };
     }
 
@@ -26,35 +39,43 @@ class MockSqlStorage implements SqlStorage {
       if (match) {
         const tableName = match[1];
         if (!this.tables.has(tableName)) this.tables.set(tableName, new Map());
-        const table = this.tables.get(tableName)!;
-        const key = params[0];
-        table.set(String(key), params);
+        this.tables.get(tableName)!.set(String(params[0]), params);
       }
+      return { toArray: () => [], one: () => null, raw: () => [] };
+    }
+
+    if (q.startsWith('DELETE')) {
+      const match = query.match(/FROM\s+([a-zA-Z0-9_]+)/i);
+      if (match) this.tables.get(match[1])?.delete(String(params[0]));
       return { toArray: () => [], one: () => null, raw: () => [] };
     }
 
     if (q.startsWith('SELECT')) {
       const match = query.match(/FROM\s+([a-zA-Z0-9_]+)/i);
-      if (match) {
-        const tableName = match[1];
-        const table = this.tables.get(tableName) || new Map();
-        if (q.includes('WHERE')) {
-          const key = params[0];
-          const row = table.get(String(key));
-          if (row && tableName === 'tasks') {
-            const mapped = {
-              taskId: row[0], taskKey: row[1], idempotencyKey: row[2], clientRequestId: row[3],
-              backend: row[4], capability: row[5], requiredScope: row[6], status: row[7],
-              priority: row[8], payloadJson: row[9], retryPolicyJson: row[10], leaseJson: row[11],
-              resultJson: row[12], errorJson: row[13], artifactsJson: row[14], logsJson: row[15],
-              metadataJson: row[16], startedAt: row[17], completedAt: row[18], createdAt: row[19], updatedAt: row[20]
-            };
-            return { one: () => mapped, toArray: () => [mapped], raw: () => row };
-          }
-          return { one: () => null, toArray: () => [], raw: () => null };
-        }
-        return { toArray: () => Array.from(table.values()), one: () => null, raw: () => [] };
+      if (!match) return { toArray: () => [], one: () => null, raw: () => [] };
+      const tableName = match[1];
+      const table = this.tables.get(tableName) || new Map();
+      const allRows = Array.from(table.values());
+      let selected = allRows;
+
+      if (tableName === 'tasks') {
+        if (/WHERE\s+TASKID\s*=\s*\?/i.test(query)) selected = allRows.filter(r => String(r[0]) === String(params[0]));
+        const mapped = selected.map(r => this.mapTask(r));
+        return { toArray: () => mapped, one: () => mapped[0] || null, raw: () => selected[0] || null };
       }
+
+      if (tableName === 'artifacts') {
+        if (/WHERE\s+ID\s*=\s*\?/i.test(query)) selected = allRows.filter(r => String(r[0]) === String(params[0]));
+        if (/WHERE\s+TASKID\s*=\s*\?/i.test(query)) selected = allRows.filter(r => String(r[1]) === String(params[0]));
+        const mapped = selected.map(r => this.mapArtifact(r));
+        return { toArray: () => mapped, one: () => mapped[0] || null, raw: () => selected[0] || null };
+      }
+
+      if (q.includes('WHERE') && params.length > 0) {
+        const row = table.get(String(params[0]));
+        selected = row ? [row] : [];
+      }
+      return { toArray: () => selected, one: () => selected[0] || null, raw: () => selected[0] || null };
     }
 
     return { toArray: () => [], one: () => null, raw: () => null };
@@ -140,20 +161,30 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     const testMasterSecret = 'test-workers-secret-32-bytes-minimum-1234567890';
     const authManager = new AuthManager(testMasterSecret);
     const { token: clientToken } = authManager.generateToken('cf-client', 'client', ['admin']);
+    const kv = new Map<string, any>();
+    let alarmAt: number | null = null;
 
-    const mockCtx: any = {
-      storage: { sql: mockSql },
+    const createMockCtx = () => ({
+      storage: {
+        sql: mockSql,
+        get: async (key: string) => kv.get(key),
+        put: async (key: string, value: any) => { kv.set(key, structuredClone(value)); },
+        setAlarm: async (when: number) => { alarmAt = when; },
+        deleteAlarm: async () => { alarmAt = null; }
+      },
       getWebSockets: () => [],
-      acceptWebSocket: () => {}
-    };
+      acceptWebSocket: () => {},
+      blockConcurrencyWhile: async (fn: () => Promise<void>) => { await fn(); }
+    });
 
-    const durableObject = new GatewayDurableObject(mockCtx, {
+    const durableEnv = {
       GATEWAY_DO: {},
       ARTIFACTS_R2: mockR2,
-      MASTER_SECRET: testMasterSecret,
-      KAGGLE_USERNAME: 'test_user',
-      KAGGLE_KEY: 'test_key'
-    });
+      MASTER_SECRET: testMasterSecret
+      // No Kaggle credentials: CloudflareKaggleHttpClient intentionally runs in mock mode.
+    };
+
+    const durableObject = new GatewayDurableObject(createMockCtx(), durableEnv);
 
     const healthReq = new Request('https://gateway.workers.dev/health');
     const healthRes = await durableObject.fetch(healthReq);
@@ -176,16 +207,56 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
 
     const mcpReq = new Request('https://gateway.workers.dev/mcp', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${clientToken}`
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
       body: JSON.stringify({ method: 'tools/list' })
     });
     const mcpRes = await durableObject.fetch(mcpReq);
     assert.strictEqual(mcpRes.status, 200);
     const mcpBody = await mcpRes.json() as any;
     assert.ok(mcpBody.result.tools.length >= 8);
+    passed++;
+
+    // 5. Durable Kaggle polling survives a Durable Object instance replacement.
+    const runReq = new Request('https://gateway.workers.dev/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 41, method: 'tools/call',
+        params: { name: 'kaggle_run', arguments: { kernelSlug: 'durable-alarm-smoke', code: 'print("durable")' } }
+      })
+    });
+    const runRes = await durableObject.fetch(runReq);
+    assert.strictEqual(runRes.status, 200);
+    const runBody = await runRes.json() as any;
+    const runResult = JSON.parse(runBody.result.content[0].text);
+    assert.ok(runResult.taskId);
+    assert.ok(alarmAt, 'Kaggle submission must arm a Durable Object alarm');
+
+    const pollKey = 'devspace:kaggle-polls:v1';
+    const pending = kv.get(pollKey);
+    assert.ok(pending?.[runResult.taskId], 'Pending Kaggle poll must be persisted in Durable Object storage');
+    pending[runResult.taskId].dueAt = Date.now() - 1;
+    kv.set(pollKey, pending);
+
+    // Simulate eviction/restart: a fresh instance hydrates the task from SQLite and
+    // consumes the same durable alarm/poll record.
+    const replacement = new GatewayDurableObject(createMockCtx(), durableEnv);
+    await replacement.alarm();
+
+    const statusReq = new Request('https://gateway.workers.dev/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 42, method: 'tools/call',
+        params: { name: 'kaggle_status', arguments: { taskId: runResult.taskId } }
+      })
+    });
+    const statusAfterAlarm = await replacement.fetch(statusReq);
+    assert.strictEqual(statusAfterAlarm.status, 200);
+    const statusBody = await statusAfterAlarm.json() as any;
+    const statusResultAfterAlarm = JSON.parse(statusBody.result.content[0].text);
+    assert.strictEqual(statusResultAfterAlarm.status, 'succeeded');
+    assert.strictEqual(kv.get(pollKey)?.[runResult.taskId], undefined, 'Terminal Kaggle task must be removed from pending alarm state');
     passed++;
   } catch (err: any) {
     console.error('Workers runtime test failed:', err);
