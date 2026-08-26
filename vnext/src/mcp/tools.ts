@@ -48,9 +48,9 @@ export const SWARM_DISPATCH_SCHEMA = {
 };
 export const SWARM_STATUS_SCHEMA = { type: 'object', properties: {}, additionalProperties: false };
 
-// Legacy Chat Swarm compatibility schemas. These intentionally mirror the
-// mature connector's token/invite/batch contracts instead of the early vNext
-// workerId-as-token wrappers.
+// Mature Chat Swarm compatibility schemas. Keep these intentionally aligned
+// with the existing connector contract so a connector endpoint migration does
+// not silently change model-visible arguments.
 export const CHAT_SWARM_CREATE_SCHEMA = {
   type: 'object',
   properties: {
@@ -69,7 +69,6 @@ export const CHAT_SWARM_JOIN_SCHEMA = {
   required: ['inviteCode'],
   additionalProperties: false
 };
-
 export const CHAT_SWARM_JOIN_BROWSER_SCHEMA = CHAT_SWARM_JOIN_SCHEMA;
 
 export const CHAT_SWARM_STATUS_SCHEMA = {
@@ -100,11 +99,9 @@ export const CHAT_SWARM_DISPATCH_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          taskKey: { type: 'string', minLength: 1, maxLength: 200 },
-          title: { type: 'string', maxLength: 200 },
-          taskTitle: { type: 'string', maxLength: 200 },
-          prompt: { type: 'string', minLength: 1, maxLength: 200000 },
-          targetWorkerId: { type: 'string' }
+          prompt: { type: 'string', minLength: 1, maxLength: 100000 },
+          targetWorkerId: { type: 'string', pattern: '^worker-[0-9]{2}$' },
+          taskKey: { type: 'string', minLength: 1, maxLength: 120 }
         },
         required: ['prompt'],
         additionalProperties: false
@@ -132,17 +129,8 @@ export const CHAT_SWARM_ACK_SCHEMA = {
   additionalProperties: false
 };
 
-export const CHAT_SWARM_NEXT_SCHEMA = {
-  type: 'object',
-  properties: {
-    workerToken: { type: 'string', minLength: 16 },
-    waitMs: { type: 'integer', minimum: 0, maximum: 25000 }
-  },
-  required: ['workerToken'],
-  additionalProperties: false
-};
-
-export const CHAT_SWARM_RECOVER_SCHEMA = CHAT_SWARM_NEXT_SCHEMA;
+export const CHAT_SWARM_NEXT_SCHEMA = CHAT_SWARM_CLAIM_SCHEMA;
+export const CHAT_SWARM_RECOVER_SCHEMA = CHAT_SWARM_CLAIM_SCHEMA;
 
 export const CHAT_SWARM_SUBMIT_SCHEMA = {
   type: 'object',
@@ -156,7 +144,6 @@ export const CHAT_SWARM_SUBMIT_SCHEMA = {
   required: ['workerToken', 'taskId'],
   additionalProperties: false
 };
-
 export const CHAT_SWARM_SUBMIT_ONCE_SCHEMA = CHAT_SWARM_SUBMIT_SCHEMA;
 
 export const CHAT_SWARM_COLLECT_SCHEMA = {
@@ -175,7 +162,8 @@ export const CHAT_SWARM_CANCEL_SCHEMA = {
   type: 'object',
   properties: {
     orchestratorToken: { type: 'string', minLength: 16 },
-    taskIds: { type: 'array', minItems: 1, maxItems: 64, items: { type: 'string', minLength: 8 } }
+    taskIds: { type: 'array', minItems: 1, maxItems: 64, items: { type: 'string', minLength: 8 } },
+    reason: { type: 'string', maxLength: 500 }
   },
   required: ['orchestratorToken', 'taskIds'],
   additionalProperties: false
@@ -186,18 +174,14 @@ export const CHAT_SWARM_RECYCLE_WORKER_SCHEMA = {
   properties: {
     orchestratorToken: { type: 'string', minLength: 16 },
     workerId: { type: 'string', pattern: '^worker-[0-9]{2}$' },
-    force: { type: 'boolean', default: false }
+    force: { type: 'boolean', default: false },
+    reason: { type: 'string', maxLength: 500 }
   },
   required: ['orchestratorToken', 'workerId'],
   additionalProperties: false
 };
 
-export const CHAT_SWARM_LEAVE_SCHEMA = {
-  type: 'object',
-  properties: { workerToken: { type: 'string', minLength: 16 } },
-  required: ['workerToken'],
-  additionalProperties: false
-};
+export const CHAT_SWARM_LEAVE_SCHEMA = CHAT_SWARM_CLAIM_SCHEMA;
 
 export const CHAT_SWARM_CLOSE_SCHEMA = {
   type: 'object',
