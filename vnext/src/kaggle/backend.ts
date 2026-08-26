@@ -1,34 +1,48 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { KaggleClient } from './client';
+import { IKaggleClient } from './kaggle-client.interface';
 import { TaskStore } from '../storage/task-store';
 import { ArtifactStore } from '../storage/artifact-store';
 import { KaggleTaskPayload, KaggleTaskResult } from '../types/kaggle';
 import { DurableTask } from '../types/task';
 
-export type KagglePollScheduler = (delayMs: number) => void | Promise<void>;
+export interface KagglePollScheduler {
+  schedule(taskId: string, kernelSlug: string, delayMs: number): Promise<void> | void;
+}
 
 export class KaggleBackend {
-  private client: KaggleClient;
-  private workDirBase = '';
-  private activeLocalPollers: Set<string> = new Set();
+  private client: IKaggleClient;
+  private taskStore: TaskStore;
+  private artifactStore: ArtifactStore;
+  private workDirBase: string;
+  private pollIntervalMs: number;
+  private pollScheduler?: KagglePollScheduler;
+  private activePollers: Map<string, NodeJS.Timeout> = new Map();
 
   constructor(
-    private taskStore: TaskStore,
-    private artifactStore: ArtifactStore,
-    client?: KaggleClient,
+    taskStore: TaskStore,
+    artifactStore: ArtifactStore,
+    client?: IKaggleClient,
     storageDir?: string,
-    private pollIntervalMs = 15000,
-    private externalScheduler?: KagglePollScheduler
+    pollIntervalMs = 15000,
+    pollScheduler?: KagglePollScheduler
   ) {
+    this.taskStore = taskStore;
+    this.artifactStore = artifactStore;
     this.client = client || new KaggleClient();
+    this.pollIntervalMs = pollIntervalMs;
+    this.pollScheduler = pollScheduler;
+
     if (storageDir && storageDir !== ':memory:') {
       this.workDirBase = path.join(storageDir, 'kaggle_runs');
-      try { if (!fs.existsSync(this.workDirBase)) fs.mkdirSync(this.workDirBase, { recursive: true }); } catch {}
+      try {
+        if (!fs.existsSync(this.workDirBase)) fs.mkdirSync(this.workDirBase, { recursive: true });
+      } catch {}
     }
   }
 
-  public getClient(): KaggleClient { return this.client; }
+  public getClient(): IKaggleClient { return this.client; }
 
   public async submitKaggleTask(task: DurableTask<KaggleTaskPayload>): Promise<{ taskId: string; kernelSlug: string; status: string }> {
     const payload = task.payload;
@@ -38,55 +52,49 @@ export class KaggleBackend {
       `GPU requested: ${!!payload.enableGpu}, Internet: ${payload.enableInternet !== false}`
     ]);
 
-    const pushResult = typeof (this.client as any).pushKernel === 'function'
-      ? ((this.client as any).pushKernel.length === 1
-          ? await (this.client as any).pushKernel(payload)
-          : await (this.client as any).pushKernel(taskWorkDir || payload, payload))
-      : await (this.client as any).pushKernel(payload);
+    const pushResult = (this.client as any).pushKernel.length === 1
+      ? await (this.client as any).pushKernel(payload)
+      : await (this.client as any).pushKernel(taskWorkDir || payload, payload);
 
     if (!pushResult.success) {
       this.taskStore.failTask(task.taskId, { code: pushResult.error?.includes('QUOTA') ? 'RESOURCE_QUOTA_EXCEEDED' : 'KAGGLE_PUSH_FAILED', message: pushResult.error || 'Failed to push kernel to Kaggle' });
-      throw new Error(pushResult.error || 'Kaggle push failed');
+      throw new Error(pushResult.error);
     }
 
     this.taskStore.startTask(task.taskId, 'kaggle-backend');
-    this.taskStore.appendLogs(task.taskId, [`Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`, 'Scheduling status monitor.']);
+    this.taskStore.appendLogs(task.taskId, [`Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`, 'Scheduling Kaggle status monitor.']);
     await this.schedulePoll(task.taskId, payload.kernelSlug);
     return { taskId: task.taskId, kernelSlug: payload.kernelSlug, status: 'running' };
   }
 
   private async schedulePoll(taskId: string, kernelSlug: string): Promise<void> {
-    if (this.externalScheduler) {
-      await this.externalScheduler(this.pollIntervalMs);
+    if (this.pollScheduler) {
+      await this.pollScheduler.schedule(taskId, kernelSlug, this.pollIntervalMs);
       return;
     }
-    if (this.activeLocalPollers.has(taskId)) return;
-    this.activeLocalPollers.add(taskId);
-    setTimeout(async () => {
-      this.activeLocalPollers.delete(taskId);
-      try { await this.pollKaggleTaskOnce(taskId, kernelSlug, true); }
-      catch (err) { console.error(`Error polling Kaggle task ${taskId}:`, err); }
+    if (this.activePollers.has(taskId)) return;
+    const timer = setTimeout(async () => {
+      this.activePollers.delete(taskId);
+      await this.pollKaggleTask(taskId, kernelSlug, true);
     }, this.pollIntervalMs);
+    this.activePollers.set(taskId, timer);
   }
 
-  public async pollKaggleTaskOnce(taskId: string, kernelSlug: string, reschedule = false): Promise<boolean> {
+  public async pollKaggleTask(taskId: string, kernelSlug: string, reschedule = false): Promise<boolean> {
     const task = this.taskStore.getTask(taskId);
-    if (!task || ['succeeded', 'failed', 'cancelled', 'stale'].includes(task.status)) return false;
-
+    if (!task || ['succeeded', 'failed', 'cancelled'].includes(task.status)) return false;
     try {
-      const statusRes = await (this.client as any).getKernelStatus(kernelSlug);
+      const statusRes = await this.client.getKernelStatus(kernelSlug);
       this.taskStore.appendLogs(taskId, [`Kaggle execution status: ${statusRes.status} (${statusRes.rawMessage || ''})`]);
-
       if (statusRes.status === 'complete') {
         await this.finalizeKaggleRun(taskId, kernelSlug);
         return false;
       }
-      if (statusRes.status === 'error') {
-        this.taskStore.failTask(taskId, { code: 'KAGGLE_RUN_FAILED', message: `Kaggle execution resulted in error: ${statusRes.rawMessage || 'unknown error'}` });
-        return false;
-      }
-      if (statusRes.status === 'quotaExceeded') {
-        this.taskStore.failTask(taskId, { code: 'RESOURCE_QUOTA_EXCEEDED', message: 'Kaggle GPU quota limit exceeded during execution' });
+      if (statusRes.status === 'error' || statusRes.status === 'quotaExceeded') {
+        this.taskStore.failTask(taskId, {
+          code: statusRes.status === 'quotaExceeded' ? 'RESOURCE_QUOTA_EXCEEDED' : 'KAGGLE_RUN_FAILED',
+          message: statusRes.status === 'quotaExceeded' ? 'Kaggle GPU quota limit exceeded during execution' : `Kaggle execution resulted in error: ${statusRes.rawMessage}`
+        });
         return false;
       }
 
@@ -112,7 +120,15 @@ export class KaggleBackend {
           const type = fileName.endsWith('.json') ? 'json' : fileName.endsWith('.csv') ? 'csv' : fileName.endsWith('.ipynb') ? 'notebook' : 'log';
           const mimeType = fileName.endsWith('.json') ? 'application/json' : fileName.endsWith('.csv') ? 'text/csv' : fileName.endsWith('.ipynb') ? 'application/x-ipynb+json' : 'text/plain';
           const art = this.artifactStore.saveArtifact(taskId, fileName, content, type as any, mimeType);
-          this.taskStore.addArtifact(taskId, art.id);
+          this.taskStore.addArtifact(taskId, {
+            id: art.id,
+            name: art.name,
+            type: art.type,
+            sizeBytes: art.sizeBytes,
+            mimeType: art.mimeType || mimeType,
+            preview: art.preview,
+            downloadUrl: `/api/artifacts/${encodeURIComponent(art.id)}`
+          });
           resultSummary.outputFiles.push({ fileName, sizeBytes: art.sizeBytes });
           if (fileName === 'result.json' || fileName === 'metrics.json') {
             try {
