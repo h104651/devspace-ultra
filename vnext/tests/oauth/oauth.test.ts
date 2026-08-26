@@ -1,13 +1,12 @@
 import * as assert from 'assert';
 import crypto from 'crypto';
 import { AuthManager } from '../../src/security/auth-manager';
-import { OAuthManager, CHATGPT_LEAST_PRIVILEGE_SCOPES } from '../../src/oauth/oauth-manager';
+import { OAuthManager } from '../../src/oauth/oauth-manager';
 
 class MockStorage {
-  private clients: Map<string, any> = new Map();
-  private codes: Map<string, any> = new Map();
-  private revoked: Set<string> = new Set();
-
+  private clients = new Map<string, any>();
+  private codes = new Map<string, any>();
+  private revoked = new Set<string>();
   async saveOAuthClient(client: any) { this.clients.set(client.clientId, client); }
   async getOAuthClient(id: string) { return this.clients.get(id); }
   async saveOAuthCode(code: any) { this.codes.set(code.code, code); }
@@ -20,138 +19,76 @@ class MockStorage {
 export async function runOAuthTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0;
   let failed = 0;
-
   try {
+    const issuer = 'https://devspace-ultra-gateway.abdul-hsu.workers.dev';
+    const resource = `${issuer}/mcp`;
     const authManager = new AuthManager('test-master-secret-12345678901234567890');
     const storage = new MockStorage() as any;
-    const oauthManager = new OAuthManager('https://devspace-ultra-gateway.abdul-hsu.workers.dev', authManager, storage);
+    const oauthManager = new OAuthManager(issuer, authManager, storage);
 
-    // 1. Discovery Metadata: offline_access advertised & S256 PKCE
-    const authServerMeta = oauthManager.getAuthorizationServerMetadata();
-    assert.strictEqual(authServerMeta.issuer, 'https://devspace-ultra-gateway.abdul-hsu.workers.dev');
-    assert.strictEqual(authServerMeta.authorization_endpoint, 'https://devspace-ultra-gateway.abdul-hsu.workers.dev/oauth/authorize');
-    assert.strictEqual(authServerMeta.token_endpoint, 'https://devspace-ultra-gateway.abdul-hsu.workers.dev/oauth/token');
-    assert.ok(authServerMeta.scopes_supported.includes('offline_access'), 'Must advertise offline_access');
-    assert.deepStrictEqual(authServerMeta.code_challenge_methods_supported, ['S256']);
-    assert.deepStrictEqual(authServerMeta.token_endpoint_auth_methods_supported, ['none']);
-    assert.strictEqual(authServerMeta.scopes_supported.includes('admin:*'), false);
+    const authMeta = oauthManager.getAuthorizationServerMetadata();
+    assert.strictEqual(authMeta.issuer, issuer);
+    assert.deepStrictEqual(authMeta.code_challenge_methods_supported, ['S256']);
+    assert.deepStrictEqual(authMeta.token_endpoint_auth_methods_supported, ['none']);
+    assert.strictEqual(authMeta.authorization_response_iss_parameter_supported, true);
+    assert.strictEqual(authMeta.scopes_supported.includes('admin:*'), false);
     passed++;
 
-    // 2. Protected Resource Metadata for /mcp
     const resourceMeta = oauthManager.getProtectedResourceMetadata();
-    assert.strictEqual(resourceMeta.resource, 'https://devspace-ultra-gateway.abdul-hsu.workers.dev/mcp');
-    assert.ok(resourceMeta.scopes_supported.includes('offline_access'));
+    assert.strictEqual(resourceMeta.resource, resource);
     assert.ok(resourceMeta.scopes_supported.includes('mcp:access'));
     passed++;
 
-    // 3. Dynamic Client Registration with arbitrary valid ChatGPT redirect URI
-    const chatgptRedirectUri = 'https://chatgpt.com/connector/oauth/FLLrQdlez6Uf';
-    const regRes = await oauthManager.registerClient({
-      client_name: 'ChatGPT Live Connector',
-      redirect_uris: [chatgptRedirectUri],
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-      token_endpoint_auth_method: 'none'
-    });
-    assert.ok(regRes.client_id.startsWith('chatgpt_client_'));
-    assert.deepStrictEqual(regRes.redirect_uris, [chatgptRedirectUri]);
+    const redirectUri = 'https://chatgpt.com/connector/oauth/FLLrQdlez6Uf';
+    const reg = await oauthManager.registerClient({ client_name: 'ChatGPT Live Connector', redirect_uris: [redirectUri], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' });
+    assert.ok(reg.client_id.startsWith('chatgpt_client_'));
+    assert.deepStrictEqual(reg.redirect_uris, [redirectUri]);
     passed++;
 
-    // 4. Authorization Code Generation with PKCE S256 & resource parameter
-    const codeVerifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
-    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    await assert.rejects(() => oauthManager.registerClient({ redirect_uris: ['http://evil.example/cb'] }), /web redirect URIs must use https/);
+    passed++;
 
-    const code = await oauthManager.createAuthorizationCode({
-      clientId: regRes.client_id,
-      redirectUri: chatgptRedirectUri,
-      codeChallenge,
-      codeChallengeMethod: 'S256',
-      scope: 'offline_access mcp:access tasks:submit admin:*', // tries to request admin:*
-      state: 'oauth_s_6a8e8733e3788191afcf32faea0c3d5f',
-      resource: 'https://devspace-ultra-gateway.abdul-hsu.workers.dev/mcp'
-    });
+    const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
+    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+    const code = await oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'offline_access mcp:access tasks:submit admin:*', state: 'state-1', resource });
     assert.ok(code.startsWith('dsu_code_'));
     passed++;
 
-    // 5. Code Exchange: Reject Tampered Redirect URI
-    await assert.rejects(
-      async () => {
-        await oauthManager.exchangeCodeForTokens({
-          code,
-          redirectUri: 'https://evil.com/callback',
-          codeVerifier
-        });
-      },
-      /redirect_uri mismatch/,
-      'Must reject tampered redirect URI'
-    );
+    await assert.rejects(() => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri: 'https://evil.example/callback', codeChallenge: challenge, codeChallengeMethod: 'S256', resource }), /redirect_uri is not registered/);
     passed++;
 
-    // 6. Code Exchange: PKCE verification and least-privilege token issuance
-    const tokens = await oauthManager.exchangeCodeForTokens({
-      code,
-      redirectUri: chatgptRedirectUri,
-      codeVerifier,
-      resource: 'https://devspace-ultra-gateway.abdul-hsu.workers.dev/mcp'
-    });
-    assert.ok(tokens.access_token);
-    assert.ok(tokens.refresh_token);
-    assert.strictEqual(tokens.token_type, 'Bearer');
-    assert.strictEqual(tokens.scope.includes('admin:*'), false, 'Must not grant admin:* scope');
-    assert.ok(tokens.scope.includes('mcp:access'));
+    await assert.rejects(() => oauthManager.exchangeCodeForTokens({ code, clientId: 'wrong-client', redirectUri, codeVerifier: verifier, resource }), /client_id mismatch/);
+    await assert.rejects(() => oauthManager.exchangeCodeForTokens({ code, clientId: reg.client_id, redirectUri: 'https://evil.example/callback', codeVerifier: verifier, resource }), /redirect_uri mismatch/);
     passed++;
 
-    // 7. Single-use Code Replay Prevention
-    await assert.rejects(
-      async () => {
-        await oauthManager.exchangeCodeForTokens({
-          code,
-          redirectUri: chatgptRedirectUri,
-          codeVerifier
-        });
-      },
-      /Authorization code not found or expired/
-    );
+    const tokens = await oauthManager.exchangeCodeForTokens({ code, clientId: reg.client_id, redirectUri, codeVerifier: verifier, resource });
+    assert.ok(tokens.access_token && tokens.refresh_token);
+    assert.strictEqual(tokens.scope.includes('admin:*'), false);
+    assert.strictEqual(authManager.validateToken(tokens.access_token).payload?.metadata?.purpose, 'access_token');
+    assert.strictEqual(authManager.validateToken(tokens.refresh_token).payload?.metadata?.purpose, 'refresh_token');
     passed++;
 
-    // 8. Refresh Token Exchange with Rotation
-    const refreshedTokens = await oauthManager.refreshAccessToken(tokens.refresh_token, 'https://devspace-ultra-gateway.abdul-hsu.workers.dev/mcp');
-    assert.ok(refreshedTokens.access_token);
-    assert.ok(refreshedTokens.refresh_token);
-    assert.notStrictEqual(refreshedTokens.access_token, tokens.access_token);
-    assert.strictEqual(refreshedTokens.scope.includes('admin:*'), false);
+    await assert.rejects(() => oauthManager.exchangeCodeForTokens({ code, clientId: reg.client_id, redirectUri, codeVerifier: verifier, resource }), /Authorization code not found or expired/);
     passed++;
 
-    // 9. Revoked Token Rejection
-    const parsedRef = authManager.validateToken(refreshedTokens.refresh_token);
-    await storage.revokeToken(parsedRef.payload?.tokenId);
-
-    await assert.rejects(
-      async () => {
-        await oauthManager.refreshAccessToken(refreshedTokens.refresh_token);
-      },
-      /Refresh token revoked/
-    );
+    const refreshed = await oauthManager.refreshAccessToken(tokens.refresh_token, resource);
+    assert.notStrictEqual(refreshed.refresh_token, tokens.refresh_token);
+    await assert.rejects(() => oauthManager.refreshAccessToken(tokens.refresh_token, resource), /(TOKEN_REVOKED|Refresh token revoked)/);
     passed++;
 
-    // 10. Consent UI rendering includes resource
-    const html = oauthManager.renderAuthorizationPage({
-      clientId: regRes.client_id,
-      redirectUri: chatgptRedirectUri,
-      state: 'oauth_s_6a8e8733e3788191afcf32faea0c3d5f',
-      codeChallenge,
-      codeChallengeMethod: 'S256',
-      resource: 'https://devspace-ultra-gateway.abdul-hsu.workers.dev/mcp'
-    });
+    await assert.rejects(() => oauthManager.refreshAccessToken(tokens.access_token, resource), /not a refresh token/);
+    await assert.rejects(() => oauthManager.refreshAccessToken(refreshed.refresh_token, 'https://other.example/mcp'), /resource mismatch/);
+    passed++;
+
+    const redirect = oauthManager.buildAuthorizationRedirect(redirectUri, 'code-1', 'state-1');
+    assert.ok(redirect.includes('iss='));
+    const html = oauthManager.renderAuthorizationPage({ clientId: reg.client_id, redirectUri, state: 'state-1', codeChallenge: challenge, codeChallengeMethod: 'S256', resource });
     assert.ok(html.includes('Authorize DevSpace Ultra vNext'));
-    assert.ok(html.includes('ChatGPT'));
     assert.ok(html.includes('mcp:access'));
     passed++;
-
   } catch (err: any) {
     console.error('OAuth test failed:', err);
     failed++;
   }
-
   return { passed, failed };
 }

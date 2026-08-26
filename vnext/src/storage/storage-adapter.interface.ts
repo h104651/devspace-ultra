@@ -30,6 +30,7 @@ export interface IStorageAdapter {
   saveArtifactMetadata(meta: ArtifactMetadata): Promise<void>;
   getArtifactMetadata(id: string): Promise<ArtifactMetadata | undefined>;
   listTaskArtifacts(taskId: string): Promise<ArtifactMetadata[]>;
+  listArtifacts(): Promise<ArtifactMetadata[]>;
 
   // Audit
   appendAuditLog(event: AuditEvent): Promise<void>;

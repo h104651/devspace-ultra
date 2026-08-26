@@ -1,16 +1,28 @@
 import { GatewayServer } from '../gateway/server';
 import { redactObject } from '../security/redactor';
+import { ScopeChecker } from '../security/scope-checker';
+
+export interface McpCallerContext {
+  scopes: string[];
+  subjectId: string;
+}
 
 export class McpHandlers {
-  private gateway: GatewayServer;
-  private defaultClientScopes: string[];
+  constructor(private gateway: GatewayServer) {}
 
-  constructor(gateway: GatewayServer, defaultClientScopes = ['admin']) {
-    this.gateway = gateway;
-    this.defaultClientScopes = defaultClientScopes;
+  private requireCaller(caller?: McpCallerContext): McpCallerContext {
+    if (!caller) throw new Error('AUTH_CONTEXT_REQUIRED: authenticated caller context is required');
+    return caller;
   }
 
-  public async handleRemoteTaskSubmit(args: any) {
+  private requireScope(caller: McpCallerContext, ...accepted: string[]): void {
+    if (!accepted.some(scope => ScopeChecker.hasScope(caller.scopes, scope))) {
+      throw new Error(`AUTH_FORBIDDEN: Required one of scopes: ${accepted.join(', ')}`);
+    }
+  }
+
+  public async handleRemoteTaskSubmit(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
     const result = await this.gateway.taskRouter.routeTaskSubmit(
       {
         backend: args.backend,
@@ -19,8 +31,8 @@ export class McpHandlers {
         priority: args.priority,
         clientRequestId: args.clientRequestId
       },
-      this.defaultClientScopes,
-      'mcp-client'
+      auth.scopes,
+      auth.subjectId
     );
 
     return {
@@ -33,11 +45,11 @@ export class McpHandlers {
     };
   }
 
-  public async handleRemoteTaskStatus(args: any) {
+  public async handleRemoteTaskStatus(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'tasks:read');
     const task = this.gateway.taskStore.getTask(args.taskId);
-    if (!task) {
-      throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
-    }
+    if (!task) throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
 
     return {
       taskId: task.taskId,
@@ -54,22 +66,22 @@ export class McpHandlers {
     };
   }
 
-  public async handleRemoteTaskLogs(args: any) {
+  public async handleRemoteTaskLogs(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'tasks:read');
     const task = this.gateway.taskStore.getTask(args.taskId);
-    if (!task) {
-      throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
-    }
-
+    if (!task) throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
     const limit = args.limit || 100;
-    const lines = task.logs.slice(-limit);
     return {
       taskId: task.taskId,
       totalLines: task.logs.length,
-      lines: lines.map(line => redactObject(line))
+      lines: task.logs.slice(-limit).map(line => redactObject(line))
     };
   }
 
-  public async handleRemoteTaskArtifacts(args: any) {
+  public async handleRemoteTaskArtifacts(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'artifacts:read', 'tasks:read');
     const artifacts = this.gateway.artifactStore.getTaskArtifacts(args.taskId);
     return {
       taskId: args.taskId,
@@ -78,6 +90,7 @@ export class McpHandlers {
         id: a.id,
         name: a.name,
         type: a.type,
+        mimeType: a.mimeType,
         sizeBytes: a.sizeBytes,
         preview: a.preview,
         sha256: a.sha256
@@ -85,15 +98,17 @@ export class McpHandlers {
     };
   }
 
-  public async handleRemoteTaskCancel(args: any) {
+  public async handleRemoteTaskCancel(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'tasks:submit');
     const success = this.gateway.taskStore.cancelTask(args.taskId, args.reason || 'Cancelled by MCP caller');
-    if (!success) {
-      throw new Error(`TASK_CANCEL_FAILED: Task '${args.taskId}' could not be cancelled`);
-    }
+    if (!success) throw new Error(`TASK_CANCEL_FAILED: Task '${args.taskId}' could not be cancelled`);
     return { taskId: args.taskId, status: 'cancelled' };
   }
 
-  public async handleKaggleRun(args: any) {
+  public async handleKaggleRun(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'kaggle:submit', 'tasks:submit');
     const result = await this.gateway.taskRouter.routeTaskSubmit(
       {
         backend: 'kaggle',
@@ -108,40 +123,49 @@ export class McpHandlers {
         },
         clientRequestId: args.clientRequestId
       },
-      this.defaultClientScopes,
-      'mcp-client'
+      auth.scopes,
+      auth.subjectId
     );
 
     return {
       taskId: result.taskId,
       status: result.status,
       kernelSlug: args.kernelSlug,
-      message: 'Kaggle task submitted to remote GPU backend. Query kaggle_status for execution progress.'
+      message: 'Kaggle task submitted. Query kaggle_status for execution progress.'
     };
   }
 
-  public async handleKaggleStatus(args: any) {
-    return this.handleRemoteTaskStatus(args);
+  public async handleKaggleStatus(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'kaggle:read', 'tasks:read');
+    return this.handleRemoteTaskStatus(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
   }
 
-  public async handleKaggleLogs(args: any) {
-    return this.handleRemoteTaskLogs(args);
+  public async handleKaggleLogs(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'kaggle:read', 'tasks:read');
+    return this.handleRemoteTaskLogs(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
   }
 
-  public async handleKaggleResult(args: any) {
-    const status = await this.handleRemoteTaskStatus(args);
-    const artifacts = await this.handleRemoteTaskArtifacts(args);
-    return {
-      taskId: args.taskId,
-      status: status.status,
-      result: status.result,
-      error: status.error,
-      artifacts: artifacts.artifacts
-    };
+  public async handleKaggleResult(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'kaggle:read', 'tasks:read');
+    const elevatedRead = { ...auth, scopes: [...auth.scopes, 'tasks:read', 'artifacts:read'] };
+    const status = await this.handleRemoteTaskStatus(args, elevatedRead);
+    const artifacts = await this.handleRemoteTaskArtifacts(args, elevatedRead);
+    return { taskId: args.taskId, status: status.status, result: status.result, error: status.error, artifacts: artifacts.artifacts };
   }
 
-  public async handleSwarmDispatch(args: any) {
-    const result = this.gateway.swarmOrchestrator.dispatchTask(args);
+  public async handleSwarmDispatch(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'swarm:dispatch');
+    const result = this.gateway.swarmOrchestrator.dispatchTask({
+      taskTitle: args.taskTitle || args.title || 'Chat Swarm task',
+      prompt: args.prompt,
+      roleRequired: args.roleRequired,
+      contextFiles: args.contextFiles,
+      timeoutMs: args.timeoutMs
+    });
     return {
       taskId: result.taskId,
       assignedWorkerId: result.assignedWorkerId,
@@ -149,7 +173,9 @@ export class McpHandlers {
     };
   }
 
-  public async handleSwarmStatus() {
+  public async handleSwarmStatus(caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'swarm:dispatch');
     const workers = this.gateway.swarmOrchestrator.listWorkers();
     return {
       totalWorkers: workers.length,
@@ -159,43 +185,63 @@ export class McpHandlers {
     };
   }
 
-  public async handleChatSwarmDispatch(args: any) {
-    return this.handleSwarmDispatch(args);
+  public async handleChatSwarmDispatch(args: any, caller?: McpCallerContext) {
+    return this.handleSwarmDispatch(args, caller);
   }
 
-  public async handleChatSwarmStatus(args?: any) {
-    return this.handleSwarmStatus();
+  public async handleChatSwarmStatus(_args?: any, caller?: McpCallerContext) {
+    return this.handleSwarmStatus(caller);
   }
 
-  public async handleChatSwarmClaim(args: any) {
-    const worker = this.gateway.swarmOrchestrator.registerWorker(args.workerName || 'worker-01', args.role || 'default', args.capabilities || ['chat']);
-    return { ok: true, workerId: worker.workerId, status: 'claimed' };
+  public async handleChatSwarmClaim(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'swarm:dispatch');
+    const worker = this.gateway.swarmOrchestrator.registerWorker(
+      args.workerName || 'worker',
+      args.role || 'default',
+      args.capabilities || ['chat']
+    );
+    const task = this.gateway.swarmOrchestrator.claimNextTask(worker.workerId);
+    return { ok: true, workerId: worker.workerId, workerToken: worker.workerId, task: task || null, status: task ? 'claimed' : 'idle' };
   }
 
-  public async handleChatSwarmNext(args: any) {
-    return { ok: true, status: 'no_task', message: 'Waiting for swarm task' };
+  public async handleChatSwarmNext(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'swarm:dispatch');
+    const workerId = args.workerToken;
+    const worker = this.gateway.swarmOrchestrator.getWorker(workerId);
+    if (!worker) throw new Error('WORKER_NOT_FOUND: invalid workerToken');
+    const task = this.gateway.swarmOrchestrator.claimNextTask(workerId);
+    return task ? { ok: true, status: 'task', task } : { ok: true, status: 'no_task', message: 'Waiting for swarm task' };
   }
 
-  public async handleChatSwarmSubmit(args: any) {
-    if (args.taskId) {
-      if (args.error) {
-        this.gateway.taskStore.failTask(args.taskId, { code: 'TASK_FAILED', message: args.error });
-      } else {
-        this.gateway.taskStore.completeTask(args.taskId, args.result || { ok: true });
-      }
+  public async handleChatSwarmSubmit(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'swarm:dispatch');
+    const workerId = args.workerToken;
+    if (args.error) {
+      const ok = this.gateway.swarmOrchestrator.failWorkerTask(workerId, args.taskId, { code: 'TASK_FAILED', message: args.error });
+      if (!ok) throw new Error('TASK_SUBMIT_FAILED: worker/task ownership mismatch');
+    } else {
+      const ok = this.gateway.swarmOrchestrator.completeWorkerTask(workerId, args.taskId, args.result || { ok: true });
+      if (!ok) throw new Error('TASK_SUBMIT_FAILED: worker/task ownership mismatch');
     }
     return { ok: true, taskId: args.taskId, status: 'submitted' };
   }
 
-  public async handleChatSwarmCancel(args: any) {
-    return this.handleRemoteTaskCancel(args);
+  public async handleChatSwarmCancel(args: any, caller?: McpCallerContext) {
+    return this.handleRemoteTaskCancel(args, caller);
   }
 
-  public async handleChatSwarmWakeBridge(args?: any) {
+  public async handleChatSwarmWakeBridge(_args?: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'swarm:dispatch');
     return { ok: true, wakeBridge: 'active', message: 'Browser wake bridge is operational' };
   }
 
-  public async handleChatSwarmRuntimeStatus() {
+  public async handleChatSwarmRuntimeStatus(caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'swarm:dispatch', 'local:read');
     const devices = this.gateway.authManager.listDevices();
     const connected = this.gateway.connectionManager.getConnectedAgents();
     return {
@@ -212,7 +258,9 @@ export class McpHandlers {
     };
   }
 
-  public async handleDeviceStatus() {
+  public async handleDeviceStatus(caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'local:read', 'admin:*');
     const devices = this.gateway.authManager.listDevices();
     const connected = this.gateway.connectionManager.getConnectedAgents();
     return {
@@ -229,7 +277,9 @@ export class McpHandlers {
     };
   }
 
-  public async handleKillSwitchTrigger(args: any) {
+  public async handleKillSwitchTrigger(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'admin:killswitch');
     if (args.action === 'EMERGENCY_STOP') {
       this.gateway.killSwitch.triggerGlobalEmergencyStop(args.reason);
     } else if (args.action === 'CLEAR_STOP') {
@@ -240,10 +290,6 @@ export class McpHandlers {
     } else if (args.action === 'REVOKE_CLIENT' && args.clientId) {
       this.gateway.killSwitch.revokeClient(args.clientId, args.reason);
     }
-
-    return {
-      status: 'OK',
-      killSwitchState: this.gateway.killSwitch.getState()
-    };
+    return { status: 'OK', killSwitchState: this.gateway.killSwitch.getState() };
   }
 }

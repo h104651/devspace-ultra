@@ -3,14 +3,17 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { CreateTaskOptions, DurableTask, TaskStatus } from '../types/task';
 import { ScopeChecker } from '../security/scope-checker';
+import { IStorageAdapter } from './storage-adapter.interface';
 
 export class TaskStore {
   private tasksDir?: string;
   private tasks: Map<string, DurableTask> = new Map();
   private defaultLeaseDurationMs: number;
+  private storageAdapter?: IStorageAdapter;
 
-  constructor(storageDir?: string, defaultLeaseDurationMs = 60000) {
+  constructor(storageDir?: string, defaultLeaseDurationMs = 60000, storageAdapter?: IStorageAdapter) {
     this.defaultLeaseDurationMs = defaultLeaseDurationMs;
+    this.storageAdapter = storageAdapter;
     if (storageDir && storageDir !== ':memory:') {
       this.tasksDir = path.join(storageDir, 'tasks');
       try {
@@ -19,6 +22,14 @@ export class TaskStore {
         }
         this.loadAll();
       } catch {}
+    }
+  }
+
+  public hydrate(tasks: DurableTask[]): void {
+    for (const task of tasks || []) {
+      if (task?.taskId) {
+        this.tasks.set(task.taskId, task);
+      }
     }
   }
 
@@ -43,20 +54,25 @@ export class TaskStore {
   }
 
   private saveTask(task: DurableTask) {
-    if (!this.tasksDir) return;
-    try {
-      if (!fs.existsSync(this.tasksDir)) {
-        fs.mkdirSync(this.tasksDir, { recursive: true });
-      }
-      const taskPath = path.join(this.tasksDir, `${task.taskId}.json`);
-      task.updatedAt = Date.now();
-      fs.writeFileSync(taskPath, JSON.stringify(task, null, 2), 'utf-8');
-    } catch {}
+    task.updatedAt = Date.now();
+
+    if (this.tasksDir) {
+      try {
+        if (!fs.existsSync(this.tasksDir)) {
+          fs.mkdirSync(this.tasksDir, { recursive: true });
+        }
+        const taskPath = path.join(this.tasksDir, `${task.taskId}.json`);
+        fs.writeFileSync(taskPath, JSON.stringify(task, null, 2), 'utf-8');
+      } catch {}
+    }
+
+    if (this.storageAdapter) {
+      void this.storageAdapter.saveTask(task).catch(err => {
+        console.error(`Failed to persist task ${task.taskId} through storage adapter:`, err);
+      });
+    }
   }
 
-  /**
-   * Creates a new durable task.
-   */
   public createTask<TPayload = any>(options: CreateTaskOptions<TPayload>): DurableTask<TPayload> {
     const taskId = options.taskId || `task-${crypto.randomBytes(8).toString('hex')}`;
     const requiredScope = options.requiredScope || ScopeChecker.getRequiredScopeForCapability(options.capability);
@@ -103,25 +119,27 @@ export class TaskStore {
     return undefined;
   }
 
-  /**
-   * Atomically claims a queued task for a worker / device.
-   */
   public claimTask(
     deviceId: string,
     supportedCapabilities: string[],
     leaseDurationMs?: number
   ): DurableTask | undefined {
-    const now = Date.now();
-    const duration = leaseDurationMs || this.defaultLeaseDurationMs;
+    this.recoverStaleTasks();
 
-    // Find highest priority queued task matching capabilities
     const eligibleTasks = Array.from(this.tasks.values())
       .filter(t => t.status === 'queued' && supportedCapabilities.includes(t.capability))
       .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
 
     if (eligibleTasks.length === 0) return undefined;
+    return this.claimTaskById(eligibleTasks[0].taskId, deviceId, leaseDurationMs);
+  }
 
-    const task = eligibleTasks[0];
+  public claimTaskById(taskId: string, deviceId: string, leaseDurationMs?: number): DurableTask | undefined {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== 'queued') return undefined;
+
+    const now = Date.now();
+    const duration = leaseDurationMs || this.defaultLeaseDurationMs;
     task.status = 'claimed';
     task.lease = {
       claimedBy: deviceId,
@@ -134,9 +152,6 @@ export class TaskStore {
     return task;
   }
 
-  /**
-   * Worker acknowledges claim.
-   */
   public acknowledgeTask(taskId: string, deviceId: string): boolean {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'claimed' || task.lease?.claimedBy !== deviceId) {
@@ -152,9 +167,6 @@ export class TaskStore {
     return true;
   }
 
-  /**
-   * Worker marks task as actively running.
-   */
   public startTask(taskId: string, deviceId: string): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
@@ -163,6 +175,7 @@ export class TaskStore {
     task.startedAt = Date.now();
     if (task.lease) {
       task.lease.lastHeartbeatAt = Date.now();
+      task.lease.leaseExpiresAt = Date.now() + this.defaultLeaseDurationMs;
     } else {
       task.lease = {
         claimedBy: deviceId,
@@ -175,9 +188,6 @@ export class TaskStore {
     return true;
   }
 
-  /**
-   * Renews task lease heartbeat.
-   */
   public renewLease(taskId: string, deviceId: string, extensionMs?: number): boolean {
     const task = this.tasks.get(taskId);
     if (!task || !task.lease || task.lease.claimedBy !== deviceId) {
@@ -195,9 +205,6 @@ export class TaskStore {
     return true;
   }
 
-  /**
-   * Appends logs to task.
-   */
   public appendLogs(taskId: string, lines: string[]): void {
     const task = this.tasks.get(taskId);
     if (!task) return;
@@ -208,9 +215,15 @@ export class TaskStore {
     this.saveTask(task);
   }
 
-  /**
-   * Completes a task successfully.
-   */
+  public addArtifact(taskId: string, artifactId: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    if (!task.artifacts.includes(artifactId)) {
+      task.artifacts.push(artifactId);
+      this.saveTask(task);
+    }
+  }
+
   public completeTask(taskId: string, result: any): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
@@ -223,9 +236,6 @@ export class TaskStore {
     return true;
   }
 
-  /**
-   * Fails a task with structured error.
-   */
   public failTask(taskId: string, error: { code: string; message: string; details?: any }): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
@@ -233,19 +243,26 @@ export class TaskStore {
     task.error = error;
     task.completedAt = Date.now();
 
-    // Check retry policy
     if (task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
       task.retryPolicy.retryCount++;
-      task.status = 'retrying';
       task.lease = undefined;
-      // Re-queue after backoff
-      setTimeout(() => {
-        const t = this.tasks.get(taskId);
-        if (t && t.status === 'retrying') {
-          t.status = 'queued';
-          this.saveTask(t);
-        }
-      }, task.retryPolicy.backoffMs * task.retryPolicy.retryCount);
+
+      // File-backed local runtimes can honor the requested backoff timer. Durable
+      // cloud runtimes requeue immediately so a process eviction cannot strand a
+      // task in an in-memory "retrying" timer that will never fire.
+      if (this.storageAdapter) {
+        task.status = 'queued';
+        task.logs.push(`[RETRY] Requeued durably after failure (attempt ${task.retryPolicy.retryCount}/${task.retryPolicy.maxRetries})`);
+      } else {
+        task.status = 'retrying';
+        setTimeout(() => {
+          const t = this.tasks.get(taskId);
+          if (t && t.status === 'retrying') {
+            t.status = 'queued';
+            this.saveTask(t);
+          }
+        }, task.retryPolicy.backoffMs * task.retryPolicy.retryCount);
+      }
     } else {
       task.status = 'failed';
       task.lease = undefined;
@@ -255,15 +272,12 @@ export class TaskStore {
     return true;
   }
 
-  /**
-   * Cancels a task.
-   */
   public cancelTask(taskId: string, reason = 'User requested cancellation'): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
     if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'cancelled') {
-      return false; // Already finished
+      return false;
     }
 
     task.status = 'cancelled';
@@ -274,9 +288,6 @@ export class TaskStore {
     return true;
   }
 
-  /**
-   * Stale task recovery: identifies expired leases and requeues / fails them.
-   */
   public recoverStaleTasks(): { recoveredCount: number; failedCount: number } {
     const now = Date.now();
     let recoveredCount = 0;
@@ -288,8 +299,8 @@ export class TaskStore {
         task.lease &&
         now > task.lease.leaseExpiresAt
       ) {
-        // Lease expired!
-        task.logs.push(`[STALE_DETECTION] Lease expired at ${new Date(task.lease.leaseExpiresAt).toISOString()} for worker ${task.lease.claimedBy}`);
+        const claimedBy = task.lease.claimedBy;
+        task.logs.push(`[STALE_DETECTION] Lease expired at ${new Date(task.lease.leaseExpiresAt).toISOString()} for worker ${claimedBy}`);
 
         if (task.retryPolicy.requeueOnStale && task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
           task.retryPolicy.retryCount++;
@@ -300,7 +311,7 @@ export class TaskStore {
           task.status = 'stale';
           task.error = {
             code: 'TASK_STALE',
-            message: `Task lease expired without heartbeat or completion from worker ${task.lease.claimedBy}`
+            message: `Task lease expired without heartbeat or completion from worker ${claimedBy}`
           };
           task.completedAt = now;
           task.lease = undefined;

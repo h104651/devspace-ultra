@@ -3,11 +3,14 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { AuditEvent } from '../types/audit';
 import { redactObject } from './redactor';
+import { IStorageAdapter } from '../storage/storage-adapter.interface';
 
 export class AuditLogger {
   private logFilePath?: string;
+  private storageAdapter?: IStorageAdapter;
 
-  constructor(storageDir?: string) {
+  constructor(storageDir?: string, storageAdapter?: IStorageAdapter) {
+    this.storageAdapter = storageAdapter;
     if (storageDir) {
       if (!fs.existsSync(storageDir)) {
         fs.mkdirSync(storageDir, { recursive: true });
@@ -28,30 +31,29 @@ export class AuditLogger {
       try {
         const dir = path.dirname(this.logFilePath);
         if (fs.existsSync(dir)) {
-          const line = JSON.stringify(fullEvent) + '\n';
-          fs.appendFileSync(this.logFilePath, line, 'utf-8');
+          fs.appendFileSync(this.logFilePath, JSON.stringify(fullEvent) + '\n', 'utf-8');
         }
-      } catch (err) {
-        // Silently ignore if storage dir was cleaned up during test teardown
-      }
+      } catch {}
+    }
+
+    if (this.storageAdapter) {
+      void this.storageAdapter.appendAuditLog(fullEvent).catch(err => {
+        console.error(`Failed to persist audit event ${fullEvent.id}:`, err);
+      });
     }
 
     return fullEvent;
   }
 
   public getRecentLogs(limit = 100): AuditEvent[] {
-    if (!this.logFilePath || !fs.existsSync(this.logFilePath)) {
-      return [];
-    }
+    if (!this.logFilePath || !fs.existsSync(this.logFilePath)) return [];
 
     try {
       const content = fs.readFileSync(this.logFilePath, 'utf-8');
       const lines = content.trim().split('\n').filter(Boolean);
       const events: AuditEvent[] = [];
       for (const line of lines.slice(-limit)) {
-        try {
-          events.push(JSON.parse(line));
-        } catch {}
+        try { events.push(JSON.parse(line)); } catch {}
       }
       return events.reverse();
     } catch {

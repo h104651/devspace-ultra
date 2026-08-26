@@ -12,9 +12,9 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["GatewayDurableObject"]
 
-# [[r2_buckets]]
-# binding = "ARTIFACTS_R2"
-# bucket_name = "devspace-ultra-artifacts"
+[[r2_buckets]]
+binding = "ARTIFACTS_R2"
+bucket_name = "devspace-ultra-artifacts"
 
 [observability]
 enabled = true

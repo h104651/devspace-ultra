@@ -6,57 +6,38 @@ import { ArtifactStore } from '../storage/artifact-store';
 import { KaggleTaskPayload, KaggleTaskResult } from '../types/kaggle';
 import { DurableTask } from '../types/task';
 
+export type KagglePollScheduler = (delayMs: number) => void | Promise<void>;
+
 export class KaggleBackend {
   private client: KaggleClient;
-  private taskStore: TaskStore;
-  private artifactStore: ArtifactStore;
-  private workDirBase: string;
-  private pollIntervalMs: number;
-  private activePollers: Map<string, NodeJS.Timeout> = new Map();
+  private workDirBase = '';
+  private activeLocalPollers: Set<string> = new Set();
 
   constructor(
-    taskStore: TaskStore,
-    artifactStore: ArtifactStore,
+    private taskStore: TaskStore,
+    private artifactStore: ArtifactStore,
     client?: KaggleClient,
     storageDir?: string,
-    pollIntervalMs = 15000
+    private pollIntervalMs = 15000,
+    private externalScheduler?: KagglePollScheduler
   ) {
-    this.taskStore = taskStore;
-    this.artifactStore = artifactStore;
     this.client = client || new KaggleClient();
-    this.pollIntervalMs = pollIntervalMs;
-
     if (storageDir && storageDir !== ':memory:') {
       this.workDirBase = path.join(storageDir, 'kaggle_runs');
-      try {
-        if (!fs.existsSync(this.workDirBase)) {
-          fs.mkdirSync(this.workDirBase, { recursive: true });
-        }
-      } catch {}
+      try { if (!fs.existsSync(this.workDirBase)) fs.mkdirSync(this.workDirBase, { recursive: true }); } catch {}
     }
   }
 
-  public getClient(): KaggleClient {
-    return this.client;
-  }
+  public getClient(): KaggleClient { return this.client; }
 
-  /**
-   * Submits a Kaggle task asynchronously. Returns immediately.
-   */
-  public async submitKaggleTask(task: DurableTask<KaggleTaskPayload>): Promise<{
-    taskId: string;
-    kernelSlug: string;
-    status: string;
-  }> {
+  public async submitKaggleTask(task: DurableTask<KaggleTaskPayload>): Promise<{ taskId: string; kernelSlug: string; status: string }> {
     const payload = task.payload;
     const taskWorkDir = this.workDirBase ? path.join(this.workDirBase, task.taskId) : '';
-
     this.taskStore.appendLogs(task.taskId, [
       `Initiating Kaggle kernel submission for slug: ${payload.kernelSlug}`,
       `GPU requested: ${!!payload.enableGpu}, Internet: ${payload.enableInternet !== false}`
     ]);
 
-    // Push kernel to Kaggle
     const pushResult = typeof (this.client as any).pushKernel === 'function'
       ? ((this.client as any).pushKernel.length === 1
           ? await (this.client as any).pushKernel(payload)
@@ -64,110 +45,86 @@ export class KaggleBackend {
       : await (this.client as any).pushKernel(payload);
 
     if (!pushResult.success) {
-      this.taskStore.failTask(task.taskId, {
-        code: pushResult.error?.includes('QUOTA') ? 'RESOURCE_QUOTA_EXCEEDED' : 'KAGGLE_PUSH_FAILED',
-        message: pushResult.error || 'Failed to push kernel to Kaggle'
-      });
-      throw new Error(pushResult.error);
+      this.taskStore.failTask(task.taskId, { code: pushResult.error?.includes('QUOTA') ? 'RESOURCE_QUOTA_EXCEEDED' : 'KAGGLE_PUSH_FAILED', message: pushResult.error || 'Failed to push kernel to Kaggle' });
+      throw new Error(pushResult.error || 'Kaggle push failed');
     }
 
     this.taskStore.startTask(task.taskId, 'kaggle-backend');
-    this.taskStore.appendLogs(task.taskId, [
-      `Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`,
-      `Starting background status monitor.`
-    ]);
-
-    // Start background polling daemon
-    this.startBackgroundPoller(task.taskId, payload.kernelSlug);
-
-    return {
-      taskId: task.taskId,
-      kernelSlug: payload.kernelSlug,
-      status: 'running'
-    };
+    this.taskStore.appendLogs(task.taskId, [`Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`, 'Scheduling status monitor.']);
+    await this.schedulePoll(task.taskId, payload.kernelSlug);
+    return { taskId: task.taskId, kernelSlug: payload.kernelSlug, status: 'running' };
   }
 
-  private startBackgroundPoller(taskId: string, kernelSlug: string) {
-    if (this.activePollers.has(taskId)) return;
-
-    const poller = setInterval(async () => {
-      try {
-        const task = this.taskStore.getTask(taskId);
-        if (!task || task.status === 'succeeded' || task.status === 'failed' || task.status === 'cancelled') {
-          clearInterval(poller);
-          this.activePollers.delete(taskId);
-          return;
-        }
-
-        const statusRes = await this.client.getKernelStatus(kernelSlug);
-        this.taskStore.appendLogs(taskId, [`Kaggle execution status: ${statusRes.status} (${statusRes.rawMessage || ''})`]);
-
-        if (statusRes.status === 'complete') {
-          clearInterval(poller);
-          this.activePollers.delete(taskId);
-          await this.finalizeKaggleRun(taskId, kernelSlug);
-        } else if (statusRes.status === 'error') {
-          clearInterval(poller);
-          this.activePollers.delete(taskId);
-          this.taskStore.failTask(taskId, {
-            code: 'KAGGLE_RUN_FAILED',
-            message: `Kaggle execution resulted in error: ${statusRes.rawMessage}`
-          });
-        } else if (statusRes.status === 'quotaExceeded') {
-          clearInterval(poller);
-          this.activePollers.delete(taskId);
-          this.taskStore.failTask(taskId, {
-            code: 'RESOURCE_QUOTA_EXCEEDED',
-            message: 'Kaggle GPU quota limit exceeded during execution'
-          });
-        }
-      } catch (err: any) {
-        console.error(`Error polling Kaggle task ${taskId}:`, err);
-      }
+  private async schedulePoll(taskId: string, kernelSlug: string): Promise<void> {
+    if (this.externalScheduler) {
+      await this.externalScheduler(this.pollIntervalMs);
+      return;
+    }
+    if (this.activeLocalPollers.has(taskId)) return;
+    this.activeLocalPollers.add(taskId);
+    setTimeout(async () => {
+      this.activeLocalPollers.delete(taskId);
+      try { await this.pollKaggleTaskOnce(taskId, kernelSlug, true); }
+      catch (err) { console.error(`Error polling Kaggle task ${taskId}:`, err); }
     }, this.pollIntervalMs);
+  }
 
-    this.activePollers.set(taskId, poller);
+  public async pollKaggleTaskOnce(taskId: string, kernelSlug: string, reschedule = false): Promise<boolean> {
+    const task = this.taskStore.getTask(taskId);
+    if (!task || ['succeeded', 'failed', 'cancelled', 'stale'].includes(task.status)) return false;
+
+    try {
+      const statusRes = await (this.client as any).getKernelStatus(kernelSlug);
+      this.taskStore.appendLogs(taskId, [`Kaggle execution status: ${statusRes.status} (${statusRes.rawMessage || ''})`]);
+
+      if (statusRes.status === 'complete') {
+        await this.finalizeKaggleRun(taskId, kernelSlug);
+        return false;
+      }
+      if (statusRes.status === 'error') {
+        this.taskStore.failTask(taskId, { code: 'KAGGLE_RUN_FAILED', message: `Kaggle execution resulted in error: ${statusRes.rawMessage || 'unknown error'}` });
+        return false;
+      }
+      if (statusRes.status === 'quotaExceeded') {
+        this.taskStore.failTask(taskId, { code: 'RESOURCE_QUOTA_EXCEEDED', message: 'Kaggle GPU quota limit exceeded during execution' });
+        return false;
+      }
+
+      if (reschedule) await this.schedulePoll(taskId, kernelSlug);
+      return true;
+    } catch (err: any) {
+      this.taskStore.appendLogs(taskId, [`Kaggle status poll failed: ${err.message || String(err)}`]);
+      if (reschedule) await this.schedulePoll(taskId, kernelSlug);
+      return true;
+    }
   }
 
   private async finalizeKaggleRun(taskId: string, kernelSlug: string) {
     const outputDir = this.workDirBase ? path.join(this.workDirBase, taskId, 'outputs') : '';
-    const downloadRes = await this.client.downloadKernelOutput(kernelSlug, outputDir);
+    const downloadRes = await (this.client as any).downloadKernelOutput(kernelSlug, outputDir);
+    const resultSummary: KaggleTaskResult = { kernelSlug, status: 'complete', outputFiles: [] };
 
-    const resultSummary: KaggleTaskResult = {
-      kernelSlug,
-      status: 'complete',
-      outputFiles: []
-    };
-
-    if (downloadRes.success && downloadRes.files && downloadRes.files.length > 0) {
+    if (downloadRes.success && Array.isArray(downloadRes.files)) {
       for (const item of downloadRes.files as any[]) {
         try {
           const fileName = typeof item === 'string' ? path.basename(item) : item.name;
           const content = typeof item === 'string' ? (fs.existsSync(item) ? fs.readFileSync(item) : '') : item.content || '';
-          const type = fileName.endsWith('.json') ? 'json' : fileName.endsWith('.csv') ? 'csv' : 'log';
-          const art = this.artifactStore.saveArtifact(taskId, fileName, content, type);
-
-          resultSummary.outputFiles.push({
-            fileName,
-            sizeBytes: art.sizeBytes
-          });
-
-          // Check if result.json exists to populate metrics
+          const type = fileName.endsWith('.json') ? 'json' : fileName.endsWith('.csv') ? 'csv' : fileName.endsWith('.ipynb') ? 'notebook' : 'log';
+          const mimeType = fileName.endsWith('.json') ? 'application/json' : fileName.endsWith('.csv') ? 'text/csv' : fileName.endsWith('.ipynb') ? 'application/x-ipynb+json' : 'text/plain';
+          const art = this.artifactStore.saveArtifact(taskId, fileName, content, type as any, mimeType);
+          this.taskStore.addArtifact(taskId, art.id);
+          resultSummary.outputFiles.push({ fileName, sizeBytes: art.sizeBytes });
           if (fileName === 'result.json' || fileName === 'metrics.json') {
             try {
-              const text = Buffer.isBuffer(content) ? content.toString('utf-8') : (typeof content === 'string' ? content : '');
+              const text = Buffer.isBuffer(content) ? content.toString('utf-8') : typeof content === 'string' ? content : '';
               resultSummary.metrics = JSON.parse(text);
             } catch {}
           }
-        } catch (e) {
-          console.error(`Failed to ingest artifact:`, e);
-        }
+        } catch (err) { console.error('Failed to ingest Kaggle artifact:', err); }
       }
     }
 
     this.taskStore.completeTask(taskId, resultSummary);
-    this.taskStore.appendLogs(taskId, [
-      `Kaggle kernel run finalized successfully. Ingested ${resultSummary.outputFiles.length} artifacts.`
-    ]);
+    this.taskStore.appendLogs(taskId, [`Kaggle kernel run finalized successfully. Ingested ${resultSummary.outputFiles.length} artifacts.`]);
   }
 }

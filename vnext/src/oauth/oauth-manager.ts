@@ -23,6 +23,7 @@ export interface OAuthClientRegistration {
   grantTypes: string[];
   responseTypes: string[];
   tokenAuthMethod: string;
+  applicationType: 'web' | 'native';
   createdAt: number;
 }
 
@@ -30,23 +31,50 @@ export interface OAuthCodeRecord {
   code: string;
   clientId: string;
   redirectUri: string;
-  codeChallenge?: string;
-  codeChallengeMethod?: string;
+  codeChallenge: string;
+  codeChallengeMethod: 'S256';
   scope: string;
   state?: string;
-  resource?: string;
+  resource: string;
   expiresAt: number;
+}
+
+type OAuthStorage = Pick<CloudflareSqliteStorageAdapter,
+  'saveOAuthClient' | 'getOAuthClient' | 'saveOAuthCode' | 'getOAuthCode' | 'deleteOAuthCode' | 'isTokenRevoked' | 'revokeToken'>;
+
+function htmlEscape(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
+function validateRedirectUri(raw: string, applicationType: 'web' | 'native'): void {
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error('INVALID_CLIENT_METADATA: redirect_uris must contain absolute URIs'); }
+  if (url.username || url.password || url.hash) throw new Error('INVALID_CLIENT_METADATA: redirect URI must not contain credentials or fragment');
+
+  if (applicationType === 'web') {
+    if (url.protocol !== 'https:') throw new Error('INVALID_CLIENT_METADATA: web redirect URIs must use https');
+  } else if (url.protocol === 'http:') {
+    if (!isLoopbackHostname(url.hostname)) throw new Error('INVALID_CLIENT_METADATA: native http redirect URIs must be loopback only');
+  } else if (url.protocol !== 'https:' && !url.protocol.endsWith(':')) {
+    throw new Error('INVALID_CLIENT_METADATA: invalid native redirect URI scheme');
+  }
 }
 
 export class OAuthManager {
   private issuerUrl: string;
-  private authManager: AuthManager;
-  private storage: CloudflareSqliteStorageAdapter;
+  private expectedResource: string;
 
-  constructor(issuerUrl: string, authManager: AuthManager, storage: CloudflareSqliteStorageAdapter) {
+  constructor(
+    issuerUrl: string,
+    private authManager: AuthManager,
+    private storage: OAuthStorage
+  ) {
     this.issuerUrl = issuerUrl.replace(/\/+$/, '');
-    this.authManager = authManager;
-    this.storage = storage;
+    this.expectedResource = `${this.issuerUrl}/mcp`;
   }
 
   public getAuthorizationServerMetadata() {
@@ -60,13 +88,14 @@ export class OAuthManager {
       grant_types_supported: ['authorization_code', 'refresh_token'],
       token_endpoint_auth_methods_supported: ['none'],
       code_challenge_methods_supported: ['S256'],
-      scopes_supported: CHATGPT_LEAST_PRIVILEGE_SCOPES
+      scopes_supported: CHATGPT_LEAST_PRIVILEGE_SCOPES,
+      authorization_response_iss_parameter_supported: true
     };
   }
 
   public getProtectedResourceMetadata() {
     return {
-      resource: `${this.issuerUrl}/mcp`,
+      resource: this.expectedResource,
       authorization_servers: [this.issuerUrl],
       scopes_supported: CHATGPT_LEAST_PRIVILEGE_SCOPES,
       bearer_methods_supported: ['header']
@@ -74,41 +103,54 @@ export class OAuthManager {
   }
 
   public async registerClient(body: any): Promise<any> {
-    const clientName = body.client_name || 'ChatGPT DevSpace Ultra Client';
-    const redirectUris = Array.isArray(body.redirect_uris) && body.redirect_uris.length > 0
-      ? body.redirect_uris
-      : ['https://chatgpt.com/aip/oauth/callback', 'https://chat.openai.com/aip/oauth/callback'];
-    const grantTypes = Array.isArray(body.grant_types) ? body.grant_types : ['authorization_code', 'refresh_token'];
-    const responseTypes = Array.isArray(body.response_types) ? body.response_types : ['code'];
-    const tokenAuthMethod = body.token_endpoint_auth_method || 'none';
+    const clientName = typeof body?.client_name === 'string' && body.client_name.trim()
+      ? body.client_name.trim().slice(0, 200)
+      : 'ChatGPT DevSpace Ultra Client';
+    const applicationType: 'web' | 'native' = body?.application_type === 'native' ? 'native' : 'web';
+    const redirectUris = Array.isArray(body?.redirect_uris) ? body.redirect_uris.filter((v: any) => typeof v === 'string') : [];
+    if (redirectUris.length === 0) throw new Error('INVALID_CLIENT_METADATA: redirect_uris is required');
+    for (const uri of redirectUris) validateRedirectUri(uri, applicationType);
+
+    const grantTypes = Array.isArray(body?.grant_types) && body.grant_types.length > 0 ? body.grant_types : ['authorization_code', 'refresh_token'];
+    const responseTypes = Array.isArray(body?.response_types) && body.response_types.length > 0 ? body.response_types : ['code'];
+    const tokenAuthMethod = body?.token_endpoint_auth_method || 'none';
+
+    if (tokenAuthMethod !== 'none') throw new Error('INVALID_CLIENT_METADATA: only public PKCE clients (token_endpoint_auth_method=none) are supported');
+    if (!grantTypes.includes('authorization_code') || grantTypes.some((g: string) => !['authorization_code', 'refresh_token'].includes(g))) {
+      throw new Error('INVALID_CLIENT_METADATA: unsupported grant_types');
+    }
+    if (responseTypes.length !== 1 || responseTypes[0] !== 'code') throw new Error('INVALID_CLIENT_METADATA: response_types must be ["code"]');
 
     const clientId = `chatgpt_client_${crypto.randomUUID()}`;
-    const clientSecret = tokenAuthMethod !== 'none' ? crypto.randomBytes(32).toString('hex') : undefined;
-
     const record: OAuthClientRegistration = {
       clientId,
-      clientSecret,
       clientName,
       redirectUris,
       grantTypes,
       responseTypes,
       tokenAuthMethod,
+      applicationType,
       createdAt: Date.now()
     };
-
     await this.storage.saveOAuthClient(record);
 
     return {
       client_id: clientId,
-      client_secret: clientSecret,
       client_id_issued_at: Math.floor(record.createdAt / 1000),
-      client_secret_expires_at: 0,
       client_name: clientName,
       redirect_uris: redirectUris,
       grant_types: grantTypes,
       response_types: responseTypes,
-      token_endpoint_auth_method: tokenAuthMethod
+      token_endpoint_auth_method: tokenAuthMethod,
+      application_type: applicationType
     };
+  }
+
+  private sanitizeScopes(scope?: string): string[] {
+    if (!scope) return [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
+    const requested = scope.split(/[\s,]+/).filter(Boolean);
+    const granted = requested.filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+    return granted.length > 0 ? granted : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
   }
 
   public async createAuthorizationCode(params: {
@@ -120,31 +162,27 @@ export class OAuthManager {
     state?: string;
     resource?: string;
   }): Promise<string> {
+    if (!params.clientId) throw new Error('INVALID_REQUEST: client_id is required');
+    const client = await this.storage.getOAuthClient(params.clientId);
+    if (!client) throw new Error('INVALID_REQUEST: unknown client_id');
+    if (!params.redirectUri || !client.redirectUris.includes(params.redirectUri)) throw new Error('INVALID_REQUEST: redirect_uri is not registered for this client');
+    if (!params.codeChallenge || params.codeChallengeMethod !== 'S256') throw new Error('INVALID_REQUEST: PKCE S256 code_challenge is required');
+
+    const resource = params.resource || this.expectedResource;
+    if (resource !== this.expectedResource) throw new Error('INVALID_TARGET: resource must identify this MCP protected resource');
+
     const code = `dsu_code_${crypto.randomUUID()}`;
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-    // Sanitize requested scopes to only allowed least-privilege scopes
-    let grantedScopes = CHATGPT_LEAST_PRIVILEGE_SCOPES;
-    if (params.scope) {
-      const requested = params.scope.split(/[\s,]+/);
-      grantedScopes = requested.filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
-      if (grantedScopes.length === 0) {
-        grantedScopes = CHATGPT_LEAST_PRIVILEGE_SCOPES;
-      }
-    }
-
     const record: OAuthCodeRecord = {
       code,
       clientId: params.clientId,
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
-      codeChallengeMethod: params.codeChallengeMethod || 'S256',
-      scope: grantedScopes.join(' '),
+      codeChallengeMethod: 'S256',
+      scope: this.sanitizeScopes(params.scope).join(' '),
       state: params.state,
-      resource: params.resource,
-      expiresAt
+      resource,
+      expiresAt: Date.now() + 10 * 60 * 1000
     };
-
     await this.storage.saveOAuthCode(record);
     return code;
   }
@@ -155,117 +193,79 @@ export class OAuthManager {
     redirectUri?: string;
     codeVerifier?: string;
     resource?: string;
-  }): Promise<{
-    access_token: string;
-    token_type: string;
-    expires_in: number;
-    refresh_token: string;
-    scope: string;
-  }> {
+  }): Promise<{ access_token: string; token_type: string; expires_in: number; refresh_token: string; scope: string }> {
+    if (!params.code || !params.clientId || !params.redirectUri || !params.codeVerifier) throw new Error('INVALID_REQUEST: code, client_id, redirect_uri and code_verifier are required');
     const codeRecord = await this.storage.getOAuthCode(params.code);
-    if (!codeRecord) {
-      throw new Error('INVALID_GRANT: Authorization code not found or expired');
-    }
-
+    if (!codeRecord) throw new Error('INVALID_GRANT: Authorization code not found or expired');
     if (codeRecord.expiresAt < Date.now()) {
       await this.storage.deleteOAuthCode(params.code);
       throw new Error('INVALID_GRANT: Authorization code has expired');
     }
+    if (codeRecord.clientId !== params.clientId) throw new Error('INVALID_GRANT: client_id mismatch');
+    if (codeRecord.redirectUri !== params.redirectUri) throw new Error('INVALID_GRANT: redirect_uri mismatch');
 
-    // Exact redirect_uri verification
-    if (codeRecord.redirectUri && params.redirectUri && codeRecord.redirectUri !== params.redirectUri) {
-      console.error(`REDIRECT_URI_MISMATCH: stored=${codeRecord.redirectUri} received=${params.redirectUri}`);
-      throw new Error('INVALID_GRANT: redirect_uri mismatch');
-    }
+    const client = await this.storage.getOAuthClient(params.clientId);
+    if (!client || !client.redirectUris.includes(params.redirectUri)) throw new Error('INVALID_GRANT: client registration is invalid');
 
-    // PKCE Verification
-    if (codeRecord.codeChallenge) {
-      if (!params.codeVerifier) {
-        throw new Error('INVALID_REQUEST: code_verifier required for PKCE');
-      }
+    const requestedResource = params.resource || codeRecord.resource;
+    if (requestedResource !== codeRecord.resource || codeRecord.resource !== this.expectedResource) throw new Error('INVALID_TARGET: resource mismatch');
 
-      if (codeRecord.codeChallengeMethod === 'S256') {
-        const computed = crypto.createHash('sha256').update(params.codeVerifier).digest('base64url');
-        if (computed !== codeRecord.codeChallenge) {
-          throw new Error('INVALID_GRANT: PKCE code_verifier challenge mismatch');
-        }
-      } else if (codeRecord.codeChallengeMethod === 'plain') {
-        if (params.codeVerifier !== codeRecord.codeChallenge) {
-          throw new Error('INVALID_GRANT: PKCE code_verifier mismatch');
-        }
-      }
-    }
+    const computed = crypto.createHash('sha256').update(params.codeVerifier).digest('base64url');
+    if (computed !== codeRecord.codeChallenge) throw new Error('INVALID_GRANT: PKCE code_verifier challenge mismatch');
 
-    // Delete used code (single-use)
     await this.storage.deleteOAuthCode(params.code);
+    const scopes = codeRecord.scope.split(' ').filter((s: string) => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+    const granted = scopes.length > 0 ? scopes : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
 
-    // Issue least-privilege tokens
-    const grantedScopes = codeRecord.scope.split(' ').filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
-    const tokenRes = this.authManager.generateToken(
-      codeRecord.clientId || 'chatgpt-oauth-client',
-      'client',
-      grantedScopes.length > 0 ? grantedScopes : CHATGPT_LEAST_PRIVILEGE_SCOPES,
-      30 * 24 * 3600 * 1000 // 30 days
-    );
-
-    const refreshTokenRes = this.authManager.generateToken(
-      codeRecord.clientId || 'chatgpt-oauth-client',
-      'client',
-      grantedScopes.length > 0 ? grantedScopes : CHATGPT_LEAST_PRIVILEGE_SCOPES,
-      90 * 24 * 3600 * 1000 // 90 days
-    );
+    const access = this.authManager.generateToken(params.clientId, 'client', granted, 60 * 60 * 1000, {
+      purpose: 'access_token', resource: codeRecord.resource, clientId: params.clientId
+    });
+    const refresh = this.authManager.generateToken(params.clientId, 'client', granted, 90 * 24 * 3600 * 1000, {
+      purpose: 'refresh_token', resource: codeRecord.resource, clientId: params.clientId
+    });
 
     return {
-      access_token: tokenRes.token,
+      access_token: access.token,
       token_type: 'Bearer',
-      expires_in: 30 * 24 * 3600,
-      refresh_token: refreshTokenRes.token,
-      scope: (grantedScopes.length > 0 ? grantedScopes : CHATGPT_LEAST_PRIVILEGE_SCOPES).join(' ')
+      expires_in: 3600,
+      refresh_token: refresh.token,
+      scope: granted.join(' ')
     };
   }
 
-  public async refreshAccessToken(refreshToken: string, requestedResource?: string): Promise<{
-    access_token: string;
-    token_type: string;
-    expires_in: number;
-    refresh_token: string;
-    scope: string;
-  }> {
+  public async refreshAccessToken(refreshToken: string, requestedResource?: string): Promise<{ access_token: string; token_type: string; expires_in: number; refresh_token: string; scope: string }> {
     const val = this.authManager.validateToken(refreshToken);
-    if (!val.valid || !val.payload) {
-      throw new Error(`INVALID_GRANT: ${val.error || 'Invalid refresh token'}`);
-    }
+    if (!val.valid || !val.payload) throw new Error(`INVALID_GRANT: ${val.error || 'Invalid refresh token'}`);
+    if (val.payload.metadata?.purpose !== 'refresh_token') throw new Error('INVALID_GRANT: token is not a refresh token');
+    if (await this.storage.isTokenRevoked(val.payload.tokenId)) throw new Error('INVALID_GRANT: Refresh token revoked');
 
-    const isRevoked = await this.storage.isTokenRevoked(val.payload.tokenId);
-    if (isRevoked) {
-      throw new Error('INVALID_GRANT: Refresh token revoked');
-    }
+    const boundResource = val.payload.metadata?.resource;
+    if (boundResource !== this.expectedResource || (requestedResource && requestedResource !== boundResource)) throw new Error('INVALID_TARGET: resource mismatch');
 
-    // Least privilege sanitization
-    const grantedScopes = (val.payload.scopes || []).filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
-    const finalScopes = grantedScopes.length > 0 ? grantedScopes : CHATGPT_LEAST_PRIVILEGE_SCOPES;
+    const granted = (val.payload.scopes || []).filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+    const finalScopes = granted.length > 0 ? granted : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
 
-    const newAccessToken = this.authManager.generateToken(
-      val.payload.subjectId,
-      'client',
-      finalScopes,
-      30 * 24 * 3600 * 1000
-    );
+    // Refresh-token rotation: revoke the token that was just redeemed before
+    // returning its replacement.
+    this.authManager.revokeToken(val.payload.tokenId);
+    await this.storage.revokeToken(val.payload.tokenId);
 
-    const newRefreshToken = this.authManager.generateToken(
-      val.payload.subjectId,
-      'client',
-      finalScopes,
-      90 * 24 * 3600 * 1000
-    );
+    const access = this.authManager.generateToken(val.payload.subjectId, 'client', finalScopes, 60 * 60 * 1000, {
+      purpose: 'access_token', resource: boundResource, clientId: val.payload.subjectId
+    });
+    const refresh = this.authManager.generateToken(val.payload.subjectId, 'client', finalScopes, 90 * 24 * 3600 * 1000, {
+      purpose: 'refresh_token', resource: boundResource, clientId: val.payload.subjectId
+    });
 
-    return {
-      access_token: newAccessToken.token,
-      token_type: 'Bearer',
-      expires_in: 30 * 24 * 3600,
-      refresh_token: newRefreshToken.token,
-      scope: finalScopes.join(' ')
-    };
+    return { access_token: access.token, token_type: 'Bearer', expires_in: 3600, refresh_token: refresh.token, scope: finalScopes.join(' ') };
+  }
+
+  public buildAuthorizationRedirect(redirectUri: string, code: string, state?: string): string {
+    const target = new URL(redirectUri);
+    target.searchParams.set('code', code);
+    if (state) target.searchParams.set('state', state);
+    target.searchParams.set('iss', this.issuerUrl);
+    return target.toString();
   }
 
   public renderAuthorizationPage(params: {
@@ -277,53 +277,16 @@ export class OAuthManager {
     scope?: string;
     resource?: string;
   }): string {
-    const scopesList = (params.scope ? params.scope.split(/[\s,]+/) : CHATGPT_LEAST_PRIVILEGE_SCOPES)
-      .filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
-
-    const scopeItemsHtml = scopesList.map(s => `<li><strong>${s}</strong></li>`).join('');
+    const scopesList = this.sanitizeScopes(params.scope);
+    const scopeItemsHtml = scopesList.map(s => `<li><strong>${htmlEscape(s)}</strong></li>`).join('');
+    const hidden = (name: string, value: string) => `<input type="hidden" name="${name}" value="${htmlEscape(value)}">`;
 
     return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Authorize DevSpace Ultra vNext</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 16px; }
-    .card { background: #1e293b; border-radius: 12px; max-width: 480px; width: 100%; padding: 32px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); border: 1px solid #334155; }
-    h1 { font-size: 22px; margin-top: 0; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
-    p { font-size: 14px; color: #94a3b8; line-height: 1.5; }
-    .scope-box { background: #0f172a; border-radius: 8px; padding: 16px; margin: 20px 0; border: 1px solid #334155; }
-    .scope-box h3 { margin: 0 0 8px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
-    .scope-box ul { margin: 0; padding-left: 20px; font-size: 13px; color: #cbd5e1; }
-    .btn { display: block; width: 100%; padding: 12px; border-radius: 8px; font-size: 15px; font-weight: 600; text-align: center; cursor: pointer; border: none; transition: all 0.15s ease; box-sizing: border-box; }
-    .btn-primary { background: #0284c7; color: white; margin-bottom: 12px; }
-    .btn-primary:hover { background: #0369a1; }
-    .btn-secondary { background: transparent; color: #94a3b8; border: 1px solid #475569; }
-    .btn-secondary:hover { background: #334155; color: white; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>🚀 DevSpace Ultra vNext</h1>
-    <p><strong>ChatGPT</strong> is requesting access to connect with your DevSpace Ultra Gateway.</p>
-    <div class="scope-box">
-      <h3>Granted Permissions (Least Privilege)</h3>
-      <ul>${scopeItemsHtml}</ul>
-    </div>
-    <form method="POST" action="${this.issuerUrl}/oauth/authorize">
-      <input type="hidden" name="client_id" value="${encodeURIComponent(params.clientId || '')}">
-      <input type="hidden" name="redirect_uri" value="${encodeURIComponent(params.redirectUri || '')}">
-      <input type="hidden" name="state" value="${encodeURIComponent(params.state || '')}">
-      <input type="hidden" name="code_challenge" value="${encodeURIComponent(params.codeChallenge || '')}">
-      <input type="hidden" name="code_challenge_method" value="${encodeURIComponent(params.codeChallengeMethod || 'S256')}">
-      <input type="hidden" name="scope" value="${encodeURIComponent(params.scope || CHATGPT_LEAST_PRIVILEGE_SCOPES.join(' '))}">
-      <input type="hidden" name="resource" value="${encodeURIComponent(params.resource || '')}">
-      <button type="submit" class="btn btn-primary">Authorize & Connect</button>
-      <button type="button" class="btn btn-secondary" onclick="window.history.back()">Cancel</button>
-    </form>
-  </div>
-</body>
-</html>`;
+<html lang="en"><head><meta charset="UTF-8"><title>Authorize DevSpace Ultra vNext</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#f8fafc;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:16px}.card{background:#1e293b;border-radius:12px;max-width:480px;width:100%;padding:32px;border:1px solid #334155}h1{font-size:22px;margin-top:0;color:#38bdf8}p{font-size:14px;color:#94a3b8;line-height:1.5}.scope-box{background:#0f172a;border-radius:8px;padding:16px;margin:20px 0;border:1px solid #334155}.btn{display:block;width:100%;padding:12px;border-radius:8px;font-size:15px;font-weight:600;border:none;cursor:pointer}.btn-primary{background:#0284c7;color:white;margin-bottom:12px}.btn-secondary{background:transparent;color:#94a3b8;border:1px solid #475569}</style></head>
+<body><div class="card"><h1>🚀 DevSpace Ultra vNext</h1><p><strong>ChatGPT</strong> is requesting access to your DevSpace Ultra Gateway.</p><div class="scope-box"><ul>${scopeItemsHtml}</ul></div>
+<form method="POST" action="${htmlEscape(this.issuerUrl)}/oauth/authorize">
+${hidden('client_id', params.clientId || '')}${hidden('redirect_uri', params.redirectUri || '')}${hidden('state', params.state || '')}${hidden('code_challenge', params.codeChallenge || '')}${hidden('code_challenge_method', params.codeChallengeMethod || 'S256')}${hidden('scope', params.scope || CHATGPT_LEAST_PRIVILEGE_SCOPES.join(' '))}${hidden('resource', params.resource || this.expectedResource)}
+<button type="submit" class="btn btn-primary">Authorize & Connect</button><button type="button" class="btn btn-secondary" onclick="window.history.back()">Cancel</button></form></div></body></html>`;
   }
 }

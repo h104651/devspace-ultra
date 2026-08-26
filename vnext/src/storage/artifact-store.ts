@@ -3,15 +3,27 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { ArtifactMetadata } from '../types/artifacts';
 import { PathSanitizer } from '../security/path-sanitizer';
+import { IStorageAdapter } from './storage-adapter.interface';
+
+export type ArtifactPayloadSink = (metadata: ArtifactMetadata, bytes: Uint8Array) => void | Promise<void>;
 
 export class ArtifactStore {
   private baseDir?: string;
   private metadataFile?: string;
   private artifacts: Map<string, ArtifactMetadata> = new Map();
   private maxSizeBytes: number;
+  private storageAdapter?: IStorageAdapter;
+  private payloadSink?: ArtifactPayloadSink;
 
-  constructor(storageDir?: string, maxSizeBytes = 50 * 1024 * 1024) {
+  constructor(
+    storageDir?: string,
+    maxSizeBytes = 50 * 1024 * 1024,
+    storageAdapter?: IStorageAdapter,
+    payloadSink?: ArtifactPayloadSink
+  ) {
     this.maxSizeBytes = maxSizeBytes;
+    this.storageAdapter = storageAdapter;
+    this.payloadSink = payloadSink;
     if (storageDir && storageDir !== ':memory:') {
       this.baseDir = path.join(storageDir, 'artifacts');
       this.metadataFile = path.join(storageDir, 'artifacts_metadata.json');
@@ -21,6 +33,12 @@ export class ArtifactStore {
         }
         this.load();
       } catch {}
+    }
+  }
+
+  public hydrate(artifacts: ArtifactMetadata[]): void {
+    for (const meta of artifacts || []) {
+      if (meta?.id) this.artifacts.set(meta.id, meta);
     }
   }
 
@@ -50,12 +68,18 @@ export class ArtifactStore {
   public saveArtifact(
     taskId: string,
     name: string,
-    content: string | Buffer,
+    content: string | Buffer | Uint8Array | ArrayBuffer,
     type: ArtifactMetadata['type'] = 'log',
     mimeType = 'text/plain'
   ): ArtifactMetadata {
     const sanitizedName = PathSanitizer.sanitizeArtifactFilename(name);
-    const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
+    const buffer = Buffer.isBuffer(content)
+      ? content
+      : content instanceof ArrayBuffer
+        ? Buffer.from(new Uint8Array(content))
+        : content instanceof Uint8Array
+          ? Buffer.from(content)
+          : Buffer.from(content, 'utf-8');
 
     if (buffer.length > this.maxSizeBytes) {
       throw new Error(`ARTIFACT_SIZE_EXCEEDED: Artifact ${name} (${buffer.length} bytes) exceeds limit of ${this.maxSizeBytes} bytes`);
@@ -64,7 +88,8 @@ export class ArtifactStore {
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
     const id = `art-${crypto.randomBytes(6).toString('hex')}`;
     const storedFileName = `${id}_${sanitizedName}`;
-    let storedPath = storedFileName;
+    let storedPath: string | undefined;
+
     if (this.baseDir) {
       const taskDir = path.join(this.baseDir, taskId);
       try {
@@ -79,7 +104,7 @@ export class ArtifactStore {
     let preview: string | undefined;
     if (type === 'log' || type === 'stdout' || type === 'stderr' || type === 'json' || type === 'csv') {
       const text = buffer.toString('utf-8');
-      preview = text.length > 2000 ? text.substring(0, 2000) + '... [TRUNCATED]' : text;
+      preview = text.length > 5000 ? text.substring(0, 5000) + '... [TRUNCATED]' : text;
     }
 
     const metadata: ArtifactMetadata = {
@@ -89,7 +114,7 @@ export class ArtifactStore {
       type,
       mimeType,
       sizeBytes: buffer.length,
-      storedPath,
+      ...(storedPath ? { storedPath } : {}),
       sha256,
       preview,
       createdAt: Date.now()
@@ -97,6 +122,25 @@ export class ArtifactStore {
 
     this.artifacts.set(id, metadata);
     this.save();
+
+    if (this.storageAdapter) {
+      void this.storageAdapter.saveArtifactMetadata(metadata).catch(err => {
+        console.error(`Failed to persist artifact metadata ${id}:`, err);
+      });
+    }
+
+    if (this.payloadSink) {
+      const bytes = Uint8Array.from(buffer);
+      try {
+        const pending = this.payloadSink(metadata, bytes);
+        if (pending && typeof (pending as Promise<void>).catch === 'function') {
+          void (pending as Promise<void>).catch(err => console.error(`Failed to persist artifact payload ${id}:`, err));
+        }
+      } catch (err) {
+        console.error(`Failed to persist artifact payload ${id}:`, err);
+      }
+    }
+
     return metadata;
   }
 
@@ -107,16 +151,18 @@ export class ArtifactStore {
   public getTaskArtifacts(taskId: string): ArtifactMetadata[] {
     const list: ArtifactMetadata[] = [];
     for (const art of this.artifacts.values()) {
-      if (art.taskId === taskId) {
-        list.push(art);
-      }
+      if (art.taskId === taskId) list.push(art);
     }
-    return list;
+    return list.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  public listArtifacts(): ArtifactMetadata[] {
+    return Array.from(this.artifacts.values()).sort((a, b) => b.createdAt - a.createdAt);
   }
 
   public readArtifactContent(artifactId: string): Buffer | undefined {
     const meta = this.artifacts.get(artifactId);
-    if (!meta || !fs.existsSync(meta.storedPath)) {
+    if (!meta?.storedPath || !fs.existsSync(meta.storedPath)) {
       return undefined;
     }
     return fs.readFileSync(meta.storedPath);

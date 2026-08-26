@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { DurableTask } from '../types/task';
+import { IStorageAdapter } from './storage-adapter.interface';
 
 export interface IdempotencyRecord {
   key: string;
@@ -12,9 +14,11 @@ export class IdempotencyStore {
   private records: Map<string, IdempotencyRecord> = new Map();
   private filePath?: string;
   private defaultTtlMs: number;
+  private storageAdapter?: IStorageAdapter;
 
-  constructor(storageDir?: string, defaultTtlMs = 24 * 3600 * 1000) {
+  constructor(storageDir?: string, defaultTtlMs = 24 * 3600 * 1000, storageAdapter?: IStorageAdapter) {
     this.defaultTtlMs = defaultTtlMs;
+    this.storageAdapter = storageAdapter;
     if (storageDir) {
       if (!fs.existsSync(storageDir)) {
         fs.mkdirSync(storageDir, { recursive: true });
@@ -69,6 +73,24 @@ export class IdempotencyStore {
     return record.result;
   }
 
+  public async getDurable(key: string): Promise<any | undefined> {
+    const local = this.get(key);
+    if (local !== undefined) return local;
+    if (!this.storageAdapter || !key) return undefined;
+
+    const persisted = await this.storageAdapter.getIdempotency(key);
+    if (!persisted) return undefined;
+
+    const now = Date.now();
+    this.records.set(key, {
+      key,
+      result: persisted,
+      createdAt: now,
+      expiresAt: now + this.defaultTtlMs
+    });
+    return persisted;
+  }
+
   public set(key: string, result: any, ttlMs?: number): void {
     if (!key) return;
     const now = Date.now();
@@ -82,5 +104,12 @@ export class IdempotencyStore {
     });
 
     this.save();
+  }
+
+  public async setDurable(key: string, result: DurableTask, ttlMs?: number): Promise<void> {
+    this.set(key, result, ttlMs);
+    if (this.storageAdapter && key && result?.taskId) {
+      await this.storageAdapter.setIdempotency(key, result, ttlMs ?? this.defaultTtlMs);
+    }
   }
 }

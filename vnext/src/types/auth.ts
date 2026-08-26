@@ -1,4 +1,9 @@
 export type StandardScope =
+  | 'offline_access'
+  | 'mcp:access'
+  | 'tasks:submit'
+  | 'tasks:read'
+  | 'artifacts:read'
   | 'kaggle:submit'
   | 'kaggle:read'
   | 'local:read'
@@ -7,6 +12,9 @@ export type StandardScope =
   | 'browser:run'
   | 'swarm:dispatch'
   | 'raw_shell:run'
+  | 'admin:health'
+  | 'admin:killswitch'
+  | 'admin:*'
   | 'admin';
 
 export type TokenType = 'client' | 'device' | 'session';
@@ -14,10 +22,10 @@ export type TokenType = 'client' | 'device' | 'session';
 export interface TokenPayload {
   tokenId: string;
   type: TokenType;
-  subjectId: string; // clientId or deviceId
+  subjectId: string;
   scopes: string[];
   issuedAt: number;
-  expiresAt: number; // timestamp ms
+  expiresAt: number;
   metadata?: Record<string, any>;
 }
 

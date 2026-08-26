@@ -1,0 +1,34 @@
+name: vNext CI
+
+on:
+  push:
+    branches:
+      - feature/vnext-remote-gateway
+    paths:
+      - 'vnext/**'
+      - '.github/workflows/vnext-ci.yml'
+  pull_request:
+    paths:
+      - 'vnext/**'
+      - '.github/workflows/vnext-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  verify-vnext:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vnext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+          cache-dependency-path: vnext/package-lock.json
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: TypeScript build
+        run: npm run build
+      - name: Unit, integration, protocol and security tests
+        run: npm test

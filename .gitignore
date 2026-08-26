@@ -26,6 +26,11 @@ ChatGPT-Classic-Worker-Runtimes/
 restart-devspace.ps1
 docs/DEVSPACE-ULTRA-HANDOFF-2026-08-18.md
 
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+
 # Cloudflare & Test storage
 .wrangler/
 .devspace-storage*/
