@@ -1,4 +1,4 @@
-import { KaggleExecutionStatus, KaggleTaskPayload, KaggleTaskResult } from '../types/kaggle';
+import { KaggleExecutionStatus, KaggleTaskPayload } from '../types/kaggle';
 
 export interface KagglePushResult {
   success: boolean;
@@ -20,6 +20,7 @@ export interface KaggleOutputResult {
 export interface IKaggleClient {
   hasCredentials(): boolean;
   getUsername(): string;
+  setMockMode?(mock: boolean): void;
   pushKernel(payload: KaggleTaskPayload, workDirOrCode?: string): Promise<KagglePushResult>;
   getKernelStatus(kernelSlug: string): Promise<KaggleStatusResult>;
   downloadKernelOutput(kernelSlug: string, targetDirOrR2Bucket?: any): Promise<KaggleOutputResult>;
