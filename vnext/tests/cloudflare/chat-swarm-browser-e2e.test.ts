@@ -105,6 +105,14 @@ async function browserClaim(gateway: GatewayDurableObject, browserWakeToken: str
   return await response.json() as any;
 }
 
+async function workerEvent(gateway: GatewayDurableObject, workerToken: string): Promise<any> {
+  const response = await gateway.fetch(new Request('https://gateway.workers.dev/chat-swarm/worker-events', {
+    method: 'GET',
+    headers: { 'X-Chat-Swarm-Worker-Token': workerToken }
+  }));
+  return readFirstSseEvent(response);
+}
+
 export async function runChatSwarmBrowserE2ETests(): Promise<{ passed: number; failed: number }> {
   let passed = 0;
   let failed = 0;
@@ -177,11 +185,9 @@ export async function runChatSwarmBrowserE2ETests(): Promise<{ passed: number; f
     assert.strictEqual(claimed.state, 'task');
     assert.strictEqual(claimed.task.taskId, taskId);
 
-    // The mature worker contract uses status once after wake to mark execution as started.
     const workerStatus = await callTool(gateway, clientToken, 'chat_swarm_status', { token: browserA.workerToken }, 103);
     assert.strictEqual(workerStatus.workerId, browserA.workerId);
 
-    // Simulate DO eviction/restart using the same durable storage.
     gateway = createGateway();
 
     const replay = await browserClaim(gateway, browserA.browserWakeToken);
@@ -214,18 +220,20 @@ export async function runChatSwarmBrowserE2ETests(): Promise<{ passed: number; f
 
   await run('one-time browser bind path works and invalid browser tokens are rejected', async () => {
     const secondSwarm = await callTool(gateway, clientToken, 'chat_swarm_create', { name: 'Bind E2E', workerSlots: 1 }, 107);
-    const joined = await callTool(gateway, clientToken, 'chat_swarm_join', { inviteCode: secondSwarm.inviteCode, label: 'Bound-Browser' }, 108);
-    const dock = await callTool(gateway, clientToken, 'chat_swarm_dock', { workerToken: joined.workerToken }, 109);
-    assert.ok(dock.browserBindCode);
+    const joinedBrowser = await callTool(gateway, clientToken, 'chat_swarm_join_browser', {
+      inviteCode: secondSwarm.inviteCode,
+      label: 'Bound-Browser'
+    }, 108);
+    assert.ok(joinedBrowser.browserBindCode);
 
     const bindResponse = await gateway.fetch(new Request('https://gateway.workers.dev/chat-swarm/browser-bind', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: dock.browserBindCode })
+      body: JSON.stringify({ code: joinedBrowser.browserBindCode })
     }));
     assert.strictEqual(bindResponse.status, 200);
     const bound = await bindResponse.json() as any;
-    assert.strictEqual(bound.workerId, joined.workerId);
+    assert.strictEqual(bound.workerId, joinedBrowser.workerId);
     assert.ok(bound.browserWakeToken);
 
     const invalid = await gateway.fetch(new Request('https://gateway.workers.dev/chat-swarm/browser-claim', {
@@ -233,6 +241,71 @@ export async function runChatSwarmBrowserE2ETests(): Promise<{ passed: number; f
       headers: { 'X-Chat-Swarm-Browser-Token': 'not-a-valid-browser-token' }
     }));
     assert.strictEqual(invalid.status, 401);
+  });
+
+  await run('Worker Dock stream reserves one task and chat_swarm_submit re-parks onto the next task', async () => {
+    const dockSwarm = await callTool(gateway, clientToken, 'chat_swarm_create', { name: 'Worker Dock E2E', workerSlots: 1 }, 200);
+    const worker = await callTool(gateway, clientToken, 'chat_swarm_join', {
+      inviteCode: dockSwarm.inviteCode,
+      label: 'Dock-Worker'
+    }, 201);
+    const dock = await callTool(gateway, clientToken, 'chat_swarm_dock', { workerToken: worker.workerToken }, 202);
+    assert.strictEqual(dock.workerDock, true);
+    assert.strictEqual(dock.workerToken, worker.workerToken);
+    assert.ok(dock.dockStreamUrl.endsWith('/chat-swarm/worker-events'));
+    assert.strictEqual(dock.browserBindCode, undefined, 'Worker Dock must not masquerade as browser binding');
+
+    const dispatched = await callTool(gateway, clientToken, 'chat_swarm_dispatch', {
+      orchestratorToken: dockSwarm.orchestratorToken,
+      tasks: [
+        { taskKey: 'dock-1', prompt: 'first dock task', targetWorkerId: worker.workerId },
+        { taskKey: 'dock-2', prompt: 'second dock task', targetWorkerId: worker.workerId }
+      ]
+    }, 203);
+    const firstTaskId = dispatched.tasks[0].taskId;
+    const secondTaskId = dispatched.tasks[1].taskId;
+
+    const event = await workerEvent(gateway, worker.workerToken);
+    assert.strictEqual(event.type, 'task_available');
+    assert.strictEqual(event.taskId, firstTaskId);
+
+    const claimed = await callTool(gateway, clientToken, 'chat_swarm_claim', { workerToken: worker.workerToken }, 204);
+    assert.strictEqual(claimed.state, 'task');
+    assert.strictEqual(claimed.task.taskId, firstTaskId);
+    await callTool(gateway, clientToken, 'chat_swarm_ack', { workerToken: worker.workerToken, taskId: firstTaskId }, 205);
+
+    const submittedAndReparked = await callTool(gateway, clientToken, 'chat_swarm_submit', {
+      workerToken: worker.workerToken,
+      taskId: firstTaskId,
+      status: 'completed',
+      result: 'first-complete'
+    }, 206);
+    assert.strictEqual(submittedAndReparked.submitted.taskId, firstTaskId);
+    assert.strictEqual(submittedAndReparked.next.state, 'task', 'submit must immediately re-enter the worker loop');
+    assert.strictEqual(submittedAndReparked.next.task.taskId, secondTaskId);
+
+    await callTool(gateway, clientToken, 'chat_swarm_ack', { workerToken: worker.workerToken, taskId: secondTaskId }, 207);
+    await callTool(gateway, clientToken, 'chat_swarm_submit_once', {
+      workerToken: worker.workerToken,
+      taskId: secondTaskId,
+      status: 'completed',
+      result: 'second-complete'
+    }, 208);
+
+    const collected = await callTool(gateway, clientToken, 'chat_swarm_collect', {
+      orchestratorToken: dockSwarm.orchestratorToken,
+      taskIds: [firstTaskId, secondTaskId],
+      waitFor: 'all',
+      waitMs: 0
+    }, 209);
+    assert.strictEqual(collected.complete, true);
+    assert.deepStrictEqual(collected.tasks.map((item: any) => item.result), ['first-complete', 'second-complete']);
+
+    const invalidWorkerStream = await gateway.fetch(new Request('https://gateway.workers.dev/chat-swarm/worker-events', {
+      method: 'GET',
+      headers: { 'X-Chat-Swarm-Worker-Token': 'not-a-valid-worker-token' }
+    }));
+    assert.strictEqual(invalidWorkerStream.status, 401);
   });
 
   return { passed, failed };
