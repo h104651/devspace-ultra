@@ -34,6 +34,9 @@ export * from './kaggle/notebook-builder';
 export * from './swarm/swarm-orchestrator';
 export * from './swarm/wake-bridge';
 
-export * from './mcp/server';
+// Cloudflare /mcp is the only supported vNext MCP transport.  The old local
+// stdio MCP adapter was intentionally removed so there is one authenticated,
+// schema-validated wire implementation instead of two drifting protocol stacks.
+export * from './mcp/protocol';
 export * from './mcp/tools';
 export * from './mcp/handlers';
