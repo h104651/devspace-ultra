@@ -568,7 +568,7 @@ export class DurableChatSwarmCompat {
     error?: string;
     waitForNextMs?: number;
   }): Promise<any> {
-    const submitted = await this.mutate(async state => {
+    const submitted: any = await this.mutate(async state => {
       const { swarm, worker } = await this.findWorker(state, input.workerToken);
       const task = swarm.tasks[input.taskId];
       if (!task) throw new Error(`Unknown task ${input.taskId}.`);
