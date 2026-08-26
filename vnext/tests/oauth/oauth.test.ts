@@ -50,6 +50,20 @@ export async function runOAuthTests(): Promise<{ passed: number; failed: number 
 
     const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
     const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+
+    await assert.rejects(
+      () => oauthManager.createAuthorizationCode({
+        clientId: reg.client_id,
+        redirectUri,
+        codeChallenge: challenge,
+        codeChallengeMethod: 'S256',
+        scope: 'admin:* totally:unknown',
+        resource
+      }),
+      /INVALID_SCOPE/
+    );
+    passed++;
+
     const code = await oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'offline_access mcp:access tasks:submit admin:*', state: 'state-1', resource });
     assert.ok(code.startsWith('dsu_code_'));
     passed++;
