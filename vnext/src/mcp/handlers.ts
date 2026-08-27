@@ -1035,9 +1035,7 @@ export class McpHandlers {
     // 7. File presence guard: every file declared in manifest must exist in dataset file listing
     for (const [filePath] of Object.entries(manifest.files || {})) {
       if (filePath === 'devspace-project.json') continue;
-      const isPresent = N >= 2
-        ? datasetFilesMap.has(filePath)
-        : (datasetFilesMap.has(filePath) || datasetFilesMap.has(filePath.replace(/[\/\\]/g, '_')));
+      const isPresent = datasetFilesMap.has(filePath) || datasetFilesMap.has(filePath.replace(/[\/\\]/g, '_'));
       if (!isPresent) {
         throw new Error(`KAGGLE_WORKSPACE_FILE_MISSING: Manifest file "${filePath}" is missing from Kaggle dataset version ${N}`);
       }
@@ -1115,19 +1113,15 @@ export class McpHandlers {
       throw new Error(`FILE_NOT_FOUND: Workspace file "${filePath}" not found in manifest of project ${ref}`);
     }
 
-    // Try downloading the file (exact POSIX path for version >= 2; legacy fallback only for version < 2)
+    // Try downloading the file by exact POSIX path first, with legacy migration fallback if needed
     let dl: { content: Buffer; sizeBytes: number };
     try {
       dl = await client.downloadDatasetFile(owner, slug, filePath, ws.version);
     } catch (err: any) {
-      if (ws.version < 2) {
-        const flattenedName = filePath.replace(/[\/\\]/g, '_');
-        try {
-          dl = await client.downloadDatasetFile(owner, slug, flattenedName, ws.version);
-        } catch {
-          throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Failed to download "${filePath}" from ${ref} version ${ws.version}: ${err.message}`);
-        }
-      } else {
+      const flattenedName = filePath.replace(/[\/\\]/g, '_');
+      try {
+        dl = await client.downloadDatasetFile(owner, slug, flattenedName, ws.version);
+      } catch {
         throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Failed to download "${filePath}" from ${ref} version ${ws.version}: ${err.message}`);
       }
     }
