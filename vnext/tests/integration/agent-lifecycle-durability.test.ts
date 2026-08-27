@@ -12,9 +12,10 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     fs.rmSync(testDir, { recursive: true, force: true });
   }
 
-  const port = 49400 + Math.floor(Math.random() * 1000);
+  const port = 24500 + Math.floor(Math.random() * 2000);
   let server = new GatewayServer({
     port,
+    host: '127.0.0.1',
     storageDir: testDir,
     masterSecret: 'test-secret'
   });

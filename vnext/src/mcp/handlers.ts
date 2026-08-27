@@ -301,14 +301,14 @@ export class McpHandlers {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'admin:killswitch');
     if (args.action === 'EMERGENCY_STOP') {
-      this.gateway.killSwitch.triggerGlobalEmergencyStop(args.reason);
+      await this.gateway.killSwitch.triggerGlobalEmergencyStop(args.reason);
     } else if (args.action === 'CLEAR_STOP') {
-      this.gateway.killSwitch.resetGlobalEmergencyStop();
+      await this.gateway.killSwitch.resetGlobalEmergencyStop();
     } else if (args.action === 'REVOKE_DEVICE' && args.deviceId) {
-      this.gateway.killSwitch.revokeDevice(args.deviceId, args.reason);
+      await this.gateway.killSwitch.revokeDevice(args.deviceId, args.reason);
       this.gateway.authManager.revokeDevice(args.deviceId, args.reason);
     } else if (args.action === 'REVOKE_CLIENT' && args.clientId) {
-      this.gateway.killSwitch.revokeClient(args.clientId, args.reason);
+      await this.gateway.killSwitch.revokeClient(args.clientId, args.reason);
     }
     return { status: 'OK', killSwitchState: this.gateway.killSwitch.getState() };
   }

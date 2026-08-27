@@ -255,10 +255,44 @@ class GatewayDurableObject {
         return {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Authorization, Content-Type, Accept, WWW-Authenticate, MCP-Protocol-Version, Mcp-Method, Mcp-Name, X-Chat-Swarm-Browser-Token, X-Chat-Swarm-Worker-Token',
+            'Access-Control-Allow-Headers': 'Authorization, Content-Type, Accept, WWW-Authenticate, MCP-Protocol-Version, Mcp-Method, Mcp-Name, X-Chat-Swarm-Browser-Token, X-Chat-Swarm-Worker-Token, X-Admin-Secret, X-DevSpace-Admin-Secret',
             'Access-Control-Expose-Headers': 'MCP-Protocol-Version, WWW-Authenticate',
             'Access-Control-Max-Age': '86400'
         };
+    }
+    timingSafeEqualStr(a, b) {
+        if (typeof a !== 'string' || typeof b !== 'string')
+            return false;
+        const bufA = new TextEncoder().encode(a);
+        const bufB = new TextEncoder().encode(b);
+        if (bufA.length !== bufB.length)
+            return false;
+        let diff = 0;
+        for (let i = 0; i < bufA.length; i++) {
+            diff |= bufA[i] ^ bufB[i];
+        }
+        return diff === 0;
+    }
+    authenticateAdmin(request) {
+        const adminSecret = this.env.ADMIN_SECRET;
+        if (!adminSecret || adminSecret.length < 16) {
+            return Response.json({ error: 'ADMIN_NOT_CONFIGURED', message: 'ADMIN_SECRET is not configured on this gateway' }, { status: 503, headers: this.corsHeaders() });
+        }
+        const headerSecret = request.headers.get('X-Admin-Secret') || request.headers.get('X-DevSpace-Admin-Secret');
+        const authHeader = request.headers.get('Authorization');
+        const bearerSecret = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined;
+        const candidate = headerSecret || bearerSecret;
+        if (!candidate) {
+            return Response.json({ error: 'AUTH_REQUIRED', message: 'Admin credential required (X-Admin-Secret header)' }, { status: 401, headers: this.corsHeaders() });
+        }
+        // Explicitly reject token-signing master secret when used as admin credential
+        if (this.env.MASTER_SECRET && this.timingSafeEqualStr(candidate, this.env.MASTER_SECRET)) {
+            return Response.json({ error: 'FORBIDDEN: token signing master secret cannot be used as admin credential' }, { status: 403, headers: this.corsHeaders() });
+        }
+        if (!this.timingSafeEqualStr(candidate, adminSecret)) {
+            return Response.json({ error: 'AUTH_INVALID', message: 'Invalid admin credential' }, { status: 401, headers: this.corsHeaders() });
+        }
+        return undefined; // Authorized!
     }
     async parseJsonRequest(request) {
         try {
@@ -554,12 +588,9 @@ class GatewayDurableObject {
                 return Response.json({ ok: true });
             }
             if ((url.pathname === '/admin/health' || url.pathname === '/api/admin/health') && request.method === 'GET') {
-                const auth = await this.authenticate(request);
-                if (auth.error)
-                    return auth.error;
-                if (!scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin:health')) {
-                    return Response.json({ error: 'FORBIDDEN: admin:health scope required' }, { status: 403 });
-                }
+                const adminAuthError = this.authenticateAdmin(request);
+                if (adminAuthError)
+                    return adminAuthError;
                 const r2GuardState = this.r2Storage.getGuard()?.getState();
                 const r2Limits = this.r2Storage.getGuard()?.getLimits();
                 return Response.json({
@@ -589,54 +620,48 @@ class GatewayDurableObject {
                 });
             }
             if ((url.pathname === '/admin/kill-switch' || url.pathname === '/api/admin/kill-switch') && request.method === 'GET') {
-                const auth = await this.authenticate(request);
-                if (auth.error)
-                    return auth.error;
-                if (!scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin:health') && !scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin') && !scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin:kill-switch')) {
-                    return Response.json({ error: 'FORBIDDEN: admin scope required' }, { status: 403 });
-                }
+                const adminAuthError = this.authenticateAdmin(request);
+                if (adminAuthError)
+                    return adminAuthError;
                 return Response.json({ state: this.killSwitch.getState() });
             }
             if ((url.pathname === '/admin/kill-switch' || url.pathname === '/api/admin/kill-switch') && request.method === 'POST') {
-                const auth = await this.authenticate(request);
-                if (auth.error)
-                    return auth.error;
-                if (!scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin:health') && !scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin') && !scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin:kill-switch')) {
-                    return Response.json({ error: 'FORBIDDEN: admin scope required' }, { status: 403 });
-                }
+                const adminAuthError = this.authenticateAdmin(request);
+                if (adminAuthError)
+                    return adminAuthError;
                 const body = await request.json();
                 const action = body.action || '';
                 const reason = body.reason || 'Admin action';
                 const targetId = body.targetId || '';
                 if (action === 'EMERGENCY_STOP') {
-                    this.killSwitch.triggerGlobalEmergencyStop(reason);
+                    await this.killSwitch.triggerGlobalEmergencyStop(reason);
                 }
                 else if (action === 'CLEAR_STOP') {
-                    this.killSwitch.resetGlobalEmergencyStop();
+                    await this.killSwitch.resetGlobalEmergencyStop();
                 }
                 else if (action === 'REVOKE_DEVICE' && targetId) {
-                    this.killSwitch.revokeDevice(targetId, reason);
+                    await this.killSwitch.revokeDevice(targetId, reason);
                 }
                 else if (action === 'REVOKE_CLIENT' && targetId) {
-                    this.killSwitch.revokeClient(targetId, reason);
+                    await this.killSwitch.revokeClient(targetId, reason);
                 }
                 else if (action === 'DISABLE_LOCAL') {
-                    this.killSwitch.setLocalAgentExecutionDisabled(true);
+                    await this.killSwitch.setLocalAgentExecutionDisabled(true);
                 }
                 else if (action === 'ENABLE_LOCAL') {
-                    this.killSwitch.setLocalAgentExecutionDisabled(false);
+                    await this.killSwitch.setLocalAgentExecutionDisabled(false);
                 }
                 else if (action === 'DISABLE_KAGGLE') {
-                    this.killSwitch.setKaggleExecutionDisabled(true);
+                    await this.killSwitch.setKaggleExecutionDisabled(true);
                 }
                 else if (action === 'ENABLE_KAGGLE') {
-                    this.killSwitch.setKaggleExecutionDisabled(false);
+                    await this.killSwitch.setKaggleExecutionDisabled(false);
                 }
                 else if (action === 'DISABLE_SWARM') {
-                    this.killSwitch.setSwarmExecutionDisabled(true);
+                    await this.killSwitch.setSwarmExecutionDisabled(true);
                 }
                 else if (action === 'ENABLE_SWARM') {
-                    this.killSwitch.setSwarmExecutionDisabled(false);
+                    await this.killSwitch.setSwarmExecutionDisabled(false);
                 }
                 else {
                     return Response.json({ error: 'INVALID_ACTION', action }, { status: 400 });
@@ -886,22 +911,6 @@ class GatewayDurableObject {
     async webSocketClose(_ws, _code, _reason) { }
     async authenticate(request, requireMcpAccess = false) {
         const authHeader = request.headers.get('Authorization');
-        const adminSecretHeader = request.headers.get('X-Admin-Secret') || request.headers.get('X-DevSpace-Admin-Secret');
-        if (this.env.MASTER_SECRET) {
-            const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined;
-            if ((bearerToken && bearerToken === this.env.MASTER_SECRET) || (adminSecretHeader && adminSecretHeader === this.env.MASTER_SECRET)) {
-                return {
-                    payload: {
-                        tokenId: 'master-admin-token',
-                        subjectId: 'admin',
-                        type: 'client',
-                        scopes: ['admin', 'admin:health', 'admin:kill-switch', 'tasks:read', 'tasks:submit', 'artifacts:read', 'mcp:access'],
-                        issuedAt: Date.now(),
-                        expiresAt: Date.now() + 3600000
-                    }
-                };
-            }
-        }
         if (!authHeader?.startsWith('Bearer ')) {
             return {
                 error: new Response(JSON.stringify({ error: 'AUTH_REQUIRED', message: 'OAuth Bearer token required' }), {

@@ -52,14 +52,24 @@ export class KillSwitch {
             disableLocalAgentExecution: !!persisted.disableLocalAgentExecution,
             disableKaggleExecution: !!persisted.disableKaggleExecution,
             disableSwarmExecution: !!persisted.disableSwarmExecution,
-            revokedDeviceIds: Array.isArray(persisted.revokedDeviceIds) ? persisted.revokedDeviceIds : [],
-            revokedClientIds: Array.isArray(persisted.revokedClientIds) ? persisted.revokedClientIds : [],
+            revokedDeviceIds: Array.isArray(persisted.revokedDeviceIds) ? [...persisted.revokedDeviceIds] : [],
+            revokedClientIds: Array.isArray(persisted.revokedClientIds) ? [...persisted.revokedClientIds] : [],
             lastTriggeredAt: persisted.lastTriggeredAt,
             reason: persisted.reason
           };
         }
       } catch (err) {
-        console.error('Failed to hydrate durable kill switch state:', err);
+        console.error('Failed to hydrate durable kill switch state (failing closed):', err);
+        this.state = {
+          globalEmergencyStop: true,
+          disableLocalAgentExecution: true,
+          disableKaggleExecution: true,
+          disableSwarmExecution: true,
+          revokedDeviceIds: [],
+          revokedClientIds: [],
+          lastTriggeredAt: Date.now(),
+          reason: 'KILL_SWITCH_STATE_UNAVAILABLE: durable storage read failure during hydration'
+        };
       }
     }
   }
@@ -70,74 +80,111 @@ export class KillSwitch {
         const raw = fs.readFileSync(this.filePath, 'utf-8');
         this.state = JSON.parse(raw);
       } catch (err) {
-        console.error('Failed to load kill switch state:', err);
+        console.error('Failed to load kill switch state (failing closed):', err);
+        this.state = {
+          globalEmergencyStop: true,
+          disableLocalAgentExecution: true,
+          disableKaggleExecution: true,
+          disableSwarmExecution: true,
+          revokedDeviceIds: [],
+          revokedClientIds: [],
+          lastTriggeredAt: Date.now(),
+          reason: 'KILL_SWITCH_STATE_UNAVAILABLE: file read failure during load'
+        };
       }
     }
   }
 
-  private save() {
+  private async persistNextState(nextState: KillSwitchState): Promise<void> {
     if (this.filePath) {
-      try {
-        fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), 'utf-8');
-      } catch (err) {
-        console.error('Failed to persist kill switch state to file:', err);
-      }
+      fs.writeFileSync(this.filePath, JSON.stringify(nextState, null, 2), 'utf-8');
     }
     if (this.storageAdapter) {
-      void this.storageAdapter.saveKillSwitchState({ ...this.state }).catch(err => {
-        console.error('Failed to persist durable kill switch state:', err);
-      });
+      await this.storageAdapter.saveKillSwitchState({ ...nextState });
     }
+    // Only commit in-memory state after durable persistence succeeds
+    this.state = nextState;
   }
 
   public getState(): KillSwitchState {
     return { ...this.state };
   }
 
-  public triggerGlobalEmergencyStop(reason = 'Global emergency stop triggered'): void {
-    this.state.globalEmergencyStop = true;
-    this.state.lastTriggeredAt = Date.now();
-    this.state.reason = reason;
-    this.save();
-  }
-
-  public resetGlobalEmergencyStop(): void {
-    this.state.globalEmergencyStop = false;
-    this.state.lastTriggeredAt = Date.now();
-    this.state.reason = 'Emergency stop cleared';
-    this.save();
-  }
-
-  public setLocalAgentExecutionDisabled(disabled: boolean): void {
-    this.state.disableLocalAgentExecution = disabled;
-    this.save();
-  }
-
-  public setKaggleExecutionDisabled(disabled: boolean): void {
-    this.state.disableKaggleExecution = disabled;
-    this.save();
-  }
-
-  public setSwarmExecutionDisabled(disabled: boolean): void {
-    this.state.disableSwarmExecution = disabled;
-    this.save();
-  }
-
-  public revokeDevice(deviceId: string, reason?: string): void {
-    if (!this.state.revokedDeviceIds.includes(deviceId)) {
-      this.state.revokedDeviceIds.push(deviceId);
-      this.state.lastTriggeredAt = Date.now();
-      this.state.reason = `Device ${deviceId} revoked: ${reason || 'unspecified'}`;
-      this.save();
+  public async triggerGlobalEmergencyStop(reason = 'Global emergency stop triggered'): Promise<void> {
+    const nextState: KillSwitchState = {
+      ...this.state,
+      globalEmergencyStop: true,
+      lastTriggeredAt: Date.now(),
+      reason
+    };
+    try {
+      await this.persistNextState(nextState);
+    } catch (err) {
+      // For EMERGENCY_STOP specifically, fail closed in memory if persistence failed
+      this.state.globalEmergencyStop = true;
+      this.state.reason = reason;
+      throw err;
     }
   }
 
-  public revokeClient(clientId: string, reason?: string): void {
+  public async resetGlobalEmergencyStop(): Promise<void> {
+    const nextState: KillSwitchState = {
+      ...this.state,
+      globalEmergencyStop: false,
+      lastTriggeredAt: Date.now(),
+      reason: 'Emergency stop cleared'
+    };
+    await this.persistNextState(nextState);
+  }
+
+  public async setLocalAgentExecutionDisabled(disabled: boolean): Promise<void> {
+    const nextState: KillSwitchState = {
+      ...this.state,
+      disableLocalAgentExecution: disabled,
+      lastTriggeredAt: Date.now()
+    };
+    await this.persistNextState(nextState);
+  }
+
+  public async setKaggleExecutionDisabled(disabled: boolean): Promise<void> {
+    const nextState: KillSwitchState = {
+      ...this.state,
+      disableKaggleExecution: disabled,
+      lastTriggeredAt: Date.now()
+    };
+    await this.persistNextState(nextState);
+  }
+
+  public async setSwarmExecutionDisabled(disabled: boolean): Promise<void> {
+    const nextState: KillSwitchState = {
+      ...this.state,
+      disableSwarmExecution: disabled,
+      lastTriggeredAt: Date.now()
+    };
+    await this.persistNextState(nextState);
+  }
+
+  public async revokeDevice(deviceId: string, reason?: string): Promise<void> {
+    if (!this.state.revokedDeviceIds.includes(deviceId)) {
+      const nextState: KillSwitchState = {
+        ...this.state,
+        revokedDeviceIds: [...this.state.revokedDeviceIds, deviceId],
+        lastTriggeredAt: Date.now(),
+        reason: `Device ${deviceId} revoked: ${reason || 'unspecified'}`
+      };
+      await this.persistNextState(nextState);
+    }
+  }
+
+  public async revokeClient(clientId: string, reason?: string): Promise<void> {
     if (!this.state.revokedClientIds.includes(clientId)) {
-      this.state.revokedClientIds.push(clientId);
-      this.state.lastTriggeredAt = Date.now();
-      this.state.reason = `Client ${clientId} revoked: ${reason || 'unspecified'}`;
-      this.save();
+      const nextState: KillSwitchState = {
+        ...this.state,
+        revokedClientIds: [...this.state.revokedClientIds, clientId],
+        lastTriggeredAt: Date.now(),
+        reason: `Client ${clientId} revoked: ${reason || 'unspecified'}`
+      };
+      await this.persistNextState(nextState);
     }
   }
 

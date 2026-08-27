@@ -40,7 +40,7 @@ export async function runSecurityTests(): Promise<{ passed: number; failed: numb
     passed++;
 
     // 2. Global Kill Switch Emergency Stop
-    server.killSwitch.triggerGlobalEmergencyStop('Security threat detected');
+    await server.killSwitch.triggerGlobalEmergencyStop('Security threat detected');
     await assert.rejects(
       async () => {
         await server.taskRouter.routeTaskSubmit(
@@ -59,7 +59,7 @@ export async function runSecurityTests(): Promise<{ passed: number; failed: numb
     passed++;
 
     // Clear stop
-    server.killSwitch.resetGlobalEmergencyStop();
+    await server.killSwitch.resetGlobalEmergencyStop();
 
     // 3. Prompt Injection Defense Test:
     // Malicious text in prompt attempting to trick backend into bypassing scopes

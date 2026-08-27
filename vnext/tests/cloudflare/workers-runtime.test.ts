@@ -4,6 +4,7 @@ import { CloudflareR2ArtifactStorage, R2Bucket } from '../../src/cloudflare/r2-a
 import { CloudflareKaggleHttpClient } from '../../src/kaggle/http-client';
 import { GatewayDurableObject } from '../../src/cloudflare/gateway-durable-object';
 import { AuthManager } from '../../src/security/auth-manager';
+import { KillSwitch } from '../../src/security/kill-switch';
 
 class MockSqlStorage implements SqlStorage {
   private tables: Map<string, Map<string, any>> = new Map();
@@ -171,6 +172,7 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     passed++;
 
     const testMasterSecret = 'test-workers-secret-32-bytes-minimum-1234567890';
+    const testAdminSecret = 'test-dedicated-admin-secret-5678901234567890';
     const authManager = new AuthManager(testMasterSecret);
     const { token: clientToken } = authManager.generateToken('cf-client', 'client', ['mcp:access', 'tasks:submit', 'tasks:read', 'kaggle:submit', 'kaggle:read', 'local:read', 'local:test']);
     const kv = new Map<string, any>();
@@ -192,7 +194,8 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     const durableEnv = {
       GATEWAY_DO: {},
       ARTIFACTS_R2: mockR2,
-      MASTER_SECRET: testMasterSecret
+      MASTER_SECRET: testMasterSecret,
+      ADMIN_SECRET: testAdminSecret
       // No Kaggle credentials: CloudflareKaggleHttpClient intentionally runs in mock mode.
     };
 
@@ -206,9 +209,8 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     assert.strictEqual(healthBody.runtime, undefined);
     passed++;
 
-    const adminToken = authManager.generateToken('admin-tester', 'client', ['admin:health']).token;
     const adminReq = new Request('https://gateway.workers.dev/admin/health', {
-      headers: { Authorization: `Bearer ${adminToken}` }
+      headers: { 'X-Admin-Secret': testAdminSecret }
     });
     const adminRes = await durableObject.fetch(adminReq);
     assert.strictEqual(adminRes.status, 200);
@@ -272,7 +274,7 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     passed++;
 
     // 6. Durable Kill Switch survives DO instance replacement / restart
-    (durableObject as any).killSwitch.triggerGlobalEmergencyStop('Production incident simulation');
+    await (durableObject as any).killSwitch.triggerGlobalEmergencyStop('Production incident simulation');
     assert.strictEqual((durableObject as any).killSwitch.getState().globalEmergencyStop, true);
 
     const deniedSubmitReq = new Request('https://gateway.workers.dev/api/tasks', {
@@ -307,9 +309,9 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     assert.strictEqual(deniedAfterRestartRes.status, 400);
 
     // Test device and client revocation across restart
-    (restartedDo as any).killSwitch.resetGlobalEmergencyStop();
-    (restartedDo as any).killSwitch.revokeDevice('rogue-device-01', 'Security audit failure');
-    (restartedDo as any).killSwitch.revokeClient('compromised-client-02', 'Leaked token');
+    await (restartedDo as any).killSwitch.resetGlobalEmergencyStop();
+    await (restartedDo as any).killSwitch.revokeDevice('rogue-device-01', 'Security audit failure');
+    await (restartedDo as any).killSwitch.revokeClient('compromised-client-02', 'Leaked token');
 
     const restartedDo2 = new GatewayDurableObject(createMockCtx(), durableEnv);
     await (restartedDo2 as any).ready;
@@ -341,33 +343,89 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     assert.ok(!fullResponseText.includes(fakeSecret), 'Secret must NEVER be present in HTTP 500 response body');
     passed++;
 
-    // 8. Kill Switch Endpoint Authorization: Normal OAuth client rejected (403), Independent Admin allowed (200)
+    // 8. Strict Admin Secret Isolation & Permission Boundaries
+    // (a) X-Admin-Secret: MASTER_SECRET -> rejected (403 Forbidden)
+    const masterAsAdminReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testMasterSecret },
+      body: JSON.stringify({ action: 'EMERGENCY_STOP' })
+    });
+    const masterAsAdminRes = await durableObject.fetch(masterAsAdminReq);
+    assert.strictEqual(masterAsAdminRes.status, 403, 'MASTER_SECRET must NOT work as X-Admin-Secret');
+
+    // (b) Authorization: Bearer MASTER_SECRET -> rejected (401/403)
+    const masterBearerReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${testMasterSecret}` },
+      body: JSON.stringify({ action: 'EMERGENCY_STOP' })
+    });
+    const masterBearerRes = await durableObject.fetch(masterBearerReq);
+    assert.ok(masterBearerRes.status === 401 || masterBearerRes.status === 403, 'MASTER_SECRET must NOT work as Bearer admin');
+
+    // (c) Normal ChatGPT OAuth token calling /admin/kill-switch -> rejected (401/403)
     const normalKsReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
       body: JSON.stringify({ action: 'EMERGENCY_STOP' })
     });
     const normalKsRes = await durableObject.fetch(normalKsReq);
-    assert.strictEqual(normalKsRes.status, 403, 'Normal ChatGPT OAuth token must be rejected from admin kill switch');
+    assert.ok(normalKsRes.status === 401 || normalKsRes.status === 403, 'Normal ChatGPT OAuth token must be rejected from admin kill switch');
 
+    // (d) ADMIN_SECRET presented to /mcp -> rejected (401)
+    const adminOnMcpReq = new Request('https://gateway.workers.dev/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${testAdminSecret}` },
+      body: JSON.stringify({ method: 'tools/list' })
+    });
+    const adminOnMcpRes = await durableObject.fetch(adminOnMcpReq);
+    assert.strictEqual(adminOnMcpRes.status, 401, 'ADMIN_SECRET must NOT work as universal token on /mcp');
+
+    // (e) Correct ADMIN_SECRET on /admin/kill-switch -> allowed (200)
     const adminKsReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testMasterSecret },
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
       body: JSON.stringify({ action: 'EMERGENCY_STOP', reason: 'Admin unit test' })
     });
     const adminKsRes = await durableObject.fetch(adminKsReq);
-    assert.strictEqual(adminKsRes.status, 200, 'Independent admin credential must be allowed to execute Kill Switch');
+    assert.strictEqual(adminKsRes.status, 200, 'Independent ADMIN_SECRET must be allowed on Kill Switch');
     const adminKsJson = await adminKsRes.json() as any;
     assert.strictEqual(adminKsJson.ok, true);
 
-    // Clear stop with admin credential
+    // Clear stop with ADMIN_SECRET
     const clearKsReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testMasterSecret },
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
       body: JSON.stringify({ action: 'CLEAR_STOP' })
     });
     const clearKsRes = await durableObject.fetch(clearKsReq);
     assert.strictEqual(clearKsRes.status, 200);
+    passed++;
+
+    // 9. Fail-Closed Hydration & Persistence Failure Tests
+    // (a) Hydration storage failure -> fails closed
+    const brokenStorageAdapter = {
+      getKillSwitchState: async () => { throw new Error('Simulated SQLite disk corruption'); },
+      saveKillSwitchState: async () => {}
+    };
+    const failClosedKs = new KillSwitch(brokenStorageAdapter);
+    await failClosedKs.hydrate();
+    assert.strictEqual(failClosedKs.getState().globalEmergencyStop, true, 'Kill switch must fail closed if hydration fails');
+    assert.strictEqual(failClosedKs.isExecutionAllowed('local').allowed, false);
+    assert.strictEqual(failClosedKs.isExecutionAllowed('kaggle').allowed, false);
+
+    // (b) Mutation persistence failure -> throws and does not report success
+    const failingSaveStorage = {
+      getKillSwitchState: async () => undefined,
+      saveKillSwitchState: async () => { throw new Error('Simulated SQLite write error'); }
+    };
+    const failingSaveKs = new KillSwitch(failingSaveStorage);
+    let threw = false;
+    try {
+      await failingSaveKs.resetGlobalEmergencyStop();
+    } catch {
+      threw = true;
+    }
+    assert.strictEqual(threw, true, 'Mutation must throw if persistence fails');
     passed++;
   } catch (err: any) {
     console.error('Workers runtime test failed:', err);
