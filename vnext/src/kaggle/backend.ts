@@ -133,10 +133,19 @@ export class KaggleBackend {
             downloadUrl: `/api/artifacts/${encodeURIComponent(art.id)}`
           });
           resultSummary.outputFiles.push({ fileName, sizeBytes: art.sizeBytes });
+          if (fileName === 'stdout.log' || fileName === 'stderr.log') {
+            const logText = Buffer.isBuffer(content) ? content.toString('utf-8') : typeof content === 'string' ? content : '';
+            if (logText) {
+              const lines = logText.split('\n').filter(l => l.trim().length > 0);
+              this.taskStore.appendLogs(taskId, lines);
+            }
+          }
           if (fileName === 'result.json' || fileName === 'metrics.json') {
             try {
               const text = Buffer.isBuffer(content) ? content.toString('utf-8') : typeof content === 'string' ? content : '';
-              resultSummary.metrics = JSON.parse(text);
+              const parsed = JSON.parse(text);
+              resultSummary.metrics = parsed;
+              (resultSummary as any).result = parsed;
             } catch {}
           }
         } catch (err) { console.error('Failed to ingest Kaggle artifact:', err); }
