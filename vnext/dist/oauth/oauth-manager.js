@@ -193,7 +193,7 @@ class OAuthManager {
         if (computed !== codeRecord.codeChallenge)
             throw new Error('INVALID_GRANT: PKCE code_verifier challenge mismatch');
         await this.storage.deleteOAuthCode(params.code);
-        const scopes = codeRecord.scope.split(' ').filter((s) => exports.CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+        const scopes = codeRecord.scope.split(' ').filter((s) => exports.ALL_SUPPORTED_SCOPES.includes(s));
         const granted = scopes.length > 0 ? scopes : [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
         const access = this.authManager.generateToken(params.clientId, 'client', granted, 60 * 60 * 1000, {
             purpose: 'access_token', resource: codeRecord.resource, clientId: params.clientId
@@ -220,7 +220,7 @@ class OAuthManager {
         const boundResource = val.payload.metadata?.resource;
         if (boundResource !== this.expectedResource || (requestedResource && requestedResource !== boundResource))
             throw new Error('INVALID_TARGET: resource mismatch');
-        const granted = (val.payload.scopes || []).filter(s => exports.CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+        const granted = (val.payload.scopes || []).filter(s => exports.ALL_SUPPORTED_SCOPES.includes(s));
         const finalScopes = granted.length > 0 ? granted : [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
         this.authManager.revokeToken(val.payload.tokenId);
         await this.storage.revokeToken(val.payload.tokenId);
