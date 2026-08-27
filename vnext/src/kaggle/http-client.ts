@@ -50,10 +50,12 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
 
     try {
       const url = `${this.baseUrl}/kernels/push`;
+      const fullSlug = payload.kernelSlug.includes('/') ? payload.kernelSlug : `${this.username}/${payload.kernelSlug}`;
+      const rawSlug = payload.kernelSlug.includes('/') ? payload.kernelSlug.split('/')[1] : payload.kernelSlug;
       const body = {
-        newTitle: payload.title || payload.kernelSlug,
+        newTitle: payload.title || rawSlug,
         text: payload.code,
-        slug: payload.kernelSlug,
+        slug: fullSlug,
         language: payload.language || 'python',
         kernelType: payload.kernelType || 'script',
         isPrivate: payload.isPrivate !== false,
@@ -84,9 +86,18 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
         return { success: false, kernelUrl: '', error: `KAGGLE_API_ERROR: HTTP ${res.status}: ${errorText}` };
       }
 
+      const resData = await res.json() as any;
+      if (resData.hasError || resData.error) {
+        return {
+          success: false,
+          kernelUrl: '',
+          error: `KAGGLE_PUSH_FAILED: ${resData.error || resData.errorNullable || 'Unknown push error'}`
+        };
+      }
+
       return {
         success: true,
-        kernelUrl: `https://www.kaggle.com/code/${this.username}/${payload.kernelSlug}`
+        kernelUrl: resData.url || `https://www.kaggle.com/code/${this.username}/${rawSlug}`
       };
     } catch (err: any) {
       return {
@@ -106,7 +117,8 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
     }
 
     try {
-      const url = `${this.baseUrl}/kernels/status?userName=${encodeURIComponent(this.username)}&kernelSlug=${encodeURIComponent(kernelSlug)}`;
+      const rawSlug = kernelSlug.includes('/') ? kernelSlug.split('/')[1] : kernelSlug;
+      const url = `${this.baseUrl}/kernels/status?userName=${encodeURIComponent(this.username)}&kernelSlug=${encodeURIComponent(rawSlug)}`;
       const res = await fetch(url, {
         method: 'GET',
         headers: {
@@ -162,7 +174,8 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
     }
 
     try {
-      const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(this.username)}&kernelSlug=${encodeURIComponent(kernelSlug)}`;
+      const rawSlug = kernelSlug.includes('/') ? kernelSlug.split('/')[1] : kernelSlug;
+      const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(this.username)}&kernelSlug=${encodeURIComponent(rawSlug)}`;
       const res = await fetch(url, {
         method: 'GET',
         headers: {
@@ -179,19 +192,37 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       const files: Array<{ name: string; content?: string; sizeBytes?: number }> = [];
 
       if (data.log) {
+        let logText = typeof data.log === 'string' ? data.log : '';
+        try {
+          const parsedLog = typeof data.log === 'string' ? JSON.parse(data.log) : data.log;
+          if (Array.isArray(parsedLog)) {
+            logText = parsedLog.map((item: any) => item.data || '').join('');
+          }
+        } catch {}
         files.push({
           name: 'stdout.log',
-          content: data.log,
-          sizeBytes: typeof data.log === 'string' ? data.log.length : 0
+          content: logText,
+          sizeBytes: Buffer.byteLength(logText)
         });
       }
 
       if (Array.isArray(data.files)) {
         for (const file of data.files) {
+          let content = file.content;
+          if (!content && file.url) {
+            try {
+              const fileRes = await fetch(file.url);
+              if (fileRes.ok) {
+                content = await fileRes.text();
+              }
+            } catch (err) {
+              console.error(`Failed to fetch file content from ${file.url}:`, err);
+            }
+          }
           files.push({
             name: file.fileName || file.name || 'output_file',
-            content: file.content,
-            sizeBytes: file.size || 0
+            content: content || '',
+            sizeBytes: content ? Buffer.byteLength(content) : (file.size || 0)
           });
         }
       }
