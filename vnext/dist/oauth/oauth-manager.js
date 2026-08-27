@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.OAuthManager = exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = void 0;
+exports.OAuthManager = exports.ALL_SUPPORTED_SCOPES = exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = [
     'offline_access',
@@ -16,6 +16,15 @@ exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = [
     'local:read',
     'local:test',
     'swarm:dispatch'
+];
+exports.ALL_SUPPORTED_SCOPES = [
+    ...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES,
+    'admin',
+    'admin:health',
+    'admin:kill-switch',
+    'local:write',
+    'local:git_status',
+    'tasks:cancel'
 ];
 function htmlEscape(value) {
     return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -126,7 +135,7 @@ class OAuthManager {
         if (!scope)
             return [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
         const requested = scope.split(/[\s,]+/).filter(Boolean);
-        const granted = [...new Set(requested.filter(s => exports.CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s)))];
+        const granted = [...new Set(requested.filter(s => exports.ALL_SUPPORTED_SCOPES.includes(s)))];
         if (granted.length === 0) {
             throw new Error('INVALID_SCOPE: no requested OAuth scopes are supported');
         }

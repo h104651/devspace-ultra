@@ -922,6 +922,24 @@ export class GatewayDurableObject {
 
   private async authenticate(request: Request, requireMcpAccess = false): Promise<{ payload?: TokenPayload; error?: Response }> {
     const authHeader = request.headers.get('Authorization');
+    const adminSecretHeader = request.headers.get('X-Admin-Secret') || request.headers.get('X-DevSpace-Admin-Secret');
+
+    if (this.env.MASTER_SECRET) {
+      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined;
+      if ((bearerToken && bearerToken === this.env.MASTER_SECRET) || (adminSecretHeader && adminSecretHeader === this.env.MASTER_SECRET)) {
+        return {
+          payload: {
+            tokenId: 'master-admin-token',
+            subjectId: 'admin',
+            type: 'client',
+            scopes: ['admin', 'admin:health', 'admin:kill-switch', 'tasks:read', 'tasks:submit', 'artifacts:read', 'mcp:access'],
+            issuedAt: Date.now(),
+            expiresAt: Date.now() + 3600000
+          }
+        };
+      }
+    }
+
     if (!authHeader?.startsWith('Bearer ')) {
       return {
         error: new Response(JSON.stringify({ error: 'AUTH_REQUIRED', message: 'OAuth Bearer token required' }), {

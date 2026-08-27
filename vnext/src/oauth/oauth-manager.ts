@@ -15,6 +15,16 @@ export const CHATGPT_LEAST_PRIVILEGE_SCOPES = [
   'swarm:dispatch'
 ];
 
+export const ALL_SUPPORTED_SCOPES = [
+  ...CHATGPT_LEAST_PRIVILEGE_SCOPES,
+  'admin',
+  'admin:health',
+  'admin:kill-switch',
+  'local:write',
+  'local:git_status',
+  'tasks:cancel'
+];
+
 export interface OAuthClientRegistration {
   clientId: string;
   clientSecret?: string;
@@ -149,7 +159,7 @@ export class OAuthManager {
   private sanitizeScopes(scope?: string): string[] {
     if (!scope) return [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
     const requested = scope.split(/[\s,]+/).filter(Boolean);
-    const granted = [...new Set(requested.filter(s => CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s)))];
+    const granted = [...new Set(requested.filter(s => ALL_SUPPORTED_SCOPES.includes(s)))];
     if (granted.length === 0) {
       throw new Error('INVALID_SCOPE: no requested OAuth scopes are supported');
     }
