@@ -1,4 +1,5 @@
 import { ArtifactMetadata } from '../types/artifacts';
+import { R2UsageGuard } from './r2-usage-guard';
 
 export interface R2Bucket {
   put(key: string, value: any, options?: any): Promise<any>;
@@ -18,9 +19,15 @@ function safeFilename(filename: string): string {
 
 export class CloudflareR2ArtifactStorage {
   private r2?: R2Bucket;
+  private guard?: R2UsageGuard;
 
-  constructor(r2Bucket?: R2Bucket) {
+  constructor(r2Bucket?: R2Bucket, guard?: R2UsageGuard) {
     this.r2 = r2Bucket;
+    this.guard = guard;
+  }
+
+  public getGuard(): R2UsageGuard | undefined {
+    return this.guard;
   }
 
   public objectKey(metadata: Pick<ArtifactMetadata, 'taskId' | 'id' | 'name'>): string {
@@ -72,6 +79,11 @@ export class CloudflareR2ArtifactStorage {
     const shouldStore = rawBuffer.byteLength >= INLINE_SIZE_THRESHOLD_BYTES || ALWAYS_OBJECT_STORAGE.has(metadata.type);
     if (!shouldStore) return undefined;
 
+    // Hard cost guard check BEFORE performing R2 network operation
+    if (this.guard) {
+      await this.guard.checkAndValidatePut(rawBuffer.byteLength);
+    }
+
     const key = this.objectKey(metadata);
     await this.r2.put(key, rawBuffer, {
       httpMetadata: metadata.mimeType ? { contentType: metadata.mimeType } : undefined,
@@ -82,17 +94,46 @@ export class CloudflareR2ArtifactStorage {
         originalName: metadata.name
       }
     });
+
+    if (this.guard) {
+      await this.guard.recordPutSuccess(rawBuffer.byteLength);
+    }
+
     return key;
   }
 
   public async getArtifactContent(r2Key: string): Promise<ArrayBuffer | null> {
     if (!this.r2) return null;
+
+    if (this.guard) {
+      await this.guard.checkAndValidateGet();
+    }
+
     const obj = await this.r2.get(r2Key);
     if (!obj) return null;
+
+    if (this.guard) {
+      await this.guard.recordGetSuccess();
+    }
+
     return obj.arrayBuffer();
   }
 
   public async getArtifact(metadata: ArtifactMetadata): Promise<ArrayBuffer | null> {
     return this.getArtifactContent(this.objectKey(metadata));
+  }
+
+  public async deleteArtifact(r2Key: string, sizeBytes?: number): Promise<void> {
+    if (!this.r2) return;
+
+    if (this.guard) {
+      await this.guard.checkAndValidateDelete();
+    }
+
+    await this.r2.delete(r2Key);
+
+    if (this.guard) {
+      await this.guard.recordDeleteSuccess(sizeBytes);
+    }
   }
 }

@@ -52,6 +52,11 @@ class CloudflareSqliteStorageAdapter {
         code TEXT PRIMARY KEY, clientId TEXT NOT NULL, redirectUri TEXT NOT NULL, codeChallenge TEXT,
         codeChallengeMethod TEXT, scope TEXT NOT NULL, state TEXT, resource TEXT, expiresAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS r2_usage_accounting (
+        id TEXT PRIMARY KEY, monthKey TEXT NOT NULL, storedBytes INTEGER NOT NULL,
+        objectCount INTEGER NOT NULL, classAOperations INTEGER NOT NULL,
+        classBOperations INTEGER NOT NULL, updatedAt INTEGER NOT NULL
+      );
     `);
         // Existing Durable Object databases created by the previous build need an
         // additive migration. Ignore duplicate-column errors on fresh databases.
@@ -198,5 +203,23 @@ class CloudflareSqliteStorageAdapter {
         return row ? { code: row.code, clientId: row.clientId, redirectUri: row.redirectUri, codeChallenge: row.codeChallenge || undefined, codeChallengeMethod: row.codeChallengeMethod || undefined, scope: row.scope, state: row.state || undefined, resource: row.resource || undefined, expiresAt: row.expiresAt } : undefined;
     }
     async deleteOAuthCode(code) { this.sql.exec('DELETE FROM oauth_codes WHERE code = ?', code); }
+    async getR2UsageAccounting() {
+        const row = this.getFirstRow('SELECT * FROM r2_usage_accounting WHERE id = ?', 'singleton');
+        if (!row)
+            return undefined;
+        return {
+            monthKey: row.monthKey,
+            storedBytes: Number(row.storedBytes || 0),
+            objectCount: Number(row.objectCount || 0),
+            classAOperations: Number(row.classAOperations || 0),
+            classBOperations: Number(row.classBOperations || 0),
+            updatedAt: Number(row.updatedAt || 0)
+        };
+    }
+    async saveR2UsageAccounting(record) {
+        this.sql.exec(`INSERT OR REPLACE INTO r2_usage_accounting (
+        id, monthKey, storedBytes, objectCount, classAOperations, classBOperations, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`, 'singleton', record.monthKey, record.storedBytes, record.objectCount, record.classAOperations, record.classBOperations, record.updatedAt || Date.now());
+    }
 }
 exports.CloudflareSqliteStorageAdapter = CloudflareSqliteStorageAdapter;

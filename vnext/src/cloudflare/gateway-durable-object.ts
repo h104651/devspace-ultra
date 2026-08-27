@@ -1,5 +1,6 @@
 import { CloudflareSqliteStorageAdapter } from './sqlite-storage-adapter';
 import { CloudflareR2ArtifactStorage, R2Bucket } from './r2-artifact-storage';
+import { R2UsageGuard } from './r2-usage-guard';
 import { CloudflareKaggleHttpClient } from '../kaggle/http-client';
 import { AuthManager } from '../security/auth-manager';
 import { ScopeChecker } from '../security/scope-checker';
@@ -36,6 +37,12 @@ export interface Env {
   KAGGLE_USERNAME?: string;
   KAGGLE_KEY?: string;
   KAGGLE_API_TOKEN?: string;
+  R2_MAX_TOTAL_BYTES?: string | number;
+  R2_MAX_OBJECT_BYTES?: string | number;
+  R2_MAX_OBJECT_COUNT?: string | number;
+  R2_MAX_CLASS_A_MONTH?: string | number;
+  R2_MAX_CLASS_B_MONTH?: string | number;
+  R2_RETENTION_DAYS?: string | number;
 }
 
 const DEFAULT_PUBLIC_BASE_URL = 'https://devspace-ultra-gateway.abdul-hsu.workers.dev';
@@ -79,7 +86,15 @@ export class GatewayDurableObject {
 
     this.baseUrl = (env.PUBLIC_BASE_URL || DEFAULT_PUBLIC_BASE_URL).replace(/\/+$/, '');
     this.storage = new CloudflareSqliteStorageAdapter(ctx.storage.sql);
-    this.r2Storage = new CloudflareR2ArtifactStorage(env.ARTIFACTS_R2);
+    const r2Guard = new R2UsageGuard(this.storage, {
+      maxTotalStoredBytes: env.R2_MAX_TOTAL_BYTES ? Number(env.R2_MAX_TOTAL_BYTES) : undefined,
+      maxSingleArtifactBytes: env.R2_MAX_OBJECT_BYTES ? Number(env.R2_MAX_OBJECT_BYTES) : undefined,
+      maxLiveObjectCount: env.R2_MAX_OBJECT_COUNT ? Number(env.R2_MAX_OBJECT_COUNT) : undefined,
+      maxClassAOperationsMonth: env.R2_MAX_CLASS_A_MONTH ? Number(env.R2_MAX_CLASS_A_MONTH) : undefined,
+      maxClassBOperationsMonth: env.R2_MAX_CLASS_B_MONTH ? Number(env.R2_MAX_CLASS_B_MONTH) : undefined,
+      retentionDays: env.R2_RETENTION_DAYS ? Number(env.R2_RETENTION_DAYS) : undefined
+    });
+    this.r2Storage = new CloudflareR2ArtifactStorage(env.ARTIFACTS_R2, r2Guard);
 
     let kaggleUser = env.KAGGLE_USERNAME;
     let kaggleKey = env.KAGGLE_KEY;
@@ -155,6 +170,11 @@ export class GatewayDurableObject {
   }
 
   private async initializeFromDurableStorage(): Promise<void> {
+    try {
+      await this.r2Storage.getGuard()?.hydrate();
+    } catch (err) {
+      console.error('Failed to hydrate R2 usage guard:', err);
+    }
     try {
       this.taskStore.hydrate(await this.storage.listTasks());
       this.taskStore.recoverStaleTasks();
@@ -556,11 +576,28 @@ export class GatewayDurableObject {
         if (!ScopeChecker.hasScope(auth.payload!.scopes, 'admin:health')) {
           return Response.json({ error: 'FORBIDDEN: admin:health scope required' }, { status: 403 });
         }
+        const r2GuardState = this.r2Storage.getGuard()?.getState();
+        const r2Limits = this.r2Storage.getGuard()?.getLimits();
         return Response.json({
           status: 'healthy',
           service: 'devspace-ultra-cloudflare-gateway',
           runtime: 'cloudflare-durable-objects-sqlite',
           r2Available: !!this.env.ARTIFACTS_R2,
+          r2Usage: r2GuardState ? {
+            monthKey: r2GuardState.monthKey,
+            storedBytes: r2GuardState.storedBytes,
+            objectCount: r2GuardState.objectCount,
+            classAOperations: r2GuardState.classAOperations,
+            classBOperations: r2GuardState.classBOperations
+          } : undefined,
+          r2Limits: r2Limits ? {
+            maxTotalStoredBytes: r2Limits.maxTotalStoredBytes,
+            maxSingleArtifactBytes: r2Limits.maxSingleArtifactBytes,
+            maxLiveObjectCount: r2Limits.maxLiveObjectCount,
+            maxClassAOperationsMonth: r2Limits.maxClassAOperationsMonth,
+            maxClassBOperationsMonth: r2Limits.maxClassBOperationsMonth,
+            retentionDays: r2Limits.retentionDays
+          } : undefined,
           kaggleConfigured: this.kaggleHttpClient.hasCredentials(),
           version: '2.0.1',
           connectedAgents: this.ctx.getWebSockets().length,

@@ -10,8 +10,13 @@ function safeFilename(filename) {
 }
 class CloudflareR2ArtifactStorage {
     r2;
-    constructor(r2Bucket) {
+    guard;
+    constructor(r2Bucket, guard) {
         this.r2 = r2Bucket;
+        this.guard = guard;
+    }
+    getGuard() {
+        return this.guard;
     }
     objectKey(metadata) {
         return `tasks/${metadata.taskId}/${metadata.id}_${safeFilename(metadata.name)}`;
@@ -48,6 +53,10 @@ class CloudflareR2ArtifactStorage {
         const shouldStore = rawBuffer.byteLength >= exports.INLINE_SIZE_THRESHOLD_BYTES || ALWAYS_OBJECT_STORAGE.has(metadata.type);
         if (!shouldStore)
             return undefined;
+        // Hard cost guard check BEFORE performing R2 network operation
+        if (this.guard) {
+            await this.guard.checkAndValidatePut(rawBuffer.byteLength);
+        }
         const key = this.objectKey(metadata);
         await this.r2.put(key, rawBuffer, {
             httpMetadata: metadata.mimeType ? { contentType: metadata.mimeType } : undefined,
@@ -58,18 +67,38 @@ class CloudflareR2ArtifactStorage {
                 originalName: metadata.name
             }
         });
+        if (this.guard) {
+            await this.guard.recordPutSuccess(rawBuffer.byteLength);
+        }
         return key;
     }
     async getArtifactContent(r2Key) {
         if (!this.r2)
             return null;
+        if (this.guard) {
+            await this.guard.checkAndValidateGet();
+        }
         const obj = await this.r2.get(r2Key);
         if (!obj)
             return null;
+        if (this.guard) {
+            await this.guard.recordGetSuccess();
+        }
         return obj.arrayBuffer();
     }
     async getArtifact(metadata) {
         return this.getArtifactContent(this.objectKey(metadata));
+    }
+    async deleteArtifact(r2Key, sizeBytes) {
+        if (!this.r2)
+            return;
+        if (this.guard) {
+            await this.guard.checkAndValidateDelete();
+        }
+        await this.r2.delete(r2Key);
+        if (this.guard) {
+            await this.guard.recordDeleteSuccess(sizeBytes);
+        }
     }
 }
 exports.CloudflareR2ArtifactStorage = CloudflareR2ArtifactStorage;

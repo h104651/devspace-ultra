@@ -12,9 +12,17 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["GatewayDurableObject"]
 
-# [[r2_buckets]]
-# binding = "ARTIFACTS_R2"
-# bucket_name = "devspace-ultra-artifacts"
+[[r2_buckets]]
+binding = "ARTIFACTS_R2"
+bucket_name = "devspace-ultra-artifacts"
+
+[vars]
+R2_MAX_TOTAL_BYTES = "2147483648"
+R2_MAX_OBJECT_BYTES = "20971520"
+R2_MAX_OBJECT_COUNT = "2000"
+R2_MAX_CLASS_A_MONTH = "100000"
+R2_MAX_CLASS_B_MONTH = "1000000"
+R2_RETENTION_DAYS = "7"
 
 [observability]
 enabled = true

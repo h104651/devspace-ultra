@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.GatewayDurableObject = void 0;
 const sqlite_storage_adapter_1 = require("./sqlite-storage-adapter");
 const r2_artifact_storage_1 = require("./r2-artifact-storage");
+const r2_usage_guard_1 = require("./r2-usage-guard");
 const http_client_1 = require("../kaggle/http-client");
 const auth_manager_1 = require("../security/auth-manager");
 const scope_checker_1 = require("../security/scope-checker");
@@ -88,7 +89,15 @@ class GatewayDurableObject {
         }
         this.baseUrl = (env.PUBLIC_BASE_URL || DEFAULT_PUBLIC_BASE_URL).replace(/\/+$/, '');
         this.storage = new sqlite_storage_adapter_1.CloudflareSqliteStorageAdapter(ctx.storage.sql);
-        this.r2Storage = new r2_artifact_storage_1.CloudflareR2ArtifactStorage(env.ARTIFACTS_R2);
+        const r2Guard = new r2_usage_guard_1.R2UsageGuard(this.storage, {
+            maxTotalStoredBytes: env.R2_MAX_TOTAL_BYTES ? Number(env.R2_MAX_TOTAL_BYTES) : undefined,
+            maxSingleArtifactBytes: env.R2_MAX_OBJECT_BYTES ? Number(env.R2_MAX_OBJECT_BYTES) : undefined,
+            maxLiveObjectCount: env.R2_MAX_OBJECT_COUNT ? Number(env.R2_MAX_OBJECT_COUNT) : undefined,
+            maxClassAOperationsMonth: env.R2_MAX_CLASS_A_MONTH ? Number(env.R2_MAX_CLASS_A_MONTH) : undefined,
+            maxClassBOperationsMonth: env.R2_MAX_CLASS_B_MONTH ? Number(env.R2_MAX_CLASS_B_MONTH) : undefined,
+            retentionDays: env.R2_RETENTION_DAYS ? Number(env.R2_RETENTION_DAYS) : undefined
+        });
+        this.r2Storage = new r2_artifact_storage_1.CloudflareR2ArtifactStorage(env.ARTIFACTS_R2, r2Guard);
         let kaggleUser = env.KAGGLE_USERNAME;
         let kaggleKey = env.KAGGLE_KEY;
         if (env.KAGGLE_API_TOKEN && (!kaggleUser || !kaggleKey)) {
@@ -145,6 +154,12 @@ class GatewayDurableObject {
         }
     }
     async initializeFromDurableStorage() {
+        try {
+            await this.r2Storage.getGuard()?.hydrate();
+        }
+        catch (err) {
+            console.error('Failed to hydrate R2 usage guard:', err);
+        }
         try {
             this.taskStore.hydrate(await this.storage.listTasks());
             this.taskStore.recoverStaleTasks();
@@ -539,11 +554,28 @@ class GatewayDurableObject {
                 if (!scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'admin:health')) {
                     return Response.json({ error: 'FORBIDDEN: admin:health scope required' }, { status: 403 });
                 }
+                const r2GuardState = this.r2Storage.getGuard()?.getState();
+                const r2Limits = this.r2Storage.getGuard()?.getLimits();
                 return Response.json({
                     status: 'healthy',
                     service: 'devspace-ultra-cloudflare-gateway',
                     runtime: 'cloudflare-durable-objects-sqlite',
                     r2Available: !!this.env.ARTIFACTS_R2,
+                    r2Usage: r2GuardState ? {
+                        monthKey: r2GuardState.monthKey,
+                        storedBytes: r2GuardState.storedBytes,
+                        objectCount: r2GuardState.objectCount,
+                        classAOperations: r2GuardState.classAOperations,
+                        classBOperations: r2GuardState.classBOperations
+                    } : undefined,
+                    r2Limits: r2Limits ? {
+                        maxTotalStoredBytes: r2Limits.maxTotalStoredBytes,
+                        maxSingleArtifactBytes: r2Limits.maxSingleArtifactBytes,
+                        maxLiveObjectCount: r2Limits.maxLiveObjectCount,
+                        maxClassAOperationsMonth: r2Limits.maxClassAOperationsMonth,
+                        maxClassBOperationsMonth: r2Limits.maxClassBOperationsMonth,
+                        retentionDays: r2Limits.retentionDays
+                    } : undefined,
                     kaggleConfigured: this.kaggleHttpClient.hasCredentials(),
                     version: '2.0.1',
                     connectedAgents: this.ctx.getWebSockets().length,
