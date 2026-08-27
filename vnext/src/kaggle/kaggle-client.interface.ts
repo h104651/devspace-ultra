@@ -32,4 +32,5 @@ export interface IKaggleClient {
   pullProject?(owner: string, slug: string, version?: number): Promise<{ metadata: any; source: string }>;
   getProjectOutputFiles?(owner: string, slug: string): Promise<{ files: KaggleOutputFile[]; log?: string }>;
   getProjectLogs?(owner: string, slug: string): Promise<{ logs: string[]; available: boolean }>;
+  downloadSingleOutputFile?(owner: string, slug: string, fileName?: string): Promise<{ file?: { name: string; content?: string | Buffer; sizeBytes?: number; url?: string }; totalFiles: number; allFileNames: string[]; log?: string; error?: string }>;
 }

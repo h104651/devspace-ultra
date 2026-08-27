@@ -12,6 +12,8 @@ export interface KaggleTaskPayload {
   datasetDataSources?: string[];
   competitionDataSources?: string[];
   kernelDataSources?: string[];
+  modelDataSources?: string[];
+  machineShape?: string;
   timeoutSeconds?: number;
   environmentVariables?: Record<string, string>;
 }

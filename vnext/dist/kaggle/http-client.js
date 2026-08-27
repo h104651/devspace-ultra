@@ -54,6 +54,10 @@ class CloudflareKaggleHttpClient {
                 competitionDataSources: payload.competitionDataSources || [],
                 kernelDataSources: payload.kernelDataSources || []
             };
+            if (payload.machineShape)
+                body.machineShape = payload.machineShape;
+            if (payload.modelDataSources && payload.modelDataSources.length > 0)
+                body.modelDataSources = payload.modelDataSources;
             const res = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -160,7 +164,7 @@ class CloudflareKaggleHttpClient {
     /**
      * Downloads kernel stdout/stderr and output files via pure HTTP REST API.
      */
-    async downloadKernelOutput(kernelSlug) {
+    async downloadKernelOutput(kernelSlug, targetDirOrR2Bucket) {
         if (this.isMockMode) {
             return {
                 success: true,
@@ -180,8 +184,9 @@ class CloudflareKaggleHttpClient {
             };
         }
         try {
+            const owner = kernelSlug.includes('/') ? kernelSlug.split('/')[0] : (typeof targetDirOrR2Bucket === 'string' && targetDirOrR2Bucket ? targetDirOrR2Bucket : this.username);
             const rawSlug = kernelSlug.includes('/') ? kernelSlug.split('/')[1] : kernelSlug;
-            const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(this.username)}&kernelSlug=${encodeURIComponent(rawSlug)}`;
+            const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(rawSlug)}`;
             const res = await fetch(url, {
                 method: 'GET',
                 headers: {
@@ -321,6 +326,9 @@ class CloudflareKaggleHttpClient {
      * Pulls current or known version source and metadata.
      */
     async pullProject(owner, slug, version) {
+        if (version !== undefined && version !== null) {
+            throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${version})`);
+        }
         if (this.isMockMode) {
             const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
             const mockSource = isNotebook
@@ -438,6 +446,115 @@ class CloudflareKaggleHttpClient {
         }
         catch {
             return { logs: [], available: false };
+        }
+    }
+    /**
+     * Downloads a single selected output file safely with pre-check on size.
+     */
+    async downloadSingleOutputFile(owner, slug, fileName) {
+        if (this.isMockMode) {
+            const mockFiles = {
+                'stdout.log': { name: 'stdout.log', content: 'Mock output stdout: Execution success\nLoss: 0.042', sizeBytes: 52 },
+                'metrics.json': { name: 'metrics.json', content: JSON.stringify({ accuracy: 0.985, val_loss: 0.042 }, null, 2), sizeBytes: 46 }
+            };
+            const requested = fileName || 'stdout.log';
+            const selected = mockFiles[requested] || Object.values(mockFiles)[0];
+            return {
+                file: selected,
+                totalFiles: Object.keys(mockFiles).length,
+                allFileNames: Object.keys(mockFiles),
+                log: 'Mock output stdout: Execution success\nLoss: 0.042'
+            };
+        }
+        try {
+            const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(slug)}`;
+            const res = await fetch(url, {
+                headers: { 'Authorization': this.getAuthHeader() }
+            });
+            if (res.status === 404) {
+                return { totalFiles: 0, allFileNames: [] };
+            }
+            if (!res.ok) {
+                const errText = await res.text();
+                return { totalFiles: 0, allFileNames: [], error: `Failed to fetch output: HTTP ${res.status}: ${errText}` };
+            }
+            const data = await res.json();
+            const availableFiles = Array.isArray(data.files) ? data.files : [];
+            const allFileNames = availableFiles.map((f) => f.fileName || f.name || 'output_file');
+            if (data.log && !allFileNames.includes('stdout.log')) {
+                allFileNames.unshift('stdout.log');
+            }
+            if (!allFileNames.length) {
+                return { totalFiles: 0, allFileNames: [] };
+            }
+            // Match requested file or default to stdout.log / first file
+            let matchedFile;
+            if (fileName) {
+                matchedFile = availableFiles.find((f) => (f.fileName || f.name || '').toLowerCase() === fileName.toLowerCase());
+            }
+            if (!matchedFile && (!fileName || fileName.toLowerCase() === 'stdout.log')) {
+                if (data.log) {
+                    let logText = typeof data.log === 'string' ? data.log : '';
+                    try {
+                        const parsedLog = typeof data.log === 'string' ? JSON.parse(data.log) : data.log;
+                        if (Array.isArray(parsedLog))
+                            logText = parsedLog.map((item) => item.data || '').join('');
+                    }
+                    catch { }
+                    return {
+                        file: {
+                            name: 'stdout.log',
+                            content: logText,
+                            sizeBytes: Buffer.byteLength(logText)
+                        },
+                        totalFiles: allFileNames.length,
+                        allFileNames,
+                        log: logText
+                    };
+                }
+            }
+            if (!matchedFile) {
+                matchedFile = availableFiles[0];
+            }
+            if (!matchedFile) {
+                return { totalFiles: allFileNames.length, allFileNames };
+            }
+            const targetName = matchedFile.fileName || matchedFile.name || 'output_file';
+            const targetSize = matchedFile.size || matchedFile.sizeBytes || 0;
+            // Pre-rejection check: > 20 MiB (20971520 bytes)
+            if (targetSize > 20971520) {
+                throw new Error(`KAGGLE_OUTPUT_TOO_LARGE: Output file "${targetName}" (${targetSize} bytes) exceeds the 20 MiB R2 single-object limit`);
+            }
+            let content = matchedFile.content;
+            if (!content && matchedFile.url) {
+                const fileRes = await fetch(matchedFile.url);
+                if (!fileRes.ok) {
+                    throw new Error(`Failed to fetch file content from ${matchedFile.url}: HTTP ${fileRes.status}`);
+                }
+                const arrayBuf = await fileRes.arrayBuffer();
+                if (arrayBuf.byteLength > 20971520) {
+                    throw new Error(`KAGGLE_OUTPUT_TOO_LARGE: Output file "${targetName}" (${arrayBuf.byteLength} bytes) exceeds the 20 MiB R2 single-object limit`);
+                }
+                content = Buffer.from(arrayBuf);
+            }
+            const finalSize = content ? (typeof content === 'string' ? Buffer.byteLength(content) : content.length) : targetSize;
+            return {
+                file: {
+                    name: targetName,
+                    content,
+                    sizeBytes: finalSize,
+                    url: matchedFile.url
+                },
+                totalFiles: allFileNames.length,
+                allFileNames,
+                log: typeof data.log === 'string' ? data.log : undefined
+            };
+        }
+        catch (err) {
+            if (err.message?.includes('KAGGLE_OUTPUT_TOO_LARGE')) {
+                throw err;
+            }
+            return { totalFiles: 0, allFileNames: [], error: err.message };
         }
     }
 }

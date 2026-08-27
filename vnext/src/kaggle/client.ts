@@ -228,6 +228,10 @@ export class KaggleClient {
   }
 
   public async pullProject(owner: string, slug: string, version?: number): Promise<{ metadata: any; source: string }> {
+    if (version !== undefined && version !== null) {
+      throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${version})`);
+    }
+
     const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
     const mockSource = isNotebook
       ? JSON.stringify({
@@ -271,5 +275,20 @@ export class KaggleClient {
 
   public async getProjectLogs(owner: string, slug: string): Promise<{ logs: string[]; available: boolean }> {
     return { logs: ['Mock log line 1', 'Mock log line 2'], available: true };
+  }
+
+  public async downloadSingleOutputFile(owner: string, slug: string, fileName?: string): Promise<{ file?: { name: string; content?: string | Buffer; sizeBytes?: number; url?: string }; totalFiles: number; allFileNames: string[]; log?: string }> {
+    const mockFiles: Record<string, { name: string; content: string; sizeBytes: number }> = {
+      'stdout.log': { name: 'stdout.log', content: 'Mock output stdout: Execution success\nLoss: 0.042', sizeBytes: 52 },
+      'metrics.json': { name: 'metrics.json', content: JSON.stringify({ accuracy: 0.985, val_loss: 0.042 }, null, 2), sizeBytes: 46 }
+    };
+    const requested = fileName || 'stdout.log';
+    const selected = mockFiles[requested] || Object.values(mockFiles)[0];
+    return {
+      file: selected,
+      totalFiles: Object.keys(mockFiles).length,
+      allFileNames: Object.keys(mockFiles),
+      log: 'Mock output stdout: Execution success\nLoss: 0.042'
+    };
   }
 }

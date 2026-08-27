@@ -253,12 +253,16 @@ export class McpHandlers {
   public async handleKaggleProjectSource(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'kaggle:read', 'tasks:read');
+    if (args.version !== undefined && args.version !== null) {
+      throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${args.version})`);
+    }
+
     const client = (this.gateway.kaggleBackend.getClient() as any);
     if (!client || typeof client.pullProject !== 'function') {
       throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project source is not supported by backend client');
     }
     const { owner, slug, ref } = parseKernelRef(args.kernelRef, client.getUsername());
-    const { metadata, source } = await client.pullProject(owner, slug, args.version);
+    const { metadata, source } = await client.pullProject(owner, slug);
     const rawSource = source || '';
     const sourceSha256 = crypto.createHash('sha256').update(rawSource).digest('hex');
     const projectFingerprint = computeProjectFingerprint({
@@ -275,7 +279,14 @@ export class McpHandlers {
       modelSources: metadata.modelDataSources
     });
 
-    const cells = parseNotebookCells(rawSource);
+    const cellOptions = {
+      includeCells: args.includeCells === true,
+      cellOffset: args.cellOffset,
+      cellLimit: args.cellLimit,
+      includeCellSource: args.includeCellSource === true,
+      maxCellSourceChars: args.maxCellSourceChars
+    };
+    const parsedCells = parseNotebookCells(rawSource, cellOptions);
     const offset = Math.max(0, Number(args.offset) || 0);
     const limit = Math.min(Math.max(1, Number(args.limit) || 50000), 100000);
     const chunk = rawSource.substring(offset, offset + limit);
@@ -284,15 +295,19 @@ export class McpHandlers {
     return {
       kernelRef: ref,
       requestedVersion: args.version,
-      kernelType: metadata.kernelType || (cells ? 'notebook' : 'script'),
-      sourceFormat: cells ? 'ipynb' : 'script',
+      kernelType: metadata.kernelType || (parsedCells ? 'notebook' : 'script'),
+      sourceFormat: parsedCells ? 'ipynb' : 'script',
       sourceSha256,
       projectFingerprint,
       totalLength: rawSource.length,
       offset,
       content: chunk,
       nextOffset,
-      cells: (offset === 0 && cells) ? cells : undefined
+      totalCells: parsedCells?.totalCells,
+      cellOffset: cellOptions.includeCells ? (Number(args.cellOffset) || 0) : undefined,
+      cellLimit: cellOptions.includeCells ? (Number(args.cellLimit) || 20) : undefined,
+      nextCellOffset: parsedCells?.nextCellOffset,
+      cells: parsedCells?.cells
     };
   }
 
@@ -317,11 +332,91 @@ export class McpHandlers {
     this.requireScope(auth, 'kaggle:read', 'tasks:read');
     const client = (this.gateway.kaggleBackend.getClient() as any);
     const { owner, slug, ref } = parseKernelRef(args.kernelRef, client.getUsername());
-    const outputRes = await client.downloadKernelOutput(slug);
+
+    // Use single output file fetch when available
+    if (typeof client.downloadSingleOutputFile === 'function') {
+      const res = await client.downloadSingleOutputFile(owner, slug, args.filePattern);
+      if (res.error?.includes('KAGGLE_OUTPUT_TOO_LARGE')) {
+        throw new Error(res.error);
+      }
+      if (!res.file) {
+        return {
+          kernelRef: ref,
+          totalFiles: res.totalFiles || 0,
+          allFileNames: res.allFileNames || [],
+          message: res.error || 'No output files available for this project'
+        };
+      }
+
+      // Hard check > 20 MiB
+      if (res.file.sizeBytes && res.file.sizeBytes > 20971520) {
+        throw new Error(`KAGGLE_OUTPUT_TOO_LARGE: Output file "${res.file.name}" (${res.file.sizeBytes} bytes) exceeds the 20 MiB R2 single-object limit`);
+      }
+
+      const isTextFile = /\.(log|txt|json|csv|py|md|html|tsv|xml|yaml|yml)$/i.test(res.file.name);
+      const isSmall = (res.file.sizeBytes || 0) < 262144; // < 256 KiB
+
+      if (isSmall && isTextFile) {
+        const textContent = typeof res.file.content === 'string'
+          ? res.file.content
+          : Buffer.isBuffer(res.file.content)
+            ? res.file.content.toString('utf-8')
+            : '';
+        const maxBytes = Math.min(Number(args.maxBytes) || 262144, 262144);
+        const isTruncated = textContent.length > maxBytes;
+        return {
+          kernelRef: ref,
+          fileName: res.file.name,
+          sizeBytes: res.file.sizeBytes || textContent.length,
+          content: isTruncated ? textContent.substring(0, maxBytes) : textContent,
+          isTruncated,
+          totalFiles: res.totalFiles,
+          allFileNames: res.allFileNames
+        };
+      }
+
+      // Large file (>= 256 KiB) or binary file -> Route through ArtifactStore & R2
+      const buf = Buffer.isBuffer(res.file.content)
+        ? res.file.content
+        : Buffer.from(typeof res.file.content === 'string' ? res.file.content : '');
+
+      if (buf.byteLength > 20971520) {
+        throw new Error(`KAGGLE_OUTPUT_TOO_LARGE: Output file "${res.file.name}" (${buf.byteLength} bytes) exceeds the 20 MiB R2 single-object limit`);
+      }
+
+      const ext = (res.file.name.includes('.') ? res.file.name.split('.').pop() || '' : '').toLowerCase();
+      const mimeType = ext === 'json' ? 'application/json' : ext === 'csv' ? 'text/csv' : ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'zip' ? 'application/zip' : ext === 'ipynb' ? 'application/x-ipynb+json' : 'application/octet-stream';
+      const artifactType: 'json' | 'csv' | 'binary' | 'image' | 'archive' | 'notebook' | 'log' = ext === 'json' ? 'json' : ext === 'csv' ? 'csv' : ext === 'png' || ext === 'jpg' || ext === 'jpeg' ? 'image' : ext === 'zip' || ext === 'tar' || ext === 'gz' ? 'archive' : ext === 'ipynb' ? 'notebook' : 'binary';
+      const art = this.gateway.artifactStore.saveArtifact(
+        'kaggle-project',
+        res.file.name,
+        buf,
+        artifactType,
+        mimeType
+      );
+
+      if ((this.gateway as any).r2Storage) {
+        await (this.gateway as any).r2Storage.putArtifact(art, buf);
+      }
+
+      return {
+        kernelRef: ref,
+        fileName: res.file.name,
+        sizeBytes: art.sizeBytes,
+        sha256: art.sha256,
+        artifactId: art.id,
+        downloadUrl: `/api/artifacts/${encodeURIComponent(art.id)}`,
+        totalFiles: res.totalFiles,
+        allFileNames: res.allFileNames
+      };
+    }
+
+    const outputRes = await client.downloadKernelOutput(slug, owner);
     if (!outputRes.success || !Array.isArray(outputRes.files) || outputRes.files.length === 0) {
       return {
         kernelRef: ref,
-        filesCount: 0,
+        totalFiles: 0,
+        allFileNames: [],
         message: outputRes.error || 'No output files available for this project'
       };
     }
@@ -334,7 +429,7 @@ export class McpHandlers {
     }
 
     const content = targetFile.content ? (Buffer.isBuffer(targetFile.content) ? targetFile.content.toString('utf-8') : String(targetFile.content)) : '';
-    const maxBytes = args.maxBytes || 1048576;
+    const maxBytes = args.maxBytes || 262144;
     const isTruncated = content.length > maxBytes;
     const returnContent = isTruncated ? content.substring(0, maxBytes) : content;
 
@@ -436,7 +531,7 @@ export class McpHandlers {
     }
 
     // Submit task reusing existing durable pipeline
-    const payload = {
+    const payload: any = {
       kernelSlug: ref,
       title: current.metadata.title || slug,
       code: newSource,
@@ -449,6 +544,8 @@ export class McpHandlers {
       competitionDataSources: current.metadata.competitionDataSources,
       kernelDataSources: current.metadata.kernelDataSources
     };
+    if (current.metadata.machineShape) payload.machineShape = current.metadata.machineShape;
+    if (current.metadata.modelDataSources && current.metadata.modelDataSources.length > 0) payload.modelDataSources = current.metadata.modelDataSources;
 
     const result = await this.gateway.taskRouter.routeTaskSubmit(
       {

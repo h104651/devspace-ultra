@@ -58,18 +58,45 @@ function computeProjectFingerprint(params) {
     return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 /**
- * Parses notebook cells from raw JSON string if valid .ipynb format.
+ * Parses notebook cells from raw JSON string with pagination and safe source capping.
  */
-function parseNotebookCells(rawSource) {
+function parseNotebookCells(rawSource, options = {}) {
     try {
         const nb = JSON.parse(rawSource);
         if (!nb || !Array.isArray(nb.cells))
             return undefined;
-        return nb.cells.map((c, index) => ({
-            index,
-            cellType: c.cell_type === 'markdown' ? 'markdown' : c.cell_type === 'raw' ? 'raw' : 'code',
-            source: Array.isArray(c.source) ? c.source.join('') : String(c.source || '')
-        }));
+        const totalCells = nb.cells.length;
+        if (!options.includeCells) {
+            return { totalCells };
+        }
+        const cellOffset = Math.max(0, Number(options.cellOffset) || 0);
+        const cellLimit = Math.min(Math.max(1, Number(options.cellLimit) || 20), 100);
+        const maxChars = Math.min(Math.max(1, Number(options.maxCellSourceChars) || 20000), 50000);
+        const selectedCells = nb.cells.slice(cellOffset, cellOffset + cellLimit);
+        const cellSummaries = selectedCells.map((c, relIndex) => {
+            const absIndex = cellOffset + relIndex;
+            const fullSource = Array.isArray(c.source) ? c.source.join('') : String(c.source || '');
+            const sourceLength = fullSource.length;
+            const sourceSha256 = crypto.createHash('sha256').update(fullSource).digest('hex');
+            const item = {
+                index: absIndex,
+                cellType: c.cell_type === 'markdown' ? 'markdown' : c.cell_type === 'raw' ? 'raw' : 'code',
+                sourceLength,
+                sourceSha256
+            };
+            if (options.includeCellSource) {
+                const isTruncated = fullSource.length > maxChars;
+                item.source = isTruncated ? fullSource.substring(0, maxChars) : fullSource;
+                item.sourceTruncated = isTruncated;
+            }
+            return item;
+        });
+        const nextCellOffset = (cellOffset + cellLimit < totalCells) ? (cellOffset + cellLimit) : undefined;
+        return {
+            totalCells,
+            cells: cellSummaries,
+            nextCellOffset
+        };
     }
     catch {
         return undefined;

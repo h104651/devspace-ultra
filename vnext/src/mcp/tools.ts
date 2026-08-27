@@ -62,8 +62,13 @@ export const KAGGLE_PROJECT_SOURCE_SCHEMA = {
   properties: {
     kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
     version: { type: 'number', description: 'Known historical version number if pulling specific version' },
-    offset: { type: 'number', minimum: 0, default: 0, description: 'Character offset for pagination' },
-    limit: { type: 'number', minimum: 1, maximum: 100000, default: 50000, description: 'Maximum characters to return in chunk (max 100000)' }
+    offset: { type: 'number', minimum: 0, default: 0, description: 'Character offset for raw content pagination' },
+    limit: { type: 'number', minimum: 1, maximum: 100000, default: 50000, description: 'Maximum characters to return in raw content chunk (max 100000)' },
+    includeCells: { type: 'boolean', default: false, description: 'Whether to include structured cell metadata' },
+    cellOffset: { type: 'number', minimum: 0, default: 0, description: 'Starting cell index for pagination' },
+    cellLimit: { type: 'number', minimum: 1, maximum: 100, default: 20, description: 'Maximum number of cells to return' },
+    includeCellSource: { type: 'boolean', default: false, description: 'Whether to include cell source text in the cell items' },
+    maxCellSourceChars: { type: 'number', minimum: 1, maximum: 50000, default: 20000, description: 'Maximum characters per cell source when includeCellSource is true' }
   },
   required: ['kernelRef'],
   additionalProperties: false

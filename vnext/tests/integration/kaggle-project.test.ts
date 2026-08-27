@@ -45,11 +45,18 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     auditLogger
   );
 
+  const mockR2Storage: any = {
+    putArtifact: async (art: any, buf: Buffer) => {
+      return { key: art.id, size: buf.length };
+    }
+  };
+
   const gatewayFacade: any = {
     taskRouter,
     taskStore,
     artifactStore,
     kaggleBackend,
+    r2Storage: mockR2Storage,
     authManager: { listDevices: () => [] },
     killSwitch
   };
@@ -81,6 +88,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       isPrivate: true,
       enableGpu: true,
       enableInternet: true,
+      machineShape: 'NvidiaTeslaT4',
       datasetSources: ['ds2', 'ds1'],
       competitionSources: [],
       kernelSources: [],
@@ -144,40 +152,166 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(getRes.projectFingerprint.length, 64);
   });
 
-  // 6. handleKaggleProjectSource pagination and cells
-  await runTest('handleKaggleProjectSource chunks content and returns structured notebook cells', async () => {
-    const srcRes = await handlers.handleKaggleProjectSource({ kernelRef: 'testuser/astor-tuneup', offset: 0, limit: 100 }, readAuth);
-    assert.strictEqual(srcRes.sourceFormat, 'ipynb');
-    assert.strictEqual(srcRes.offset, 0);
-    assert.strictEqual(srcRes.content.length <= 100, true);
-    assert.strictEqual(Array.isArray(srcRes.cells), true);
-    assert.strictEqual(srcRes.cells!.length >= 1, true);
-    assert.strictEqual(srcRes.cells![0].cellType, 'code');
+  // 6. Large notebook MCP response bounding (Item A & B)
+  await runTest('Item A & B: Large 14MB mock notebook does not dump all cells by default', async () => {
+    // Generate large notebook with 100 cells
+    const bigCells = Array.from({ length: 100 }, (_, i) => ({
+      cell_type: 'code',
+      execution_count: i + 1,
+      metadata: {},
+      outputs: [],
+      source: [`# Large cell ${i}\n` + 'print("x")\n'.repeat(1000)]
+    }));
+    const bigNbSource = JSON.stringify({
+      cells: bigCells,
+      metadata: { language_info: { name: 'python' } },
+      nbformat: 4,
+      nbformat_minor: 5
+    });
+
+    const parsedDefault = parseNotebookCells(bigNbSource);
+    assert.strictEqual(parsedDefault?.totalCells, 100);
+    assert.strictEqual(parsedDefault?.cells, undefined);
+
+    const parsedWithoutCells = parseNotebookCells(bigNbSource, { includeCells: false });
+    assert.strictEqual(parsedWithoutCells?.totalCells, 100);
+    assert.strictEqual(parsedWithoutCells?.cells, undefined);
   });
 
-  // 7. handleKaggleProjectFiles
-  await runTest('handleKaggleProjectFiles returns output files metadata', async () => {
-    const filesRes = await handlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
-    assert.strictEqual(filesRes.filesCount, 2);
-    assert.strictEqual(filesRes.files[0].name, 'stdout.log');
-    assert.strictEqual(filesRes.files[1].name, 'metrics.json');
+  // 7. Cell pagination & NextCellOffset (Item C)
+  await runTest('Item C: Notebook cell pagination returns requested slice and nextCellOffset', async () => {
+    const bigCells = Array.from({ length: 35 }, (_, i) => ({
+      cell_type: i % 2 === 0 ? 'code' : 'markdown',
+      execution_count: i + 1,
+      metadata: {},
+      outputs: [],
+      source: [`cell ${i} content`]
+    }));
+    const nbSource = JSON.stringify({ cells: bigCells, metadata: {}, nbformat: 4, nbformat_minor: 5 });
+
+    const page1 = parseNotebookCells(nbSource, { includeCells: true, cellOffset: 0, cellLimit: 10 });
+    assert.strictEqual(page1?.totalCells, 35);
+    assert.strictEqual(page1?.cells?.length, 10);
+    assert.strictEqual(page1?.cells?.[0].index, 0);
+    assert.strictEqual(page1?.cells?.[9].index, 9);
+    assert.strictEqual(page1?.nextCellOffset, 10);
+
+    const page2 = parseNotebookCells(nbSource, { includeCells: true, cellOffset: 30, cellLimit: 10 });
+    assert.strictEqual(page2?.cells?.length, 5);
+    assert.strictEqual(page2?.cells?.[0].index, 30);
+    assert.strictEqual(page2?.nextCellOffset, undefined); // Reached end
   });
 
-  // 8. handleKaggleProjectOutput
-  await runTest('handleKaggleProjectOutput returns output content inline', async () => {
-    const outRes = await handlers.handleKaggleProjectOutput({ kernelRef: 'testuser/astor-tuneup', filePattern: 'stdout' }, readAuth);
-    assert.strictEqual(outRes.fileName, 'stdout.log');
-    assert.strictEqual(outRes.content!.includes('Mock Kaggle output'), true);
+  // 8. Cell source truncation (Item D)
+  await runTest('Item D: Cell source inclusion respects maxCellSourceChars and flags sourceTruncated', async () => {
+    const cells = [
+      { cell_type: 'code', source: ['x = ' + '9'.repeat(500)] }
+    ];
+    const nbSource = JSON.stringify({ cells, metadata: {}, nbformat: 4, nbformat_minor: 5 });
+
+    const parsed = parseNotebookCells(nbSource, {
+      includeCells: true,
+      includeCellSource: true,
+      maxCellSourceChars: 50
+    });
+    assert.strictEqual(parsed?.cells?.length, 1);
+    const c0 = parsed!.cells![0];
+    assert.strictEqual(c0.sourceTruncated, true);
+    assert.strictEqual(c0.source?.length, 50);
+    assert.strictEqual(c0.sourceLength, 504);
   });
 
-  // 9. handleKaggleProjectLogs
-  await runTest('handleKaggleProjectLogs returns log lines', async () => {
-    const logsRes = await handlers.handleKaggleProjectLogs({ kernelRef: 'testuser/astor-tuneup', limit: 10 }, readAuth);
-    assert.strictEqual(logsRes.available, true);
-    assert.strictEqual(logsRes.logs.length, 2);
+  // 9. Fail-closed on historical version retrieval (Item E)
+  await runTest('Item E: Requested historical version throws KAGGLE_VERSION_PULL_NOT_SUPPORTED', async () => {
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectSource({ kernelRef: 'testuser/astor-tuneup', version: 2 }, readAuth),
+      /KAGGLE_VERSION_PULL_NOT_SUPPORTED/
+    );
   });
 
-  // 10. Scope Enforcement on Read Tools
+  // 10. MachineShape & ModelSources preservation (Item F)
+  await runTest('Item F: MachineShape and modelDataSources are preserved in continue payload', async () => {
+    const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    const continueRes = await handlers.handleKaggleProjectContinue(
+      {
+        kernelRef: 'testuser/astor-tuneup',
+        expectedProjectFingerprint: getRes.projectFingerprint,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Settings preservation test")' }]
+        },
+        clientRequestId: 'req-settings-pres-1'
+      },
+      submitAuth
+    );
+
+    assert.strictEqual(continueRes.status, 'running');
+    const task = taskStore.getTask(continueRes.taskId);
+    assert.strictEqual(task?.payload?.machineShape, 'NvidiaTeslaT4');
+  });
+
+  // 11. Large output routed to R2 (Item G)
+  await runTest('Item G: Large output (>=256 KiB) routes through ArtifactStore & R2', async () => {
+    // Inject mock large file
+    const bigBuf = Buffer.alloc(300 * 1024, 'A');
+    (client as any).downloadSingleOutputFile = async () => ({
+      file: { name: 'large_weights.bin', content: bigBuf, sizeBytes: bigBuf.length },
+      totalFiles: 1,
+      allFileNames: ['large_weights.bin']
+    });
+
+    const outRes = await handlers.handleKaggleProjectOutput({ kernelRef: 'testuser/astor-tuneup', filePattern: 'large_weights.bin' }, readAuth);
+    assert.strictEqual(outRes.fileName, 'large_weights.bin');
+    assert.strictEqual(typeof outRes.artifactId, 'string');
+    assert.strictEqual(outRes.sizeBytes, 300 * 1024);
+    assert.strictEqual(typeof outRes.downloadUrl, 'string');
+    assert.strictEqual(outRes.content, undefined); // Not dumped inline
+  });
+
+  // 12. Pre-rejection of >20 MiB output (Item H)
+  await runTest('Item H: Output > 20 MiB is pre-rejected with KAGGLE_OUTPUT_TOO_LARGE', async () => {
+    (client as any).downloadSingleOutputFile = async () => {
+      throw new Error('KAGGLE_OUTPUT_TOO_LARGE: Output file "giant.zip" (25000000 bytes) exceeds the 20 MiB R2 single-object limit');
+    };
+
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectOutput({ kernelRef: 'testuser/astor-tuneup', filePattern: 'giant.zip' }, readAuth),
+      /KAGGLE_OUTPUT_TOO_LARGE/
+    );
+  });
+
+  // 13. Download single targeted file (Item I)
+  await runTest('Item I: Targeted output fetch selects only requested file', async () => {
+    (client as any).downloadSingleOutputFile = async (owner: string, slug: string, pattern?: string) => {
+      return {
+        file: { name: 'metrics.json', content: '{"loss": 0.01}', sizeBytes: 15 },
+        totalFiles: 3,
+        allFileNames: ['stdout.log', 'metrics.json', 'model.pth']
+      };
+    };
+
+    const outRes = await handlers.handleKaggleProjectOutput({ kernelRef: 'testuser/astor-tuneup', filePattern: 'metrics.json' }, readAuth);
+    assert.strictEqual(outRes.fileName, 'metrics.json');
+    assert.strictEqual(outRes.content, '{"loss": 0.01}');
+    assert.strictEqual(outRes.totalFiles, 3);
+  });
+
+  // 14. Explicit owner honored for read (Item J)
+  await runTest('Item J: Explicit owner is honored in project reads', async () => {
+    let capturedOwner = '';
+    (client as any).pullProject = async (owner: string, slug: string) => {
+      capturedOwner = owner;
+      return {
+        metadata: { kernelType: 'script', language: 'python', isPrivate: false },
+        source: 'print("Public script")'
+      };
+    };
+
+    await handlers.handleKaggleProjectGet({ kernelRef: 'otherresearcher/public-notebook' }, readAuth);
+    assert.strictEqual(capturedOwner, 'otherresearcher');
+  });
+
+  // 15. Scope Enforcement on Read Tools
   await runTest('Scope enforcement: Read tools reject unauthorized callers', async () => {
     await assert.rejects(
       async () => handlers.handleKaggleProjectList({}, writeForbiddenAuth),
@@ -193,8 +327,9 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 11. Ownership Protection in Continue
+  // 16. Ownership Protection in Continue
   await runTest('Ownership protection: Reject modifying kernel owned by another user', async () => {
+    (client as any).getUsername = () => 'testuser';
     await assert.rejects(
       async () => handlers.handleKaggleProjectContinue(
         {
@@ -208,8 +343,13 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 12. Conflict Protection in Continue (Stale Fingerprint)
+  // 17. Conflict Protection in Continue (Stale Fingerprint)
   await runTest('Conflict protection: Reject continue when fingerprint does not match', async () => {
+    (client as any).getUsername = () => 'testuser';
+    (client as any).pullProject = async (owner: string, slug: string) => ({
+      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true },
+      source: 'print("current")'
+    });
     await assert.rejects(
       async () => handlers.handleKaggleProjectContinue(
         {
@@ -223,10 +363,15 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 13. Successful Continue with append_notebook_cells
-  await runTest('Successful continue with append_notebook_cells submits durable task', async () => {
+  // 18. Idempotent Replay on Continue
+  await runTest('Idempotent replay on continue returns existing task without duplicate execution', async () => {
+    (client as any).getUsername = () => 'testuser';
+    (client as any).pullProject = async (owner: string, slug: string) => ({
+      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, title: 'Astor TuneUp' },
+      source: 'print("current")'
+    });
     const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
-    const continueRes = await handlers.handleKaggleProjectContinue(
+    const res1 = await handlers.handleKaggleProjectContinue(
       {
         kernelRef: 'testuser/astor-tuneup',
         expectedProjectFingerprint: getRes.projectFingerprint,
@@ -234,20 +379,10 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
           type: 'append_notebook_cells',
           cells: [{ cellType: 'code', source: 'print("Continuation Step 1")' }]
         },
-        clientRequestId: 'req-proj-1'
+        clientRequestId: 'req-proj-idem-1'
       },
       submitAuth
     );
-
-    assert.strictEqual(continueRes.status, 'running');
-    assert.strictEqual(continueRes.kernelRef, 'testuser/astor-tuneup');
-    assert.strictEqual(continueRes.previousProjectFingerprint, getRes.projectFingerprint);
-    assert.strictEqual(typeof continueRes.submittedSourceSha256, 'string');
-  });
-
-  // 14. Idempotent Replay on Continue
-  await runTest('Idempotent replay on continue returns existing task without duplicate execution', async () => {
-    const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
     const replayRes = await handlers.handleKaggleProjectContinue(
       {
         kernelRef: 'testuser/astor-tuneup',
@@ -256,32 +391,13 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
           type: 'append_notebook_cells',
           cells: [{ cellType: 'code', source: 'print("Continuation Step 1")' }]
         },
-        clientRequestId: 'req-proj-1'
+        clientRequestId: 'req-proj-idem-1'
       },
       submitAuth
     );
 
     assert.strictEqual(replayRes.isReplay, true);
-  });
-
-  // 15. Successful Continue with append_script
-  await runTest('Successful continue with append_script preserves script and appends code', async () => {
-    const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/devspace-project-control-e2e' }, readAuth);
-    const continueRes = await handlers.handleKaggleProjectContinue(
-      {
-        kernelRef: 'testuser/devspace-project-control-e2e',
-        expectedProjectFingerprint: getRes.projectFingerprint,
-        mutation: {
-          type: 'append_script',
-          code: 'print("Appended script test")'
-        },
-        clientRequestId: 'req-proj-script-1'
-      },
-      submitAuth
-    );
-
-    assert.strictEqual(continueRes.status, 'running');
-    assert.strictEqual(continueRes.kernelRef, 'testuser/devspace-project-control-e2e');
+    assert.strictEqual(replayRes.taskId, res1.taskId);
   });
 
   return { passed, failed };

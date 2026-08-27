@@ -35,10 +35,13 @@ export interface KaggleProjectMetadata {
   projectFingerprint: string;
 }
 
-export interface KaggleNotebookCell {
+export interface KaggleNotebookCellSummary {
   index: number;
   cellType: 'code' | 'markdown' | 'raw';
-  source: string;
+  sourceLength: number;
+  sourceSha256: string;
+  source?: string;
+  sourceTruncated?: boolean;
 }
 
 export interface KaggleProjectSourceResult {
@@ -52,7 +55,11 @@ export interface KaggleProjectSourceResult {
   offset: number;
   content: string;
   nextOffset?: number;
-  cells?: KaggleNotebookCell[];
+  totalCells?: number;
+  cellOffset?: number;
+  cellLimit?: number;
+  nextCellOffset?: number;
+  cells?: KaggleNotebookCellSummary[];
 }
 
 export interface KaggleOutputFile {
@@ -73,9 +80,13 @@ export interface KaggleProjectOutputResult {
   fileName?: string;
   content?: string;
   sizeBytes: number;
+  sha256?: string;
   artifactId?: string;
   downloadUrl?: string;
   isTruncated?: boolean;
+  totalFiles?: number;
+  allFileNames?: string[];
+  message?: string;
 }
 
 export interface KaggleProjectLogsResult {
@@ -104,6 +115,7 @@ export interface KaggleProjectContinueResult {
   status: string;
   previousProjectFingerprint: string;
   submittedSourceSha256: string;
+  isReplay?: boolean;
   message?: string;
 }
 
@@ -140,17 +152,61 @@ export function computeProjectFingerprint(params: {
 }
 
 /**
- * Parses notebook cells from raw JSON string if valid .ipynb format.
+ * Parses notebook cells from raw JSON string with pagination and safe source capping.
  */
-export function parseNotebookCells(rawSource: string): KaggleNotebookCell[] | undefined {
+export function parseNotebookCells(
+  rawSource: string,
+  options: {
+    includeCells?: boolean;
+    cellOffset?: number;
+    cellLimit?: number;
+    includeCellSource?: boolean;
+    maxCellSourceChars?: number;
+  } = {}
+): { totalCells: number; cells?: KaggleNotebookCellSummary[]; nextCellOffset?: number } | undefined {
   try {
     const nb = JSON.parse(rawSource);
     if (!nb || !Array.isArray(nb.cells)) return undefined;
-    return nb.cells.map((c: any, index: number) => ({
-      index,
-      cellType: c.cell_type === 'markdown' ? 'markdown' : c.cell_type === 'raw' ? 'raw' : 'code',
-      source: Array.isArray(c.source) ? c.source.join('') : String(c.source || '')
-    }));
+
+    const totalCells = nb.cells.length;
+    if (!options.includeCells) {
+      return { totalCells };
+    }
+
+    const cellOffset = Math.max(0, Number(options.cellOffset) || 0);
+    const cellLimit = Math.min(Math.max(1, Number(options.cellLimit) || 20), 100);
+    const maxChars = Math.min(Math.max(1, Number(options.maxCellSourceChars) || 20000), 50000);
+    const selectedCells = nb.cells.slice(cellOffset, cellOffset + cellLimit);
+
+    const cellSummaries: KaggleNotebookCellSummary[] = selectedCells.map((c: any, relIndex: number) => {
+      const absIndex = cellOffset + relIndex;
+      const fullSource = Array.isArray(c.source) ? c.source.join('') : String(c.source || '');
+      const sourceLength = fullSource.length;
+      const sourceSha256 = crypto.createHash('sha256').update(fullSource).digest('hex');
+
+      const item: KaggleNotebookCellSummary = {
+        index: absIndex,
+        cellType: c.cell_type === 'markdown' ? 'markdown' : c.cell_type === 'raw' ? 'raw' : 'code',
+        sourceLength,
+        sourceSha256
+      };
+
+      if (options.includeCellSource) {
+        const isTruncated = fullSource.length > maxChars;
+        item.source = isTruncated ? fullSource.substring(0, maxChars) : fullSource;
+        item.sourceTruncated = isTruncated;
+      }
+
+      return item;
+    });
+
+    const nextCellOffset = (cellOffset + cellLimit < totalCells) ? (cellOffset + cellLimit) : undefined;
+
+    return {
+      totalCells,
+      cells: cellSummaries,
+      nextCellOffset
+    };
   } catch {
     return undefined;
   }

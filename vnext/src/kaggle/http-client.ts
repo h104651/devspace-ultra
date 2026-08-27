@@ -54,7 +54,7 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       const rawSlug = payload.kernelSlug.includes('/') ? payload.kernelSlug.split('/')[1] : payload.kernelSlug;
       const rawTitle = payload.title || rawSlug;
       const title = rawTitle.length > 50 ? rawTitle.substring(0, 50) : rawTitle;
-      const body = {
+      const body: any = {
         newTitle: title,
         text: payload.code,
         slug: fullSlug,
@@ -67,6 +67,8 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
         competitionDataSources: payload.competitionDataSources || [],
         kernelDataSources: payload.kernelDataSources || []
       };
+      if (payload.machineShape) body.machineShape = payload.machineShape;
+      if (payload.modelDataSources && payload.modelDataSources.length > 0) body.modelDataSources = payload.modelDataSources;
 
       const res = await fetch(url, {
         method: 'POST',
@@ -175,7 +177,7 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
   /**
    * Downloads kernel stdout/stderr and output files via pure HTTP REST API.
    */
-  public async downloadKernelOutput(kernelSlug: string): Promise<KaggleOutputResult> {
+  public async downloadKernelOutput(kernelSlug: string, targetDirOrR2Bucket?: any): Promise<KaggleOutputResult> {
     if (this.isMockMode) {
       return {
         success: true,
@@ -196,8 +198,9 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
     }
 
     try {
+      const owner = kernelSlug.includes('/') ? kernelSlug.split('/')[0] : (typeof targetDirOrR2Bucket === 'string' && targetDirOrR2Bucket ? targetDirOrR2Bucket : this.username);
       const rawSlug = kernelSlug.includes('/') ? kernelSlug.split('/')[1] : kernelSlug;
-      const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(this.username)}&kernelSlug=${encodeURIComponent(rawSlug)}`;
+      const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(rawSlug)}`;
       const res = await fetch(url, {
         method: 'GET',
         headers: {
@@ -346,6 +349,10 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
    * Pulls current or known version source and metadata.
    */
   public async pullProject(owner: string, slug: string, version?: number): Promise<{ metadata: any; source: string }> {
+    if (version !== undefined && version !== null) {
+      throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${version})`);
+    }
+
     if (this.isMockMode) {
       const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
       const mockSource = isNotebook
@@ -479,6 +486,130 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       return { logs, available: true };
     } catch {
       return { logs: [], available: false };
+    }
+  }
+
+  /**
+   * Downloads a single selected output file safely with pre-check on size.
+   */
+  public async downloadSingleOutputFile(
+    owner: string,
+    slug: string,
+    fileName?: string
+  ): Promise<{ file?: { name: string; content?: string | Buffer; sizeBytes?: number; url?: string }; totalFiles: number; allFileNames: string[]; log?: string; error?: string }> {
+    if (this.isMockMode) {
+      const mockFiles: Record<string, { name: string; content: string; sizeBytes: number }> = {
+        'stdout.log': { name: 'stdout.log', content: 'Mock output stdout: Execution success\nLoss: 0.042', sizeBytes: 52 },
+        'metrics.json': { name: 'metrics.json', content: JSON.stringify({ accuracy: 0.985, val_loss: 0.042 }, null, 2), sizeBytes: 46 }
+      };
+      const requested = fileName || 'stdout.log';
+      const selected = mockFiles[requested] || Object.values(mockFiles)[0];
+      return {
+        file: selected,
+        totalFiles: Object.keys(mockFiles).length,
+        allFileNames: Object.keys(mockFiles),
+        log: 'Mock output stdout: Execution success\nLoss: 0.042'
+      };
+    }
+
+    try {
+      const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(slug)}`;
+      const res = await fetch(url, {
+        headers: { 'Authorization': this.getAuthHeader() }
+      });
+
+      if (res.status === 404) {
+        return { totalFiles: 0, allFileNames: [] };
+      }
+
+      if (!res.ok) {
+        const errText = await res.text();
+        return { totalFiles: 0, allFileNames: [], error: `Failed to fetch output: HTTP ${res.status}: ${errText}` };
+      }
+
+      const data = await res.json() as any;
+      const availableFiles: any[] = Array.isArray(data.files) ? data.files : [];
+      const allFileNames: string[] = availableFiles.map((f: any) => f.fileName || f.name || 'output_file');
+
+      if (data.log && !allFileNames.includes('stdout.log')) {
+        allFileNames.unshift('stdout.log');
+      }
+
+      if (!allFileNames.length) {
+        return { totalFiles: 0, allFileNames: [] };
+      }
+
+      // Match requested file or default to stdout.log / first file
+      let matchedFile: any;
+      if (fileName) {
+        matchedFile = availableFiles.find((f: any) => (f.fileName || f.name || '').toLowerCase() === fileName.toLowerCase());
+      }
+      if (!matchedFile && (!fileName || fileName.toLowerCase() === 'stdout.log')) {
+        if (data.log) {
+          let logText = typeof data.log === 'string' ? data.log : '';
+          try {
+            const parsedLog = typeof data.log === 'string' ? JSON.parse(data.log) : data.log;
+            if (Array.isArray(parsedLog)) logText = parsedLog.map((item: any) => item.data || '').join('');
+          } catch {}
+          return {
+            file: {
+              name: 'stdout.log',
+              content: logText,
+              sizeBytes: Buffer.byteLength(logText)
+            },
+            totalFiles: allFileNames.length,
+            allFileNames,
+            log: logText
+          };
+        }
+      }
+      if (!matchedFile) {
+        matchedFile = availableFiles[0];
+      }
+
+      if (!matchedFile) {
+        return { totalFiles: allFileNames.length, allFileNames };
+      }
+
+      const targetName = matchedFile.fileName || matchedFile.name || 'output_file';
+      const targetSize = matchedFile.size || matchedFile.sizeBytes || 0;
+
+      // Pre-rejection check: > 20 MiB (20971520 bytes)
+      if (targetSize > 20971520) {
+        throw new Error(`KAGGLE_OUTPUT_TOO_LARGE: Output file "${targetName}" (${targetSize} bytes) exceeds the 20 MiB R2 single-object limit`);
+      }
+
+      let content: Buffer | string | undefined = matchedFile.content;
+      if (!content && matchedFile.url) {
+        const fileRes = await fetch(matchedFile.url);
+        if (!fileRes.ok) {
+          throw new Error(`Failed to fetch file content from ${matchedFile.url}: HTTP ${fileRes.status}`);
+        }
+        const arrayBuf = await fileRes.arrayBuffer();
+        if (arrayBuf.byteLength > 20971520) {
+          throw new Error(`KAGGLE_OUTPUT_TOO_LARGE: Output file "${targetName}" (${arrayBuf.byteLength} bytes) exceeds the 20 MiB R2 single-object limit`);
+        }
+        content = Buffer.from(arrayBuf);
+      }
+
+      const finalSize = content ? (typeof content === 'string' ? Buffer.byteLength(content) : content.length) : targetSize;
+
+      return {
+        file: {
+          name: targetName,
+          content,
+          sizeBytes: finalSize,
+          url: matchedFile.url
+        },
+        totalFiles: allFileNames.length,
+        allFileNames,
+        log: typeof data.log === 'string' ? data.log : undefined
+      };
+    } catch (err: any) {
+      if (err.message?.includes('KAGGLE_OUTPUT_TOO_LARGE')) {
+        throw err;
+      }
+      return { totalFiles: 0, allFileNames: [], error: err.message };
     }
   }
 }

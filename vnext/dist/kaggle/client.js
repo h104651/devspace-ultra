@@ -239,6 +239,9 @@ class KaggleClient {
         return mockProjects.filter(p => p.title.toLowerCase().includes(search) || p.slug.toLowerCase().includes(search));
     }
     async pullProject(owner, slug, version) {
+        if (version !== undefined && version !== null) {
+            throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${version})`);
+        }
         const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
         const mockSource = isNotebook
             ? JSON.stringify({
@@ -278,6 +281,20 @@ class KaggleClient {
     }
     async getProjectLogs(owner, slug) {
         return { logs: ['Mock log line 1', 'Mock log line 2'], available: true };
+    }
+    async downloadSingleOutputFile(owner, slug, fileName) {
+        const mockFiles = {
+            'stdout.log': { name: 'stdout.log', content: 'Mock output stdout: Execution success\nLoss: 0.042', sizeBytes: 52 },
+            'metrics.json': { name: 'metrics.json', content: JSON.stringify({ accuracy: 0.985, val_loss: 0.042 }, null, 2), sizeBytes: 46 }
+        };
+        const requested = fileName || 'stdout.log';
+        const selected = mockFiles[requested] || Object.values(mockFiles)[0];
+        return {
+            file: selected,
+            totalFiles: Object.keys(mockFiles).length,
+            allFileNames: Object.keys(mockFiles),
+            log: 'Mock output stdout: Execution success\nLoss: 0.042'
+        };
     }
 }
 exports.KaggleClient = KaggleClient;
