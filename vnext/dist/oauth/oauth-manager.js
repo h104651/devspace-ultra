@@ -239,9 +239,16 @@ class OAuthManager {
 <html lang="en"><head><meta charset="UTF-8"><title>Authorize DevSpace Ultra vNext</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#f8fafc;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:16px}.card{background:#1e293b;border-radius:12px;max-width:480px;width:100%;padding:32px;border:1px solid #334155}h1{font-size:22px;margin-top:0;color:#38bdf8}p{font-size:14px;color:#94a3b8;line-height:1.5}.scope-box{background:#0f172a;border-radius:8px;padding:16px;margin:20px 0;border:1px solid #334155}.btn{display:block;width:100%;padding:12px;border-radius:8px;font-size:15px;font-weight:600;border:none;cursor:pointer}.btn-primary{background:#0284c7;color:white;margin-bottom:12px}.btn-secondary{background:transparent;color:#94a3b8;border:1px solid #475569}</style></head>
 <body><div class="card"><h1>🚀 DevSpace Ultra vNext</h1><p><strong>ChatGPT</strong> is requesting access to your DevSpace Ultra Gateway.</p><div class="scope-box"><ul>${scopeItemsHtml}</ul></div>
-<form method="POST" action="${htmlEscape(this.issuerUrl)}/oauth/authorize">
+<form id="authForm" method="POST" action="/oauth/authorize">
 ${hidden('client_id', params.clientId || '')}${hidden('redirect_uri', params.redirectUri || '')}${hidden('state', params.state || '')}${hidden('code_challenge', params.codeChallenge || '')}${hidden('code_challenge_method', params.codeChallengeMethod || 'S256')}${hidden('scope', params.scope || exports.CHATGPT_LEAST_PRIVILEGE_SCOPES.join(' '))}${hidden('resource', params.resource || this.expectedResource)}
-<button type="submit" class="btn btn-primary">Authorize & Connect</button><button type="button" class="btn btn-secondary" onclick="window.history.back()">Cancel</button></form></div></body></html>`;
+<button type="submit" class="btn btn-primary" id="submitBtn">Authorize & Connect</button><button type="button" class="btn btn-secondary" onclick="window.history.back()">Cancel</button></form>
+<script>
+document.getElementById('authForm').addEventListener('submit', function() {
+  var b = document.getElementById('submitBtn');
+  if (b) { b.innerText = 'Connecting...'; }
+});
+</script>
+</div></body></html>`;
     }
 }
 exports.OAuthManager = OAuthManager;
