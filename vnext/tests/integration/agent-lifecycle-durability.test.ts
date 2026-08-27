@@ -105,6 +105,167 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     assert.strictEqual(reloadedTask?.status, 'succeeded');
     assert.ok(reloadedTask?.result?.branch);
     passed++;
+
+    // =========================================================================
+    // REGRESSION TESTS: AGENT AUTH TRUST BOUNDARY & LEASE ENFORCEMENT
+    // =========================================================================
+    const WebSocketClient = (await import('ws')).default;
+
+    // Reg 1: Client OAuth token cannot AGENT_REGISTER
+    const clientToken = server.authManager.registerClient('Test OAuth Client', ['local:read', 'tasks:submit']).token;
+    const wsClientBad = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
+    const reg1Promise = new Promise<boolean>((resolve) => {
+      wsClientBad.on('open', () => {
+        wsClientBad.send(JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg1',
+          deviceId: 'fake-dev-1',
+          token: clientToken
+        }));
+      });
+      wsClientBad.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'ERROR' && msg.error?.includes('AUTH_FAILED')) resolve(true);
+      });
+      wsClientBad.on('close', () => resolve(true));
+      setTimeout(() => resolve(false), 1000);
+    });
+    assert.strictEqual(await reg1Promise, true, 'Client token must be rejected on AGENT_REGISTER');
+    passed++;
+
+    // Reg 2: Valid device token can register
+    const devA = server.authManager.registerDevice('Device Alpha', 'windows', ['local:read', 'local:test']);
+    const wsDevA = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
+    const reg2Promise = new Promise<boolean>((resolve) => {
+      wsDevA.on('open', () => {
+        wsDevA.send(JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg2',
+          deviceId: devA.deviceId,
+          token: devA.token
+        }));
+      });
+      wsDevA.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'AGENT_REGISTERED' && msg.deviceId === devA.deviceId) resolve(true);
+      });
+      setTimeout(() => resolve(false), 1000);
+    });
+    assert.strictEqual(await reg2Promise, true, 'Valid device token must register successfully');
+    passed++;
+
+    // Reg 3: Mismatched deviceId rejected
+    const wsMismatched = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
+    const reg3Promise = new Promise<boolean>((resolve) => {
+      wsMismatched.on('open', () => {
+        wsMismatched.send(JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg3',
+          deviceId: 'dev-spoofed-other-id',
+          token: devA.token
+        }));
+      });
+      wsMismatched.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'ERROR' && msg.error?.includes('mismatch')) resolve(true);
+      });
+      wsMismatched.on('close', () => resolve(true));
+      setTimeout(() => resolve(false), 1000);
+    });
+    assert.strictEqual(await reg3Promise, true, 'Mismatched deviceId must be rejected');
+    passed++;
+
+    // Reg 4: Device B registers with its own token
+    const devB = server.authManager.registerDevice('Device Beta', 'windows', ['local:write']);
+    const wsDevB = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
+    await new Promise<void>((resolve) => {
+      wsDevB.on('open', () => {
+        wsDevB.send(JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg4',
+          deviceId: devB.deviceId,
+          token: devB.token
+        }));
+      });
+      wsDevB.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'AGENT_REGISTERED') resolve();
+      });
+    });
+
+    // Reg 5: Unauthorized capability escalation rejected
+    // devA has ['local:read', 'local:test'], cannot claim task requiring 'local:write' even if polling with ['local:write']
+    const taskWrite = server.taskStore.createTask({
+      backend: 'local',
+      capability: 'local:write',
+      payload: { test: true }
+    });
+    wsDevA.send(JSON.stringify({
+      type: 'TASK_CLAIM_POLL',
+      messageId: 'poll-esc',
+      supportedCapabilities: ['local:write'] // Attempt escalation
+    }));
+    await new Promise(r => setTimeout(r, 100));
+    assert.strictEqual(server.taskStore.getTask(taskWrite.taskId)?.status, 'queued', 'DevA cannot claim local:write task');
+    passed++;
+
+    // DevB claims taskWrite
+    wsDevB.send(JSON.stringify({
+      type: 'TASK_CLAIM_POLL',
+      messageId: 'poll-b'
+    }));
+    await new Promise(r => setTimeout(r, 100));
+    const claimedByB = server.taskStore.getTask(taskWrite.taskId);
+    assert.strictEqual(claimedByB?.status, 'claimed');
+    assert.strictEqual(claimedByB?.lease?.claimedBy, devB.deviceId);
+
+    // Reg 6: Device A cannot ACK Device B task
+    const ackPromise = new Promise<boolean>((resolve) => {
+      const handler = (d: any) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'ERROR' && msg.error?.includes('LEASE_VIOLATION')) {
+          wsDevA.off('message', handler);
+          resolve(true);
+        }
+      };
+      wsDevA.on('message', handler);
+      wsDevA.send(JSON.stringify({
+        type: 'TASK_ACK',
+        messageId: 'ack-bad',
+        taskId: taskWrite.taskId,
+        deviceId: devB.deviceId // Spoofing deviceId in message
+      }));
+      setTimeout(() => resolve(false), 1000);
+    });
+    assert.strictEqual(await ackPromise, true, 'DevA cannot ACK task owned by DevB');
+    assert.strictEqual(server.taskStore.getTask(taskWrite.taskId)?.status, 'claimed');
+    passed++;
+
+    // Reg 7: Device A cannot complete Device B task
+    const completePromise = new Promise<boolean>((resolve) => {
+      const handler = (d: any) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'ERROR' && msg.error?.includes('LEASE_VIOLATION')) {
+          wsDevA.off('message', handler);
+          resolve(true);
+        }
+      };
+      wsDevA.on('message', handler);
+      wsDevA.send(JSON.stringify({
+        type: 'TASK_COMPLETE',
+        messageId: 'comp-bad',
+        taskId: taskWrite.taskId,
+        result: { spoofed: true },
+        deviceId: devB.deviceId // Spoofing deviceId in message
+      }));
+      setTimeout(() => resolve(false), 1000);
+    });
+    assert.strictEqual(await completePromise, true, 'DevA cannot complete task owned by DevB');
+    assert.strictEqual(server.taskStore.getTask(taskWrite.taskId)?.status, 'claimed');
+    passed++;
+
+    wsDevA.close();
+    wsDevB.close();
   } catch (err: any) {
     console.error('Durability test failed:', err);
     failed++;

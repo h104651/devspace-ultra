@@ -673,44 +673,134 @@ export class GatewayDurableObject {
     try {
       const text = typeof message === 'string' ? message : new TextDecoder().decode(message);
       const msg: GatewayMessage = JSON.parse(text);
+
       if (msg.type === 'AGENT_REGISTER') {
         const val = this.authManager.validateToken(msg.token);
-        if (!val.valid || (val.payload?.type !== 'device' && val.payload?.type !== 'client') || await this.storage.isTokenRevoked(val.payload.tokenId)) {
-          ws.send(JSON.stringify({ type: 'ERROR', error: 'AUTH_FAILED' }));
+        if (!val.valid || !val.payload || val.payload.type !== 'device' || await this.storage.isTokenRevoked(val.payload.tokenId)) {
+          ws.send(JSON.stringify({
+            type: 'ERROR',
+            error: `AUTH_FAILED: Device token required (received ${val.payload?.type || 'invalid'})`
+          }));
           ws.close(1008, 'Authentication failed');
           return;
         }
-        this.authManager.rememberAuthenticatedDevice(msg.token, msg.deviceId, msg.name, msg.capabilities, msg.platform as any);
-        (ws as any).serializeAttachment({ deviceId: msg.deviceId, name: msg.name, capabilities: msg.capabilities });
+
+        if (msg.deviceId && val.payload.subjectId !== msg.deviceId) {
+          ws.send(JSON.stringify({
+            type: 'ERROR',
+            error: `AUTH_FAILED: deviceId mismatch (token subject: ${val.payload.subjectId}, message deviceId: ${msg.deviceId})`
+          }));
+          ws.close(1008, 'Authentication failed');
+          return;
+        }
+
+        const authoritativeDeviceId = val.payload.subjectId;
+        const tokenCaps = val.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
+        const authorizedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
+          ? msg.capabilities.filter(c => tokenCaps.includes(c) || val.payload!.scopes.includes(c))
+          : (tokenCaps.length > 0 ? tokenCaps : ['local:read', 'local:write', 'local:test']);
+
+        this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, (msg.platform as any) || 'windows');
+        (ws as any).serializeAttachment({
+          deviceId: authoritativeDeviceId,
+          name: msg.name || authoritativeDeviceId,
+          capabilities: authorizedCaps
+        });
+
         ws.send(JSON.stringify({
           type: 'AGENT_REGISTERED',
-          messageId: crypto.randomUUID(),
+          messageId: (msg as any).messageId || crypto.randomUUID(),
           timestamp: Date.now(),
-          deviceId: msg.deviceId
+          deviceId: authoritativeDeviceId
         }));
         return;
       }
-      if (msg.type === 'AGENT_HEARTBEAT') {
-        ws.send(JSON.stringify({ type: 'AGENT_HEARTBEAT_ACK', messageId: crypto.randomUUID(), timestamp: Date.now() }));
+
+      const attachment = (ws as any).deserializeAttachment() as { deviceId: string; capabilities: string[]; name?: string } | null;
+      if (!attachment || !attachment.deviceId) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'AUTH_REQUIRED: Must authenticate with AGENT_REGISTER first' }));
+        ws.close(1008, 'Unauthorized');
         return;
       }
+
+      const authenticatedDeviceId = attachment.deviceId;
+      const authorizedCapabilities = attachment.capabilities || [];
+
+      if (msg.type === 'AGENT_HEARTBEAT') {
+        this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);
+        if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
+          for (const tid of msg.activeTaskIds) {
+            const task = this.taskStore.getTask(tid);
+            if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+              this.taskStore.renewLease(tid, authenticatedDeviceId);
+            }
+          }
+        }
+        ws.send(JSON.stringify({
+          type: 'AGENT_HEARTBEAT_ACK',
+          messageId: (msg as any).messageId || crypto.randomUUID(),
+          timestamp: Date.now()
+        }));
+        return;
+      }
+
       if (msg.type === 'TASK_CLAIM_POLL') {
         this.taskStore.recoverStaleTasks();
-        const task = this.taskStore.claimTask(msg.deviceId, msg.supportedCapabilities);
+        const task = this.taskStore.claimTask(authenticatedDeviceId, authorizedCapabilities);
         if (task) {
-          ws.send(JSON.stringify({ type: 'TASK_ASSIGNED', messageId: crypto.randomUUID(), timestamp: Date.now(), task }));
+          ws.send(JSON.stringify({
+            type: 'TASK_ASSIGNED',
+            messageId: (msg as any).messageId || crypto.randomUUID(),
+            timestamp: Date.now(),
+            task
+          }));
         }
         return;
       }
+
       if (msg.type === 'TASK_ACK') {
-        this.taskStore.acknowledgeTask(msg.taskId, msg.deviceId);
+        const task = this.taskStore.getTask(msg.taskId);
+        if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+          ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device' }));
+          return;
+        }
+        this.taskStore.acknowledgeTask(msg.taskId, authenticatedDeviceId);
         return;
       }
+
+      if (msg.type === 'TASK_PROGRESS') {
+        const task = this.taskStore.getTask(msg.taskId);
+        if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+          this.taskStore.startTask(msg.taskId, authenticatedDeviceId);
+          this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
+        }
+        return;
+      }
+
+      if (msg.type === 'TASK_LOG_APPEND') {
+        const task = this.taskStore.getTask(msg.taskId);
+        if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+          this.taskStore.appendLogs(msg.taskId, msg.lines);
+        }
+        return;
+      }
+
       if (msg.type === 'TASK_COMPLETE') {
+        const task = this.taskStore.getTask(msg.taskId);
+        if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+          ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device' }));
+          return;
+        }
         this.taskStore.completeTask(msg.taskId, msg.result);
         return;
       }
+
       if (msg.type === 'TASK_FAIL') {
+        const task = this.taskStore.getTask(msg.taskId);
+        if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+          ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device' }));
+          return;
+        }
         this.taskStore.failTask(msg.taskId, msg.error);
         return;
       }

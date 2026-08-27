@@ -79,18 +79,31 @@ export class ConnectionManager {
   ) {
     if (msg.type === 'AGENT_REGISTER') {
       const auth = this.authManager.validateToken(msg.token);
-      if (!auth.valid || !auth.payload || auth.payload.type !== 'device' || auth.payload.subjectId !== msg.deviceId) {
+      if (!auth.valid || !auth.payload || auth.payload.type !== 'device') {
         socket.send(JSON.stringify({
           type: 'ERROR',
           messageId: msg.messageId,
           timestamp: Date.now(),
-          error: `AUTH_FAILED: ${auth.error || 'Invalid device token'}`
+          error: `AUTH_FAILED: Device token required (received ${auth.payload?.type || 'invalid'})`
         }));
         socket.close();
         return;
       }
 
-      if (this.killSwitch.isDeviceRevoked(msg.deviceId)) {
+      if (msg.deviceId && auth.payload.subjectId !== msg.deviceId) {
+        socket.send(JSON.stringify({
+          type: 'ERROR',
+          messageId: msg.messageId,
+          timestamp: Date.now(),
+          error: `AUTH_FAILED: deviceId mismatch (token subject: ${auth.payload.subjectId}, message deviceId: ${msg.deviceId})`
+        }));
+        socket.close();
+        return;
+      }
+
+      const authoritativeDeviceId = auth.payload.subjectId;
+
+      if (this.killSwitch.isDeviceRevoked(authoritativeDeviceId)) {
         socket.send(JSON.stringify({
           type: 'ERROR',
           messageId: msg.messageId,
@@ -101,22 +114,27 @@ export class ConnectionManager {
         return;
       }
 
-      setDeviceId(msg.deviceId);
+      const tokenCaps = auth.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
+      const authorizedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
+        ? msg.capabilities.filter(c => tokenCaps.includes(c) || auth.payload!.scopes.includes(c))
+        : (tokenCaps.length > 0 ? tokenCaps : ['local:read', 'local:write', 'local:test']);
+
+      setDeviceId(authoritativeDeviceId);
       const agent: ConnectedAgent = {
-        deviceId: msg.deviceId,
-        name: msg.name,
-        platform: msg.platform,
-        capabilities: msg.capabilities || [],
+        deviceId: authoritativeDeviceId,
+        name: msg.name || authoritativeDeviceId,
+        platform: msg.platform || 'windows',
+        capabilities: authorizedCaps,
         socket,
         connectedAt: Date.now(),
         lastHeartbeatAt: Date.now(),
         ip
       };
 
-      this.agents.set(msg.deviceId, agent);
-      this.authManager.updateDeviceStatus(msg.deviceId, 'online', ip);
+      this.agents.set(authoritativeDeviceId, agent);
+      this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online', ip);
       this.auditLogger.log({
-        actor: msg.deviceId,
+        actor: authoritativeDeviceId,
         actorType: 'device',
         action: 'AGENT_AUTHENTICATE',
         result: 'SUCCESS',
@@ -127,7 +145,7 @@ export class ConnectionManager {
         type: 'AGENT_REGISTERED',
         messageId: msg.messageId,
         timestamp: Date.now(),
-        deviceId: msg.deviceId
+        deviceId: authoritativeDeviceId
       }));
       return;
     }
@@ -150,10 +168,13 @@ export class ConnectionManager {
       agent.lastHeartbeatAt = Date.now();
       this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);
 
-      // Renew lease for all reported active tasks
+      // Renew lease for all owned active tasks
       if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
         for (const tid of msg.activeTaskIds) {
-          this.taskStore.renewLease(tid, authenticatedDeviceId);
+          const task = this.taskStore.getTask(tid);
+          if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+            this.taskStore.renewLease(tid, authenticatedDeviceId);
+          }
         }
       }
 
@@ -166,7 +187,8 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'TASK_CLAIM_POLL') {
-      const task = this.taskStore.claimTask(authenticatedDeviceId, msg.supportedCapabilities);
+      // Use strictly the agent's authorized capabilities, ignoring unauthorized escalation
+      const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities);
       if (task) {
         socket.send(JSON.stringify({
           type: 'TASK_ASSIGNED',
@@ -179,22 +201,64 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'TASK_ACK') {
+      const task = this.taskStore.getTask(msg.taskId);
+      if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+        this.auditLogger.log({
+          actor: authenticatedDeviceId,
+          actorType: 'device',
+          action: 'TASK_ACK_REJECTED',
+          taskId: msg.taskId,
+          result: 'FAILURE',
+          details: { reason: 'Task lease not owned by authenticated device' }
+        });
+        socket.send(JSON.stringify({
+          type: 'ERROR',
+          messageId: msg.messageId,
+          timestamp: Date.now(),
+          error: 'LEASE_VIOLATION: Task lease not owned by device'
+        }));
+        return;
+      }
       this.taskStore.acknowledgeTask(msg.taskId, authenticatedDeviceId);
       return;
     }
 
     if (msg.type === 'TASK_PROGRESS') {
-      this.taskStore.startTask(msg.taskId, authenticatedDeviceId);
-      this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
+      const task = this.taskStore.getTask(msg.taskId);
+      if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+        this.taskStore.startTask(msg.taskId, authenticatedDeviceId);
+        this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
+      }
       return;
     }
 
     if (msg.type === 'TASK_LOG_APPEND') {
-      this.taskStore.appendLogs(msg.taskId, msg.lines);
+      const task = this.taskStore.getTask(msg.taskId);
+      if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+        this.taskStore.appendLogs(msg.taskId, msg.lines);
+      }
       return;
     }
 
     if (msg.type === 'TASK_COMPLETE') {
+      const task = this.taskStore.getTask(msg.taskId);
+      if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+        this.auditLogger.log({
+          actor: authenticatedDeviceId,
+          actorType: 'device',
+          action: 'TASK_COMPLETE_REJECTED',
+          taskId: msg.taskId,
+          result: 'FAILURE',
+          details: { reason: 'Task lease not owned by authenticated device' }
+        });
+        socket.send(JSON.stringify({
+          type: 'ERROR',
+          messageId: msg.messageId,
+          timestamp: Date.now(),
+          error: 'LEASE_VIOLATION: Task lease not owned by device'
+        }));
+        return;
+      }
       this.taskStore.completeTask(msg.taskId, msg.result);
       this.auditLogger.log({
         actor: authenticatedDeviceId,
@@ -207,6 +271,24 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'TASK_FAIL') {
+      const task = this.taskStore.getTask(msg.taskId);
+      if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+        this.auditLogger.log({
+          actor: authenticatedDeviceId,
+          actorType: 'device',
+          action: 'TASK_FAIL_REJECTED',
+          taskId: msg.taskId,
+          result: 'FAILURE',
+          details: { reason: 'Task lease not owned by authenticated device' }
+        });
+        socket.send(JSON.stringify({
+          type: 'ERROR',
+          messageId: msg.messageId,
+          timestamp: Date.now(),
+          error: 'LEASE_VIOLATION: Task lease not owned by device'
+        }));
+        return;
+      }
       this.taskStore.failTask(msg.taskId, msg.error);
       this.auditLogger.log({
         actor: authenticatedDeviceId,
@@ -214,7 +296,7 @@ export class ConnectionManager {
         action: 'TASK_FAIL',
         taskId: msg.taskId,
         result: 'FAILURE',
-        details: msg.error
+        details: typeof msg.error === 'object' ? msg.error : { error: msg.error }
       });
       return;
     }
