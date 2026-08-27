@@ -292,4 +292,20 @@ export class KaggleClient {
       log: 'Mock output stdout: Execution success\nLoss: 0.042'
     };
   }
+
+  public async uploadBlob(fileName: string, content: Buffer | string): Promise<string> {
+    return `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  public async createDataset(slug: string, title: string, files: { token: string; description?: string }[], isPrivate = true): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
+    return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
+  }
+
+  public async createDatasetVersion(slug: string, versionNotes: string, files: { token: string; description?: string }[]): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
+    return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
+  }
+
+  public async getDatasetStatus(slug: string, owner?: string): Promise<{ status: string; isReady: boolean }> {
+    return { status: 'READY', isReady: true };
+  }
 }

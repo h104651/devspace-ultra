@@ -1,0 +1,66 @@
+{
+  "name": "Astor TuneUp",
+  "slug": "astor-tuneup-project",
+  "owner": "astorhsu",
+  "version": 1,
+  "type": "workspace",
+  "entrypoint": "experiments/gate2c_9a_mining.py",
+  "runnerKernelRef": "astorhsu/astor-tuneup-runner",
+  "archiveMaster": {
+    "filename": "archive/astor-tuneup-original.ipynb",
+    "size": 14276636,
+    "sha256": "9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450",
+    "cellCount": 139
+  },
+  "files": {
+    "archive/astor-tuneup-original.ipynb": {
+      "size": 14276636,
+      "sha256": "9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450"
+    },
+    "config/experiment.json": {
+      "size": 178,
+      "sha256": "06b73bdc1450755795e4e099ad4c82c9c98f89fa336feb1aa82d17f6b3bbeb86"
+    },
+    "config/project.json": {
+      "size": 313,
+      "sha256": "298df0fafaf6828fa151b6289842e6c3f1eff60f55a6e83e2fbcc0e51f579e5e"
+    },
+    "experiments/current.py": {
+      "size": 76,
+      "sha256": "b164b956bdbd2e36ad691cd5d11e21a05b78514947f3100053ac59ece9693296"
+    },
+    "experiments/gate2c_9a_mining.py": {
+      "size": 55914,
+      "sha256": "f0a2f31709d68ce0e6ee17328749a392ef6b02cf7cc5fa11992fd43dd08b8540"
+    },
+    "PROJECT_CONTEXT.md": {
+      "size": 1351,
+      "sha256": "5d31facb87ff05f879f9e5562a51b70c1d81579ebc63038d57e19aa9e8add990"
+    },
+    "src/astor_tuneup/config.py": {
+      "size": 420,
+      "sha256": "5747ca975b9c402d4d292181a06ec8bde601d0c57d3e2873cc414f52915649a5"
+    },
+    "src/astor_tuneup/detector_mining.py": {
+      "size": 262,
+      "sha256": "21dc9303fa6b2bb0068807baef494a87d1a2c3db4213ac4f4855feb45e8bc169"
+    },
+    "src/astor_tuneup/hash_utils.py": {
+      "size": 505,
+      "sha256": "f9b928b75e261de286129a215ab9582db9a50c2375eee79d16456e2d46de9ce5"
+    },
+    "src/astor_tuneup/packaging.py": {
+      "size": 311,
+      "sha256": "c1428c28850187b23edf6d08af659313cd1df2f2729acadd2f240624f353df1d"
+    },
+    "src/astor_tuneup/video_decode.py": {
+      "size": 526,
+      "sha256": "d95830d30bf2b7121529ee56a6a0dddc6bc0eb2d117aee975dddbe1805e91e33"
+    },
+    "src/astor_tuneup/__init__.py": {
+      "size": 66,
+      "sha256": "3660ad4bddeb52d4fe8d025c1dbc35ebbd62e7f87c16202377cb2c29ba889bcd"
+    }
+  },
+  "updatedAt": "2026-08-27T09:53:09.174Z"
+}

@@ -1,0 +1,10 @@
+{
+  "experiment": "gate2c_9a_detector_failure_mining",
+  "version": "1.3",
+  "target_confidence_range": [
+    0.2,
+    0.8
+  ],
+  "input_fps": 10,
+  "max_extracted_frames": 300
+}

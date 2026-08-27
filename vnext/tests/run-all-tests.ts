@@ -19,6 +19,7 @@ import { runR2CostGuardTests } from './cloudflare/r2-cost-guard.test';
 import { runOAuthTests } from './oauth/oauth.test';
 import { runMcp2026Tests } from './mcp/mcp-2026.test';
 import { runKaggleProjectTests } from './integration/kaggle-project.test';
+import { runKaggleWorkspaceTests } from './integration/kaggle-workspace.test';
 
 async function main() {
   console.log('====================================================');
@@ -40,6 +41,7 @@ async function main() {
     { name: 'Integration: Agent Lifecycle & Durability', runner: runAgentLifecycleDurabilityTests },
     { name: 'Integration: Kaggle Mock Backend', runner: runKaggleIntegrationTests },
     { name: 'Integration: Kaggle Persistent Project Control v1', runner: runKaggleProjectTests },
+    { name: 'Integration: Kaggle Large Project Workspace Mode', runner: runKaggleWorkspaceTests },
     { name: 'Integration: Chat Swarm & Wake Bridge', runner: runSwarmIntegrationTests },
     { name: 'Integration: Stale Task Recovery', runner: runStaleRecoveryIntegrationTests },
     { name: 'Integration: Idempotency & Replays', runner: runIdempotencyIntegrationTests },

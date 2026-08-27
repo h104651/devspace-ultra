@@ -297,5 +297,17 @@ class KaggleClient {
             log: 'Mock output stdout: Execution success\nLoss: 0.042'
         };
     }
+    async uploadBlob(fileName, content) {
+        return `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+    async createDataset(slug, title, files, isPrivate = true) {
+        return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
+    }
+    async createDatasetVersion(slug, versionNotes, files) {
+        return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
+    }
+    async getDatasetStatus(slug, owner) {
+        return { status: 'READY', isReady: true };
+    }
 }
 exports.KaggleClient = KaggleClient;

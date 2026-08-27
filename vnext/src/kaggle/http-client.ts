@@ -633,4 +633,193 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       return { totalFiles: 0, allFileNames: [], error: err.message };
     }
   }
+
+  /**
+   * Uploads a file blob to Kaggle GCS storage and returns a blob token.
+   */
+  public async uploadBlob(fileName: string, content: Buffer | string): Promise<string> {
+    if (this.isMockMode) {
+      return `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    const buf = Buffer.isBuffer(content) ? content : Buffer.from(content);
+    const nowUtc = Math.floor(Date.now() / 1000);
+    const startReq = {
+      type: 1, // ApiBlobType.DATASET = 1
+      name: fileName,
+      contentLength: buf.length,
+      lastModifiedEpochSeconds: nowUtc
+    };
+
+    const startUrl = `${this.baseUrl}/blobs.BlobApiService/StartBlobUpload`;
+    const startRes = await fetch(startUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.getAuthHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(startReq)
+    });
+
+    if (!startRes.ok) {
+      const errText = await startRes.text();
+      throw new Error(`KAGGLE_BLOB_UPLOAD_FAILED: HTTP ${startRes.status}: ${errText}`);
+    }
+
+    const startData = await startRes.json() as any;
+    const { token, createUrl } = startData;
+    if (!createUrl || !token) {
+      throw new Error('KAGGLE_BLOB_UPLOAD_FAILED: No createUrl or token returned from StartBlobUpload');
+    }
+
+    const gcsRes = await fetch(createUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: buf
+    });
+
+    if (!gcsRes.ok) {
+      const gcsErrText = await gcsRes.text();
+      throw new Error(`KAGGLE_GCS_UPLOAD_FAILED: HTTP ${gcsRes.status}: ${gcsErrText}`);
+    }
+
+    return token;
+  }
+
+  /**
+   * Creates a new Kaggle Dataset.
+   */
+  public async createDataset(
+    slug: string,
+    title: string,
+    files: { token: string; description?: string }[],
+    isPrivate = true
+  ): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
+    if (this.isMockMode) {
+      return {
+        success: true,
+        url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`,
+        ref: `${this.getUsername()}/${slug}`
+      };
+    }
+
+    const createUrl = `${this.baseUrl}/datasets.DatasetApiService/CreateDataset`;
+    const createReq = {
+      title,
+      slug,
+      ownerSlug: this.getUsername(),
+      licenseName: 'CC0-1.0',
+      isPrivate,
+      files
+    };
+
+    const res = await fetch(createUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.getAuthHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(createReq)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return { success: false, error: `HTTP ${res.status}: ${errText}` };
+    }
+
+    const data = await res.json() as any;
+    if (data.status && data.status !== 'Ok' && data.error) {
+      return { success: false, error: data.error };
+    }
+
+    return {
+      success: true,
+      url: data.url || `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`,
+      ref: data.ref || `${this.getUsername()}/${slug}`
+    };
+  }
+
+  /**
+   * Creates a new version of an existing Kaggle Dataset.
+   */
+  public async createDatasetVersion(
+    slug: string,
+    versionNotes: string,
+    files: { token: string; description?: string }[]
+  ): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
+    if (this.isMockMode) {
+      return {
+        success: true,
+        url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`,
+        ref: `${this.getUsername()}/${slug}`
+      };
+    }
+
+    const verUrl = `${this.baseUrl}/datasets.DatasetApiService/CreateDatasetVersion`;
+    const verReq = {
+      ownerSlug: this.getUsername(),
+      datasetSlug: slug,
+      body: {
+        versionNotes,
+        files
+      }
+    };
+
+    const res = await fetch(verUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.getAuthHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(verReq)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return { success: false, error: `HTTP ${res.status}: ${errText}` };
+    }
+
+    const data = await res.json() as any;
+    if (data.status && data.status !== 'Ok' && data.error) {
+      return { success: false, error: data.error };
+    }
+
+    return {
+      success: true,
+      url: data.url || `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`,
+      ref: data.ref || `${this.getUsername()}/${slug}`
+    };
+  }
+
+  /**
+   * Gets dataset status.
+   */
+  public async getDatasetStatus(slug: string, owner?: string): Promise<{ status: string; isReady: boolean }> {
+    if (this.isMockMode) {
+      return { status: 'READY', isReady: true };
+    }
+
+    const effectiveOwner = owner || this.getUsername();
+    const statUrl = `${this.baseUrl}/datasets.DatasetApiService/GetDatasetStatus`;
+    const res = await fetch(statUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.getAuthHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ownerSlug: effectiveOwner, datasetSlug: slug })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return { status: `HTTP ${res.status}: ${errText}`, isReady: false };
+    }
+
+    const data = await res.json() as any;
+    const rawStatus = (data.status || '').toUpperCase();
+    return {
+      status: rawStatus,
+      isReady: rawStatus === 'READY' || rawStatus === 'OK'
+    };
+  }
 }

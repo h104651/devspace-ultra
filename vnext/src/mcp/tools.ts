@@ -162,6 +162,54 @@ export const KAGGLE_PROJECT_RESTORE_SCHEMA = {
   additionalProperties: false
 };
 
+export const KAGGLE_WORKSPACE_GET_SCHEMA = {
+  type: 'object',
+  properties: {
+    project: { type: 'string', description: 'Dataset or project workspace reference, e.g. "astorhsu/astor-tuneup-project"' }
+  },
+  required: ['project'],
+  additionalProperties: false
+};
+
+export const KAGGLE_WORKSPACE_FILE_SCHEMA = {
+  type: 'object',
+  properties: {
+    project: { type: 'string', description: 'Dataset or project workspace reference' },
+    path: { type: 'string', description: 'Relative path of file in workspace' },
+    offset: { type: 'number', default: 0, description: 'Character offset for chunking' },
+    limit: { type: 'number', default: 50000, description: 'Maximum characters to return' }
+  },
+  required: ['project', 'path'],
+  additionalProperties: false
+};
+
+export const KAGGLE_WORKSPACE_CONTINUE_SCHEMA = {
+  type: 'object',
+  properties: {
+    project: { type: 'string', description: 'Dataset or project workspace reference' },
+    expectedWorkspaceFingerprint: { type: 'string', description: 'Expected optimistic concurrency fingerprint from kaggle_workspace_get' },
+    changes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          expectedSha256: { type: 'string' },
+          content: { type: 'string' }
+        },
+        required: ['path', 'content']
+      },
+      description: 'List of file updates or additions to apply to the workspace'
+    },
+    experimentEntrypoint: { type: 'string', description: 'Experiment entrypoint script or module to execute in runner' },
+    runnerKernelRef: { type: 'string', description: 'Optional runner kernel ref' },
+    reason: { type: 'string', description: 'Reason for workspace mutation' },
+    clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
+  },
+  required: ['project', 'expectedWorkspaceFingerprint', 'changes', 'reason'],
+  additionalProperties: false
+};
+
 export const SWARM_DISPATCH_SCHEMA = {
   type: 'object',
   properties: {

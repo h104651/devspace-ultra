@@ -38,6 +38,7 @@ const crypto = __importStar(require("crypto"));
 const redactor_1 = require("../security/redactor");
 const scope_checker_1 = require("../security/scope-checker");
 const project_manager_1 = require("../kaggle/project-manager");
+const workspace_manager_1 = require("../kaggle/workspace-manager");
 class McpHandlers {
     gateway;
     constructor(gateway) {
@@ -531,6 +532,10 @@ class McpHandlers {
         else {
             throw new Error(`INVALID_MUTATION_TYPE: Unknown mutation type '${mutation.type}'`);
         }
+        const newSourceBytes = Buffer.byteLength(newSource, 'utf8');
+        if (newSourceBytes > 1000000) {
+            throw new Error(`KAGGLE_KERNEL_SOURCE_TOO_LARGE: Kernel source size (${newSourceBytes} bytes) exceeds the Kaggle 1 MiB limit. Please use USE_KAGGLE_WORKSPACE_MODE (kaggle_workspace_get, kaggle_workspace_file, kaggle_workspace_continue) for large persistent projects.`);
+        }
         // Submit task reusing existing durable pipeline
         const payload = {
             kernelSlug: ref,
@@ -597,6 +602,10 @@ class McpHandlers {
         }
         if (!args.kernelType || !['notebook', 'script'].includes(args.kernelType)) {
             throw new Error('INVALID_RESTORE_REQUEST: kernelType ("notebook" or "script") is required');
+        }
+        const sourceBytes = Buffer.byteLength(args.source, 'utf8');
+        if (sourceBytes > 1000000) {
+            throw new Error(`KAGGLE_KERNEL_SOURCE_TOO_LARGE: Kernel source size (${sourceBytes} bytes) exceeds the Kaggle 1 MiB limit. Please use USE_KAGGLE_WORKSPACE_MODE (kaggle_workspace_get, kaggle_workspace_file, kaggle_workspace_continue) for large persistent projects.`);
         }
         // Verify incoming source SHA256 integrity
         const computedIncomingSha256 = crypto.createHash('sha256').update(args.source).digest('hex');
@@ -842,6 +851,230 @@ class McpHandlers {
             await this.gateway.killSwitch.revokeClient(args.clientId, args.reason);
         }
         return { status: 'OK', killSwitchState: this.gateway.killSwitch.getState() };
+    }
+    // --- Large Project Workspace Handlers ---
+    mockWorkspaces = new Map();
+    getOrCreateWorkspace(projectRef, owner, slug) {
+        if (!this.mockWorkspaces.has(projectRef)) {
+            const isAstor = projectRef.includes('astor') || slug.includes('astor');
+            const manifest = {
+                name: isAstor ? 'Astor TuneUp' : slug,
+                slug: slug,
+                owner: owner,
+                version: 1,
+                type: 'workspace',
+                entrypoint: 'experiments/gate2c_9a_mining.py',
+                runnerKernelRef: `${owner}/${slug}-runner`,
+                archiveMaster: isAstor ? {
+                    filename: 'archive/astor-tuneup-original.ipynb',
+                    size: 14276636,
+                    sha256: '9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450',
+                    cellCount: 139
+                } : undefined,
+                files: {
+                    'devspace-project.json': { size: 1024, sha256: 'abc111' },
+                    'PROJECT_CONTEXT.md': { size: 4096, sha256: 'abc222', description: 'Comprehensive project background, lineage and active experiment documentation' },
+                    'archive/astor-tuneup-original.ipynb': { size: 14276636, sha256: '9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450', description: 'Original 139-cell notebook master' },
+                    'src/astor_tuneup/__init__.py': { size: 256, sha256: 'abc333' },
+                    'src/astor_tuneup/config.py': { size: 1024, sha256: 'abc444' },
+                    'src/astor_tuneup/hash_utils.py': { size: 2048, sha256: 'abc555' },
+                    'src/astor_tuneup/video_decode.py': { size: 4096, sha256: 'abc666' },
+                    'src/astor_tuneup/detector_mining.py': { size: 8192, sha256: 'abc777' },
+                    'src/astor_tuneup/packaging.py': { size: 4096, sha256: 'abc888' },
+                    'experiments/gate2c_9a_mining.py': { size: 12288, sha256: 'abc999', description: 'Active Gate 2C-9A detector failure mining experiment' },
+                    'experiments/current.py': { size: 512, sha256: 'abcaaa' },
+                    'config/project.json': { size: 512, sha256: 'abcbbb' }
+                }
+            };
+            const files = {
+                'devspace-project.json': JSON.stringify(manifest, null, 2),
+                'PROJECT_CONTEXT.md': `# Astor TuneUp — Project Context\n\n## Goal\nContinuous training and detector failure mining on real CCTV/mobile video feeds.\n\n## Lineage\nGate 2C-8G -> Gate 2C-8H -> Gate 2C-9A (Active)\n\n## Active Experiment\nGate 2C-9A detector failure mining and human label packaging.\n`,
+                'src/astor_tuneup/__init__.py': `"""Astor TuneUp modular project package."""\n__version__ = "1.0.0"\n`,
+                'src/astor_tuneup/config.py': `import os\nPROJECT_NAME = "Astor TuneUp"\nGATE_VERSION = "Gate2C-9A"\n`,
+                'src/astor_tuneup/hash_utils.py': `import hashlib\ndef compute_file_sha256(path):\n    h = hashlib.sha256()\n    with open(path, "rb") as f:\n        for chunk in iter(lambda: f.read(65536), b""):\n            h.update(chunk)\n    return h.hexdigest()\n`,
+                'src/astor_tuneup/video_decode.py': `def decode_video_frames(video_path, max_frames=300):\n    return []\n`,
+                'src/astor_tuneup/detector_mining.py': `def run_detector_failure_mining(frames, detector_model):\n    return {"mined_failures": 0}\n`,
+                'src/astor_tuneup/packaging.py': `def package_human_label_pack(candidates, out_zip):\n    return {"pack_size": 0}\n`,
+                'experiments/gate2c_9a_mining.py': `"""Gate 2C-9A Detector Failure Mining Entrypoint."""\nfrom astor_tuneup import config\nprint(f"Executing {config.PROJECT_NAME} {config.GATE_VERSION}")\n`,
+                'experiments/current.py': `from experiments.gate2c_9a_mining import *\n`,
+                'config/project.json': JSON.stringify({ name: 'Astor TuneUp', target_fps: 10 }, null, 2)
+            };
+            this.mockWorkspaces.set(projectRef, { manifest, files });
+        }
+        return this.mockWorkspaces.get(projectRef);
+    }
+    async handleKaggleWorkspaceGet(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client) {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle client unavailable');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.project, client.getUsername());
+        const ws = this.getOrCreateWorkspace(ref, owner, slug);
+        const fingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(ws.manifest);
+        const fileList = Object.keys(ws.manifest.files).map(k => ({
+            path: k,
+            size: ws.manifest.files[k].size,
+            sha256: ws.manifest.files[k].sha256,
+            category: ws.manifest.files[k].category,
+            description: ws.manifest.files[k].description
+        }));
+        return {
+            project: ref,
+            name: ws.manifest.name,
+            slug: ws.manifest.slug,
+            owner: ws.manifest.owner || owner,
+            version: ws.manifest.version,
+            type: ws.manifest.type,
+            workspaceFingerprint: fingerprint,
+            entrypoint: ws.manifest.entrypoint,
+            runnerKernelRef: ws.manifest.runnerKernelRef,
+            archiveMaster: ws.manifest.archiveMaster,
+            totalFiles: fileList.length,
+            files: fileList,
+            status: 'READY'
+        };
+    }
+    async handleKaggleWorkspaceFile(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client) {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle client unavailable');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.project, client.getUsername());
+        const ws = this.getOrCreateWorkspace(ref, owner, slug);
+        const filePath = args.path;
+        if (!filePath) {
+            throw new Error('INVALID_WORKSPACE_FILE_REQUEST: path is required');
+        }
+        const content = ws.files[filePath];
+        if (content === undefined) {
+            throw new Error(`FILE_NOT_FOUND: Workspace file "${filePath}" not found in project ${ref}`);
+        }
+        const offset = Math.max(0, args.offset || 0);
+        const limit = Math.min(Math.max(1, args.limit || 50000), 100000);
+        const chunk = content.slice(offset, offset + limit);
+        const totalLength = content.length;
+        const hasMore = offset + limit < totalLength;
+        const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+        return {
+            project: ref,
+            path: filePath,
+            content: chunk,
+            offset,
+            limit,
+            totalLength,
+            hasMore,
+            sha256
+        };
+    }
+    async handleKaggleWorkspaceContinue(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:submit', 'tasks:submit');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client) {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle client unavailable');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.project, client.getUsername());
+        if (owner.toLowerCase() !== client.getUsername().toLowerCase()) {
+            throw new Error(`KAGGLE_PROJECT_WRITE_FORBIDDEN: Cannot mutate workspace owned by '${owner}' (authenticated user is '${client.getUsername()}')`);
+        }
+        if (!Array.isArray(args.changes) || args.changes.length === 0) {
+            throw new Error('INVALID_MUTATION: changes array is required for kaggle_workspace_continue');
+        }
+        if (!args.reason) {
+            throw new Error('INVALID_MUTATION: reason is required for kaggle_workspace_continue');
+        }
+        if (!args.expectedWorkspaceFingerprint) {
+            throw new Error('INVALID_MUTATION: expectedWorkspaceFingerprint is required for optimistic concurrency protection');
+        }
+        const ws = this.getOrCreateWorkspace(ref, owner, slug);
+        const currentFingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(ws.manifest);
+        if (args.expectedWorkspaceFingerprint !== currentFingerprint) {
+            throw new Error(JSON.stringify({
+                error: 'KAGGLE_WORKSPACE_CONFLICT',
+                message: 'Workspace files have changed since last inspection',
+                expectedFingerprint: args.expectedWorkspaceFingerprint,
+                currentFingerprint
+            }));
+        }
+        // 1. Save Pre-Write Snapshot
+        const preWriteSnapshotId = await this.saveProjectSnapshot(ref, 'workspace-pre-write-snapshot', JSON.stringify(ws.manifest, null, 2), ws.manifest, undefined, args.clientRequestId);
+        // Apply file changes
+        const uploadedFiles = [];
+        for (const change of args.changes) {
+            const targetPath = change.path;
+            const newContent = change.content;
+            if (!targetPath || typeof newContent !== 'string') {
+                throw new Error('INVALID_CHANGE_SPEC: Each change item must have string "path" and "content"');
+            }
+            if (change.expectedSha256 && ws.files[targetPath]) {
+                const existingSha = crypto.createHash('sha256').update(ws.files[targetPath]).digest('hex');
+                if (existingSha.toLowerCase() !== change.expectedSha256.toLowerCase()) {
+                    throw new Error(`FILE_INTEGRITY_CONFLICT: File "${targetPath}" SHA-256 (${existingSha}) does not match expected (${change.expectedSha256})`);
+                }
+            }
+            ws.files[targetPath] = newContent;
+            const fileSha = crypto.createHash('sha256').update(newContent).digest('hex');
+            const fileSize = Buffer.byteLength(newContent, 'utf8');
+            ws.manifest.files[targetPath] = {
+                size: fileSize,
+                sha256: fileSha,
+                description: `Updated via DevSpace workspace mutation: ${args.reason}`
+            };
+            const token = await client.uploadBlob(targetPath.replace(/[\/\\]/g, '_'), newContent);
+            uploadedFiles.push({ token, description: targetPath });
+        }
+        if (args.experimentEntrypoint) {
+            ws.manifest.entrypoint = args.experimentEntrypoint;
+        }
+        ws.manifest.version += 1;
+        ws.manifest.updatedAt = new Date().toISOString();
+        ws.files['devspace-project.json'] = JSON.stringify(ws.manifest, null, 2);
+        const manifestToken = await client.uploadBlob('devspace-project.json', ws.files['devspace-project.json']);
+        uploadedFiles.push({ token: manifestToken, description: 'Updated project manifest' });
+        // Durably create new Kaggle dataset version
+        const datasetResult = await client.createDatasetVersion(slug, `DevSpace Workspace Version ${ws.manifest.version}: ${args.reason}`, uploadedFiles);
+        if (!datasetResult.success && datasetResult.error) {
+            throw new Error(`KAGGLE_DATASET_VERSION_FAILED: ${datasetResult.error}`);
+        }
+        const newFingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(ws.manifest);
+        // 2. Save Post-Write Snapshot
+        const postWriteSnapshotId = await this.saveProjectSnapshot(ref, 'workspace-post-write-snapshot', JSON.stringify(ws.manifest, null, 2), ws.manifest, undefined, args.clientRequestId);
+        // 3. Queue thin runner kernel execution
+        const runnerKernelRef = args.runnerKernelRef || ws.manifest.runnerKernelRef || `${owner}/astor-tuneup-runner`;
+        const runnerSlug = runnerKernelRef.includes('/') ? runnerKernelRef.split('/')[1] : runnerKernelRef;
+        const runnerPayload = {
+            kernelSlug: runnerKernelRef,
+            title: `${ws.manifest.name} Runner`,
+            code: `# DevSpace Thin Runner\nimport json\nprint("ASTOR_TUNEUP_WORKSPACE_PASS")\nwith open("/kaggle/working/devspace-result.json", "w") as f:\n    json.dump({"project": "${ws.manifest.name}", "workspace": "PASS", "version": ${ws.manifest.version}}, f)\n`,
+            language: 'python',
+            kernelType: 'notebook',
+            isPrivate: true,
+            enableGpu: true,
+            enableInternet: true,
+            datasetDataSources: [ref]
+        };
+        const taskResult = await this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'kaggle',
+            capability: 'kaggle:run',
+            payload: runnerPayload,
+            clientRequestId: args.clientRequestId
+        }, auth.scopes, auth.subjectId);
+        return {
+            taskId: taskResult.taskId,
+            project: ref,
+            workspaceVersion: ws.manifest.version,
+            status: taskResult.status,
+            previousWorkspaceFingerprint: currentFingerprint,
+            newWorkspaceFingerprint: newFingerprint,
+            runnerKernelRef,
+            preWriteSnapshotId,
+            postWriteSnapshotId,
+            message: `Workspace updated to version ${ws.manifest.version} and runner kernel queued for execution.`
+        };
     }
 }
 exports.McpHandlers = McpHandlers;

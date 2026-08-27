@@ -1006,6 +1006,9 @@ class GatewayDurableObject {
             { name: 'kaggle_project_logs', description: 'Retrieve latest kernel execution logs directly by project ref', inputSchema: tools.KAGGLE_PROJECT_LOGS_SCHEMA },
             { name: 'kaggle_project_continue', description: 'Safely continue an existing persistent Kaggle project with conflict and ownership protection', inputSchema: tools.KAGGLE_PROJECT_CONTINUE_SCHEMA },
             { name: 'kaggle_project_restore', description: 'Explicitly restore an owned Kaggle project from trusted source when remote state is corrupted or suspicious', inputSchema: tools.KAGGLE_PROJECT_RESTORE_SCHEMA },
+            { name: 'kaggle_workspace_get', description: 'Retrieve Kaggle dataset-backed project workspace manifest, fingerprint, and file outline', inputSchema: tools.KAGGLE_WORKSPACE_GET_SCHEMA },
+            { name: 'kaggle_workspace_file', description: 'Read a specific file from the project workspace with bounded chunking', inputSchema: tools.KAGGLE_WORKSPACE_FILE_SCHEMA },
+            { name: 'kaggle_workspace_continue', description: 'Atomically update project workspace dataset version, apply file changes, and trigger thin runner execution', inputSchema: tools.KAGGLE_WORKSPACE_CONTINUE_SCHEMA },
             { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: tools.CHAT_SWARM_CREATE_SCHEMA },
             { name: 'chat_swarm_join', description: 'Join an existing Chat Swarm worker slot using its invite code', inputSchema: tools.CHAT_SWARM_JOIN_SCHEMA },
             { name: 'chat_swarm_dock', description: 'Mount the persistent Worker Dock stream for an existing worker token', inputSchema: tools.CHAT_SWARM_DOCK_SCHEMA },
@@ -1251,6 +1254,15 @@ class GatewayDurableObject {
                             break;
                         case 'kaggle_project_restore':
                             result = await this.mcpHandlers.handleKaggleProjectRestore(args, caller);
+                            break;
+                        case 'kaggle_workspace_get':
+                            result = await this.mcpHandlers.handleKaggleWorkspaceGet(args, caller);
+                            break;
+                        case 'kaggle_workspace_file':
+                            result = await this.mcpHandlers.handleKaggleWorkspaceFile(args, caller);
+                            break;
+                        case 'kaggle_workspace_continue':
+                            result = await this.mcpHandlers.handleKaggleWorkspaceContinue(args, caller);
                             break;
                         case 'swarm_dispatch':
                             result = await this.mcpHandlers.handleSwarmDispatch(args, caller);

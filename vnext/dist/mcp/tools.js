@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_PROJECT_RESTORE_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
+exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = exports.KAGGLE_WORKSPACE_FILE_SCHEMA = exports.KAGGLE_WORKSPACE_GET_SCHEMA = exports.KAGGLE_PROJECT_RESTORE_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
 exports.REMOTE_TASK_SUBMIT_SCHEMA = {
     type: 'object',
     properties: {
@@ -152,6 +152,51 @@ exports.KAGGLE_PROJECT_RESTORE_SCHEMA = {
         clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
     },
     required: ['kernelRef', 'expectedCurrentFingerprint', 'source', 'sourceSha256', 'kernelType', 'reason'],
+    additionalProperties: false
+};
+exports.KAGGLE_WORKSPACE_GET_SCHEMA = {
+    type: 'object',
+    properties: {
+        project: { type: 'string', description: 'Dataset or project workspace reference, e.g. "astorhsu/astor-tuneup-project"' }
+    },
+    required: ['project'],
+    additionalProperties: false
+};
+exports.KAGGLE_WORKSPACE_FILE_SCHEMA = {
+    type: 'object',
+    properties: {
+        project: { type: 'string', description: 'Dataset or project workspace reference' },
+        path: { type: 'string', description: 'Relative path of file in workspace' },
+        offset: { type: 'number', default: 0, description: 'Character offset for chunking' },
+        limit: { type: 'number', default: 50000, description: 'Maximum characters to return' }
+    },
+    required: ['project', 'path'],
+    additionalProperties: false
+};
+exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = {
+    type: 'object',
+    properties: {
+        project: { type: 'string', description: 'Dataset or project workspace reference' },
+        expectedWorkspaceFingerprint: { type: 'string', description: 'Expected optimistic concurrency fingerprint from kaggle_workspace_get' },
+        changes: {
+            type: 'array',
+            items: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string' },
+                    expectedSha256: { type: 'string' },
+                    content: { type: 'string' }
+                },
+                required: ['path', 'content']
+            },
+            description: 'List of file updates or additions to apply to the workspace'
+        },
+        experimentEntrypoint: { type: 'string', description: 'Experiment entrypoint script or module to execute in runner' },
+        runnerKernelRef: { type: 'string', description: 'Optional runner kernel ref' },
+        reason: { type: 'string', description: 'Reason for workspace mutation' },
+        clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
+    },
+    required: ['project', 'expectedWorkspaceFingerprint', 'changes', 'reason'],
     additionalProperties: false
 };
 exports.SWARM_DISPATCH_SCHEMA = {
