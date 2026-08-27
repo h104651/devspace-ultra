@@ -3,6 +3,7 @@ import { KaggleExecutionStatus, KaggleTaskPayload } from '../types/kaggle';
 export interface KagglePushResult {
   success: boolean;
   kernelUrl: string;
+  kernelSlug?: string;
   error?: string;
 }
 

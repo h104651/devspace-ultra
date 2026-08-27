@@ -75,10 +75,11 @@ class KaggleBackend {
             this.taskStore.failTask(task.taskId, { code: pushResult.error?.includes('QUOTA') ? 'RESOURCE_QUOTA_EXCEEDED' : 'KAGGLE_PUSH_FAILED', message: pushResult.error || 'Failed to push kernel to Kaggle' });
             throw new Error(pushResult.error);
         }
+        const actualSlug = pushResult.kernelSlug || payload.kernelSlug;
         this.taskStore.startTask(task.taskId, 'kaggle-backend');
         this.taskStore.appendLogs(task.taskId, [`Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`, 'Scheduling Kaggle status monitor.']);
-        await this.schedulePoll(task.taskId, payload.kernelSlug);
-        return { taskId: task.taskId, kernelSlug: payload.kernelSlug, status: 'running' };
+        await this.schedulePoll(task.taskId, actualSlug);
+        return { taskId: task.taskId, kernelSlug: actualSlug, status: 'running' };
     }
     async schedulePoll(taskId, kernelSlug) {
         if (this.pollScheduler) {

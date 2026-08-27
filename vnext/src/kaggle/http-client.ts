@@ -95,9 +95,19 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
         };
       }
 
+      let actualSlug = rawSlug;
+      if (resData.ref) {
+        const parts = resData.ref.replace(/^\/code\//, '').split('/');
+        if (parts.length > 1) actualSlug = parts[1];
+      } else if (resData.url) {
+        const parts = resData.url.replace(/^https:\/\/www\.kaggle\.com\/code\//, '').split('/');
+        if (parts.length > 1) actualSlug = parts[1];
+      }
+
       return {
         success: true,
-        kernelUrl: resData.url || `https://www.kaggle.com/code/${this.username}/${rawSlug}`
+        kernelUrl: resData.url || `https://www.kaggle.com/code/${this.username}/${actualSlug}`,
+        kernelSlug: actualSlug
       };
     } catch (err: any) {
       return {

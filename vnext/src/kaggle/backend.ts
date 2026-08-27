@@ -63,10 +63,11 @@ export class KaggleBackend {
       throw new Error(pushResult.error);
     }
 
+    const actualSlug = pushResult.kernelSlug || payload.kernelSlug;
     this.taskStore.startTask(task.taskId, 'kaggle-backend');
     this.taskStore.appendLogs(task.taskId, [`Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`, 'Scheduling Kaggle status monitor.']);
-    await this.schedulePoll(task.taskId, payload.kernelSlug);
-    return { taskId: task.taskId, kernelSlug: payload.kernelSlug, status: 'running' };
+    await this.schedulePoll(task.taskId, actualSlug);
+    return { taskId: task.taskId, kernelSlug: actualSlug, status: 'running' };
   }
 
   private async schedulePoll(taskId: string, kernelSlug: string): Promise<void> {
