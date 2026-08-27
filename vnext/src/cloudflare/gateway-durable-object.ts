@@ -610,6 +610,53 @@ export class GatewayDurableObject {
         });
       }
 
+      if ((url.pathname === '/admin/kill-switch' || url.pathname === '/api/admin/kill-switch') && request.method === 'GET') {
+        const auth = await this.authenticate(request);
+        if (auth.error) return auth.error;
+        if (!ScopeChecker.hasScope(auth.payload!.scopes, 'admin:health') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin')) {
+          return Response.json({ error: 'FORBIDDEN: admin scope required' }, { status: 403 });
+        }
+        return Response.json({ state: this.killSwitch.getState() });
+      }
+
+      if ((url.pathname === '/admin/kill-switch' || url.pathname === '/api/admin/kill-switch') && request.method === 'POST') {
+        const auth = await this.authenticate(request);
+        if (auth.error) return auth.error;
+        if (!ScopeChecker.hasScope(auth.payload!.scopes, 'admin:health') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin')) {
+          return Response.json({ error: 'FORBIDDEN: admin scope required' }, { status: 403 });
+        }
+        const body = await request.json() as any;
+        const action = body.action || '';
+        const reason = body.reason || 'Admin action';
+        const targetId = body.targetId || '';
+
+        if (action === 'EMERGENCY_STOP') {
+          this.killSwitch.triggerGlobalEmergencyStop(reason);
+        } else if (action === 'CLEAR_STOP') {
+          this.killSwitch.resetGlobalEmergencyStop();
+        } else if (action === 'REVOKE_DEVICE' && targetId) {
+          this.killSwitch.revokeDevice(targetId, reason);
+        } else if (action === 'REVOKE_CLIENT' && targetId) {
+          this.killSwitch.revokeClient(targetId, reason);
+        } else if (action === 'DISABLE_LOCAL') {
+          this.killSwitch.setLocalAgentExecutionDisabled(true);
+        } else if (action === 'ENABLE_LOCAL') {
+          this.killSwitch.setLocalAgentExecutionDisabled(false);
+        } else if (action === 'DISABLE_KAGGLE') {
+          this.killSwitch.setKaggleExecutionDisabled(true);
+        } else if (action === 'ENABLE_KAGGLE') {
+          this.killSwitch.setKaggleExecutionDisabled(false);
+        } else if (action === 'DISABLE_SWARM') {
+          this.killSwitch.setSwarmExecutionDisabled(true);
+        } else if (action === 'ENABLE_SWARM') {
+          this.killSwitch.setSwarmExecutionDisabled(false);
+        } else {
+          return Response.json({ error: 'INVALID_ACTION', action }, { status: 400 });
+        }
+
+        return Response.json({ ok: true, action, state: this.killSwitch.getState() });
+      }
+
       if ((url.pathname === '/mcp' || url.pathname === '/api/mcp/v1') && request.method === 'GET') {
         if (request.headers.get('MCP-Protocol-Version') === MCP_2026_VERSION) {
           return new Response(null, {
