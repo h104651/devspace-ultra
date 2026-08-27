@@ -264,8 +264,108 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     assert.strictEqual(server.taskStore.getTask(taskWrite.taskId)?.status, 'claimed');
     passed++;
 
+    // Reg 8: Device token with no local scopes gets ZERO execution capabilities
+    const devZero = server.authManager.registerDevice('Zero Scope Device', 'windows', []);
+    const wsDevZero = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
+    await new Promise<void>((resolve) => {
+      wsDevZero.on('open', () => {
+        wsDevZero.send(JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg-zero',
+          deviceId: devZero.deviceId,
+          token: devZero.token,
+          capabilities: ['local:read', 'local:write', 'local:test'] // Attempt to request ungranted capabilities
+        }));
+      });
+      wsDevZero.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'AGENT_REGISTERED') resolve();
+      });
+    });
+
+    const registeredZeroAgent = server.connectionManager.getAgent(devZero.deviceId);
+    assert.ok(registeredZeroAgent, 'Zero-scope device connects');
+    assert.deepStrictEqual(registeredZeroAgent.capabilities, [], 'Zero-scope device must receive 0 capabilities');
+    passed++;
+
+    // Reg 9: Zero-scope device cannot claim local:git_status
+    const taskGit = server.taskStore.createTask({
+      backend: 'local',
+      capability: 'local:git_status',
+      payload: { workspace: process.cwd() }
+    });
+    wsDevZero.send(JSON.stringify({
+      type: 'TASK_CLAIM_POLL',
+      messageId: 'poll-zero-git',
+      supportedCapabilities: ['local:git_status']
+    }));
+    await new Promise(r => setTimeout(r, 100));
+    assert.strictEqual(server.taskStore.getTask(taskGit.taskId)?.status, 'queued', 'Zero-scope device cannot claim local:git_status');
+    passed++;
+
+    // Reg 10: local:read device cannot claim local:write task
+    const devRead = server.authManager.registerDevice('Read Only Device', 'windows', ['local:read']);
+    const wsDevRead = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
+    await new Promise<void>((resolve) => {
+      wsDevRead.on('open', () => {
+        wsDevRead.send(JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg-read',
+          deviceId: devRead.deviceId,
+          token: devRead.token
+        }));
+      });
+      wsDevRead.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'AGENT_REGISTERED') resolve();
+      });
+    });
+
+    const taskWrite2 = server.taskStore.createTask({
+      backend: 'local',
+      capability: 'local:write',
+      payload: { write: true }
+    });
+    wsDevRead.send(JSON.stringify({
+      type: 'TASK_CLAIM_POLL',
+      messageId: 'poll-read-write',
+      supportedCapabilities: ['local:write']
+    }));
+    await new Promise(r => setTimeout(r, 100));
+    assert.strictEqual(server.taskStore.getTask(taskWrite2.taskId)?.status, 'queued', 'local:read device cannot claim local:write task');
+    passed++;
+
+    // Reg 11: local:test device cannot claim local:write task
+    const devTest = server.authManager.registerDevice('Test Only Device', 'windows', ['local:test']);
+    const wsDevTest = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
+    await new Promise<void>((resolve) => {
+      wsDevTest.on('open', () => {
+        wsDevTest.send(JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg-test',
+          deviceId: devTest.deviceId,
+          token: devTest.token
+        }));
+      });
+      wsDevTest.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'AGENT_REGISTERED') resolve();
+      });
+    });
+    wsDevTest.send(JSON.stringify({
+      type: 'TASK_CLAIM_POLL',
+      messageId: 'poll-test-write',
+      supportedCapabilities: ['local:write']
+    }));
+    await new Promise(r => setTimeout(r, 100));
+    assert.strictEqual(server.taskStore.getTask(taskWrite2.taskId)?.status, 'queued', 'local:test device cannot claim local:write task');
+    passed++;
+
     wsDevA.close();
     wsDevB.close();
+    wsDevZero.close();
+    wsDevRead.close();
+    wsDevTest.close();
   } catch (err: any) {
     console.error('Durability test failed:', err);
     failed++;

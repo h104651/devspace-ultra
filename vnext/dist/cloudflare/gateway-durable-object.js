@@ -670,9 +670,10 @@ class GatewayDurableObject {
                 }
                 const authoritativeDeviceId = val.payload.subjectId;
                 const tokenCaps = val.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
-                const authorizedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
-                    ? msg.capabilities.filter(c => tokenCaps.includes(c) || val.payload.scopes.includes(c))
-                    : (tokenCaps.length > 0 ? tokenCaps : ['local:read', 'local:write', 'local:test']);
+                const requestedCaps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
+                const authorizedCaps = requestedCaps.length > 0
+                    ? requestedCaps.filter(c => tokenCaps.includes(c) || val.payload.scopes.includes(c))
+                    : tokenCaps;
                 this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, msg.platform || 'windows');
                 ws.serializeAttachment({
                     deviceId: authoritativeDeviceId,

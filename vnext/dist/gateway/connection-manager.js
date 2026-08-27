@@ -82,9 +82,10 @@ class ConnectionManager {
                 return;
             }
             const tokenCaps = auth.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
-            const authorizedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
-                ? msg.capabilities.filter(c => tokenCaps.includes(c) || auth.payload.scopes.includes(c))
-                : (tokenCaps.length > 0 ? tokenCaps : ['local:read', 'local:write', 'local:test']);
+            const requestedCaps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
+            const authorizedCaps = requestedCaps.length > 0
+                ? requestedCaps.filter(c => tokenCaps.includes(c) || auth.payload.scopes.includes(c))
+                : tokenCaps;
             setDeviceId(authoritativeDeviceId);
             const agent = {
                 deviceId: authoritativeDeviceId,
