@@ -349,11 +349,10 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
    * Pulls current or known version source and metadata.
    */
   public async pullProject(owner: string, slug: string, version?: number): Promise<{ metadata: any; source: string }> {
-    if (version !== undefined && version !== null) {
-      throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${version})`);
-    }
-
     if (this.isMockMode) {
+      if (version === 999) {
+        throw new Error('KAGGLE_VERSION_NOT_FOUND: Version 999 not found');
+      }
       const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
       const mockSource = isNotebook
         ? JSON.stringify({
@@ -375,6 +374,7 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
         isPrivate: true,
         enableGpu: isNotebook,
         enableInternet: true,
+        currentVersionNumber: version || 1,
         machineShape: isNotebook ? 'NvidiaTeslaT4' : undefined,
         datasetDataSources: isNotebook ? ['astorhsu/astor-gate2c-8g-kaggle-package'] : [],
         competitionDataSources: [],
@@ -386,22 +386,43 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
     }
 
     try {
-      const url = `${this.baseUrl}/kernels/pull?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(slug)}`;
+      const slugWithVersion = (version !== undefined && version !== null) ? `${slug}/${version}` : slug;
+      const url = `${this.baseUrl}/kernels/pull?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(slugWithVersion)}`;
       const res = await fetch(url, {
         headers: { 'Authorization': this.getAuthHeader() }
       });
 
       if (!res.ok) {
         const errText = await res.text();
+        if (version !== undefined && version !== null) {
+          throw new Error(`KAGGLE_VERSION_PULL_FAILED: HTTP ${res.status}: Failed to pull version ${version} for kernel ${owner}/${slug}: ${errText}`);
+        }
         throw new Error(`KAGGLE_PULL_FAILED: HTTP ${res.status}: ${errText}`);
       }
 
       const data = await res.json() as any;
-      const metadata = data.metadata || {};
-      const source = data.blob?.source || '';
+      if (!data || typeof data !== 'object') {
+        throw new Error('KAGGLE_PROJECT_RESPONSE_UNRECOGNIZED: Response body is not a valid JSON object');
+      }
 
-      return { metadata, source };
+      const metadata = data.metadata;
+      const blob = data.blob;
+
+      if (!metadata && !blob && typeof data.source !== 'string') {
+        throw new Error(`KAGGLE_PROJECT_RESPONSE_UNRECOGNIZED: Response missing both metadata and blob. Keys: ${Object.keys(data).join(',')}`);
+      }
+
+      const source = typeof blob?.source === 'string'
+        ? blob.source
+        : (typeof data.source === 'string' ? data.source : undefined);
+
+      if (source === undefined) {
+        throw new Error(`KAGGLE_PROJECT_SOURCE_MISSING: Source code blob not found in Kaggle response. Blob keys: ${blob ? Object.keys(blob).join(',') : 'none'}`);
+      }
+
+      return { metadata: metadata || {}, source };
     } catch (err: any) {
+      if (err.message?.startsWith('KAGGLE_')) throw err;
       throw new Error(`KAGGLE_PROJECT_PULL_ERROR: ${err.message}`);
     }
   }

@@ -228,8 +228,8 @@ export class KaggleClient {
   }
 
   public async pullProject(owner: string, slug: string, version?: number): Promise<{ metadata: any; source: string }> {
-    if (version !== undefined && version !== null) {
-      throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${version})`);
+    if (version === 999) {
+      throw new Error('KAGGLE_VERSION_NOT_FOUND: Version 999 not found');
     }
 
     const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
@@ -253,6 +253,7 @@ export class KaggleClient {
       isPrivate: true,
       enableGpu: isNotebook,
       enableInternet: true,
+      currentVersionNumber: version || 1,
       machineShape: isNotebook ? 'NvidiaTeslaT4' : undefined,
       datasetDataSources: isNotebook ? ['astorhsu/astor-gate2c-8g-kaggle-package'] : [],
       competitionDataSources: [],

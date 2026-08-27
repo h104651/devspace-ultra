@@ -256,15 +256,12 @@ class McpHandlers {
     async handleKaggleProjectSource(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'kaggle:read', 'tasks:read');
-        if (args.version !== undefined && args.version !== null) {
-            throw new Error(`KAGGLE_VERSION_PULL_NOT_SUPPORTED: Historical version retrieval is not supported by Kaggle REST API (requested version: ${args.version})`);
-        }
         const client = this.gateway.kaggleBackend.getClient();
         if (!client || typeof client.pullProject !== 'function') {
             throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project source is not supported by backend client');
         }
         const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
-        const { metadata, source } = await client.pullProject(owner, slug);
+        const { metadata, source } = await client.pullProject(owner, slug, args.version);
         const rawSource = source || '';
         const sourceSha256 = crypto.createHash('sha256').update(rawSource).digest('hex');
         const projectFingerprint = (0, project_manager_1.computeProjectFingerprint)({
@@ -481,8 +478,39 @@ class McpHandlers {
                 currentFingerprint
             }));
         }
-        // Prepare mutated source
+        // Fail-Safe Suspicious State Guard: reject if state is inconsistent or corrupted
         const mutation = args.mutation || {};
+        const isNotebookExpected = mutation.type === 'append_notebook_cells' || current.metadata.kernelType === 'notebook';
+        if (isNotebookExpected) {
+            if (!currentRawSource || currentRawSource.trim().length === 0) {
+                throw new Error(JSON.stringify({
+                    error: 'KAGGLE_PROJECT_STATE_SUSPICIOUS',
+                    message: 'Project source is unexpectedly empty (0 bytes) for a notebook continuation. Aborting continue to prevent corrupting remote project.'
+                }));
+            }
+            if (current.metadata.kernelType === 'script') {
+                throw new Error(JSON.stringify({
+                    error: 'KAGGLE_PROJECT_STATE_SUSPICIOUS',
+                    message: `Project kernelType resolved to 'script' but notebook continuation was requested. Aborting continue to protect project.`
+                }));
+            }
+            const parsed = (0, project_manager_1.parseNotebookCells)(currentRawSource, { includeCells: false });
+            if (!parsed || parsed.totalCells === 0) {
+                throw new Error(JSON.stringify({
+                    error: 'KAGGLE_PROJECT_STATE_SUSPICIOUS',
+                    message: 'Project source is not a valid Jupyter Notebook structure (0 cells found). Aborting continue.'
+                }));
+            }
+        }
+        else if (mutation.type === 'append_script') {
+            if (current.metadata.kernelType === 'notebook') {
+                throw new Error(JSON.stringify({
+                    error: 'KAGGLE_PROJECT_STATE_SUSPICIOUS',
+                    message: `Project is a notebook but append_script was requested. Use append_notebook_cells instead.`
+                }));
+            }
+        }
+        // Prepare mutated source
         let newSource = '';
         if (mutation.type === 'append_notebook_cells') {
             if (!Array.isArray(mutation.cells) || mutation.cells.length === 0) {

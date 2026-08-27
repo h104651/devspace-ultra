@@ -701,6 +701,27 @@ export class GatewayDurableObject {
         return Response.json({ ok: true, action, state: this.killSwitch.getState() });
       }
 
+      if ((url.pathname === '/admin/tasks' || url.pathname === '/api/admin/tasks') && request.method === 'GET') {
+        const adminAuthError = this.authenticateAdmin(request);
+        if (adminAuthError) return adminAuthError;
+        const tasks = await this.storage.listTasks({ limit: 100 });
+        return Response.json({
+          total: tasks.length,
+          tasks: tasks.map(t => ({
+            taskId: t.taskId,
+            backend: t.backend,
+            capability: t.capability,
+            status: t.status,
+            createdAt: t.createdAt,
+            startedAt: t.startedAt,
+            completedAt: t.completedAt,
+            clientRequestId: t.clientRequestId,
+            kernelSlug: t.payload?.kernelSlug,
+            codeSize: t.payload?.code ? (typeof t.payload.code === 'string' ? t.payload.code.length : JSON.stringify(t.payload.code).length) : undefined
+          }))
+        });
+      }
+
       if ((url.pathname === '/mcp' || url.pathname === '/api/mcp/v1') && request.method === 'GET') {
         if (request.headers.get('MCP-Protocol-Version') === MCP_2026_VERSION) {
           return new Response(null, {
