@@ -4,12 +4,13 @@ import { ClientRecord, DeviceRecord } from '../types/auth';
 import { ArtifactMetadata } from '../types/artifacts';
 import { AuditEvent } from '../types/audit';
 import { R2UsageRecord, IR2UsageStorage } from './r2-usage-guard';
+import { KillSwitchState, IKillSwitchStorage } from '../security/kill-switch';
 
 export interface SqlStorage {
   exec(query: string, ...params: any[]): { toArray(): any[]; one(): any; raw(): any };
 }
 
-export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2UsageStorage {
+export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2UsageStorage, IKillSwitchStorage {
   constructor(private sql: SqlStorage) { this.initTables(); }
 
   private initTables() {
@@ -61,6 +62,9 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
         id TEXT PRIMARY KEY, monthKey TEXT NOT NULL, storedBytes INTEGER NOT NULL,
         objectCount INTEGER NOT NULL, classAOperations INTEGER NOT NULL,
         classBOperations INTEGER NOT NULL, updatedAt INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS kill_switch_state (
+        id TEXT PRIMARY KEY, stateJson TEXT NOT NULL, updatedAt INTEGER NOT NULL
       );
     `);
 
@@ -232,6 +236,25 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       record.classAOperations,
       record.classBOperations,
       record.updatedAt || Date.now()
+    );
+  }
+
+  async getKillSwitchState(): Promise<KillSwitchState | undefined> {
+    const row = this.getFirstRow('SELECT * FROM kill_switch_state WHERE id = ?', 'singleton');
+    if (!row || !row.stateJson) return undefined;
+    try {
+      return JSON.parse(row.stateJson) as KillSwitchState;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async saveKillSwitchState(state: KillSwitchState): Promise<void> {
+    this.sql.exec(
+      `INSERT OR REPLACE INTO kill_switch_state (id, stateJson, updatedAt) VALUES (?, ?, ?)`,
+      'singleton',
+      JSON.stringify(state),
+      Date.now()
     );
   }
 }

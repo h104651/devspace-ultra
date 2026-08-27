@@ -46,13 +46,39 @@ class KillSwitch {
         revokedClientIds: []
     };
     filePath;
-    constructor(storageDir) {
-        if (storageDir) {
-            if (!fs.existsSync(storageDir)) {
-                fs.mkdirSync(storageDir, { recursive: true });
+    storageAdapter;
+    constructor(storageDirOrStorage) {
+        if (typeof storageDirOrStorage === 'string') {
+            if (!fs.existsSync(storageDirOrStorage)) {
+                fs.mkdirSync(storageDirOrStorage, { recursive: true });
             }
-            this.filePath = path.join(storageDir, 'kill_switch_state.json');
+            this.filePath = path.join(storageDirOrStorage, 'kill_switch_state.json');
             this.load();
+        }
+        else if (storageDirOrStorage && typeof storageDirOrStorage === 'object') {
+            this.storageAdapter = storageDirOrStorage;
+        }
+    }
+    async hydrate() {
+        if (this.storageAdapter) {
+            try {
+                const persisted = await this.storageAdapter.getKillSwitchState();
+                if (persisted) {
+                    this.state = {
+                        globalEmergencyStop: !!persisted.globalEmergencyStop,
+                        disableLocalAgentExecution: !!persisted.disableLocalAgentExecution,
+                        disableKaggleExecution: !!persisted.disableKaggleExecution,
+                        disableSwarmExecution: !!persisted.disableSwarmExecution,
+                        revokedDeviceIds: Array.isArray(persisted.revokedDeviceIds) ? persisted.revokedDeviceIds : [],
+                        revokedClientIds: Array.isArray(persisted.revokedClientIds) ? persisted.revokedClientIds : [],
+                        lastTriggeredAt: persisted.lastTriggeredAt,
+                        reason: persisted.reason
+                    };
+                }
+            }
+            catch (err) {
+                console.error('Failed to hydrate durable kill switch state:', err);
+            }
         }
     }
     load() {
@@ -72,8 +98,13 @@ class KillSwitch {
                 fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), 'utf-8');
             }
             catch (err) {
-                console.error('Failed to persist kill switch state:', err);
+                console.error('Failed to persist kill switch state to file:', err);
             }
+        }
+        if (this.storageAdapter) {
+            void this.storageAdapter.saveKillSwitchState({ ...this.state }).catch(err => {
+                console.error('Failed to persist durable kill switch state:', err);
+            });
         }
     }
     getState() {

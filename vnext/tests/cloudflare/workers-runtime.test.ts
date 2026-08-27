@@ -71,6 +71,18 @@ class MockSqlStorage implements SqlStorage {
         return { toArray: () => mapped, one: () => mapped[0] || null, raw: () => selected[0] || null };
       }
 
+      if (tableName === 'kill_switch_state') {
+        const row = table.get(String(params[0])) || allRows[0];
+        const mapped = row ? [{ id: row[0], stateJson: row[1], updatedAt: row[2] }] : [];
+        return { toArray: () => mapped, one: () => mapped[0] || null, raw: () => mapped[0] || null };
+      }
+
+      if (tableName === 'r2_usage_accounting') {
+        const row = table.get(String(params[0])) || allRows[0];
+        const mapped = row ? [{ id: row[0], monthKey: row[1], storedBytes: row[2], objectCount: row[3], classAOperations: row[4], classBOperations: row[5], updatedAt: row[6] }] : [];
+        return { toArray: () => mapped, one: () => mapped[0] || null, raw: () => mapped[0] || null };
+      }
+
       if (q.includes('WHERE') && params.length > 0) {
         const row = table.get(String(params[0]));
         selected = row ? [row] : [];
@@ -257,6 +269,76 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     const statusResultAfterAlarm = JSON.parse(statusBody.result.content[0].text);
     assert.strictEqual(statusResultAfterAlarm.status, 'succeeded');
     assert.strictEqual(kv.get(pollKey)?.[runResult.taskId], undefined, 'Terminal Kaggle task must be removed from pending alarm state');
+    passed++;
+
+    // 6. Durable Kill Switch survives DO instance replacement / restart
+    (durableObject as any).killSwitch.triggerGlobalEmergencyStop('Production incident simulation');
+    assert.strictEqual((durableObject as any).killSwitch.getState().globalEmergencyStop, true);
+
+    const deniedSubmitReq = new Request('https://gateway.workers.dev/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
+      body: JSON.stringify({
+        backend: 'kaggle',
+        capability: 'kaggle:run',
+        payload: { kernelSlug: 'blocked-by-ks' }
+      })
+    });
+    const deniedSubmitRes = await durableObject.fetch(deniedSubmitReq);
+    assert.strictEqual(deniedSubmitRes.status, 400);
+    const deniedBody = await deniedSubmitRes.json() as any;
+    assert.ok(deniedBody.error.includes('EMERGENCY_DENY_ALL'), 'Submission must be blocked when emergency stop is active');
+
+    // Recreate DO instance (simulate restart) and verify emergency stop is hydrated
+    const restartedDo = new GatewayDurableObject(createMockCtx(), durableEnv);
+    await (restartedDo as any).ready;
+    assert.strictEqual((restartedDo as any).killSwitch.getState().globalEmergencyStop, true, 'Emergency stop state must persist across restarts');
+
+    const deniedSubmitReq2 = new Request('https://gateway.workers.dev/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
+      body: JSON.stringify({
+        backend: 'kaggle',
+        capability: 'kaggle:run',
+        payload: { kernelSlug: 'blocked-by-ks' }
+      })
+    });
+    const deniedAfterRestartRes = await restartedDo.fetch(deniedSubmitReq2);
+    assert.strictEqual(deniedAfterRestartRes.status, 400);
+
+    // Test device and client revocation across restart
+    (restartedDo as any).killSwitch.resetGlobalEmergencyStop();
+    (restartedDo as any).killSwitch.revokeDevice('rogue-device-01', 'Security audit failure');
+    (restartedDo as any).killSwitch.revokeClient('compromised-client-02', 'Leaked token');
+
+    const restartedDo2 = new GatewayDurableObject(createMockCtx(), durableEnv);
+    await (restartedDo2 as any).ready;
+    assert.strictEqual((restartedDo2 as any).killSwitch.getState().globalEmergencyStop, false);
+    assert.strictEqual((restartedDo2 as any).killSwitch.isDeviceRevoked('rogue-device-01'), true, 'Revoked device must persist across restarts');
+    assert.strictEqual((restartedDo2 as any).killSwitch.isClientRevoked('compromised-client-02'), true, 'Revoked client must persist across restarts');
+    passed++;
+
+    // 7. Sanitized HTTP 500 Responses: never leaks internal errors/secrets in response body
+    const fakeSecret = 'SUPER_SECRET_INTERNAL_VALUE_DO_NOT_LEAK';
+    const origMethod = (durableObject as any).taskRouter.routeTaskSubmit;
+    (durableObject as any).taskRouter.routeTaskSubmit = async () => {
+      throw new Error(`Database connection failed: user=admin secret=${fakeSecret} path=/var/internal/secrets`);
+    };
+
+    const crashReq = new Request('https://gateway.workers.dev/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
+      body: JSON.stringify({ backend: 'kaggle', capability: 'kaggle:run', payload: {} })
+    });
+    const crashRes = await durableObject.fetch(crashReq);
+    (durableObject as any).taskRouter.routeTaskSubmit = origMethod; // restore
+
+    assert.strictEqual(crashRes.status, 500);
+    const crashJson = await crashRes.json() as any;
+    assert.strictEqual(crashJson.error, 'INTERNAL_ERROR');
+    assert.strictEqual(crashJson.message, undefined, 'Internal exception message must NOT be in HTTP response');
+    const fullResponseText = JSON.stringify(crashJson);
+    assert.ok(!fullResponseText.includes(fakeSecret), 'Secret must NEVER be present in HTTP 500 response body');
     passed++;
   } catch (err: any) {
     console.error('Workers runtime test failed:', err);

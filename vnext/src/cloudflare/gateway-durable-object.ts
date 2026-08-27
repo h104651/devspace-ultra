@@ -113,7 +113,7 @@ export class GatewayDurableObject {
 
     this.authManager = new AuthManager(env.MASTER_SECRET);
     this.oauthManager = new OAuthManager(this.baseUrl, this.authManager, this.storage);
-    this.killSwitch = new KillSwitch();
+    this.killSwitch = new KillSwitch(this.storage);
     this.rateLimiter = new RateLimiter();
     this.auditLogger = new AuditLogger(undefined, this.storage);
     this.taskStore = new TaskStore(undefined, 60000, this.storage);
@@ -170,6 +170,11 @@ export class GatewayDurableObject {
   }
 
   private async initializeFromDurableStorage(): Promise<void> {
+    try {
+      await this.killSwitch.hydrate();
+    } catch (err) {
+      console.error('Failed to hydrate durable kill switch state:', err);
+    }
     try {
       await this.r2Storage.getGuard()?.hydrate();
     } catch (err) {
@@ -659,8 +664,22 @@ export class GatewayDurableObject {
           const result = await this.taskRouter.routeTaskSubmit(body, auth.payload!.scopes, auth.payload!.subjectId);
           return Response.json(result, { status: 202 });
         } catch (err: any) {
-          const status = err.message?.includes('AUTH_FORBIDDEN') ? 403 : 400;
-          return Response.json({ error: err.message }, { status });
+          if (err.message?.includes('AUTH_FORBIDDEN')) {
+            return Response.json({ error: err.message }, { status: 403 });
+          }
+          if (
+            err.message?.startsWith('INVALID_') ||
+            err.message?.startsWith('EMERGENCY_') ||
+            err.message?.startsWith('KILL_SWITCH_') ||
+            err.message?.includes('EMERGENCY_DENY_ALL') ||
+            err.message?.startsWith('UNKNOWN_') ||
+            err.message?.startsWith('UNSUPPORTED_') ||
+            err.message?.startsWith('SCOPE_') ||
+            err.message?.startsWith('R2_USAGE_LIMIT_EXCEEDED')
+          ) {
+            return Response.json({ error: err.message }, { status: 400 });
+          }
+          throw err;
         }
       }
 
@@ -702,7 +721,7 @@ export class GatewayDurableObject {
       return new Response('Not Found', { status: 404 });
     } catch (err: any) {
       console.error('Unhandled exception in GatewayDurableObject fetch:', err);
-      return Response.json({ error: 'INTERNAL_ERROR', message: err.message || String(err) }, { status: 500 });
+      return Response.json({ error: 'INTERNAL_ERROR' }, { status: 500 });
     }
   }
 

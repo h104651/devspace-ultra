@@ -79,9 +79,9 @@ export class CloudflareR2ArtifactStorage {
     const shouldStore = rawBuffer.byteLength >= INLINE_SIZE_THRESHOLD_BYTES || ALWAYS_OBJECT_STORAGE.has(metadata.type);
     if (!shouldStore) return undefined;
 
-    // Hard cost guard check BEFORE performing R2 network operation
+    // Reservation-first: Durably reserve quota BEFORE calling R2.put
     if (this.guard) {
-      await this.guard.checkAndValidatePut(rawBuffer.byteLength);
+      await this.guard.reservePut(rawBuffer.byteLength);
     }
 
     const key = this.objectKey(metadata);
@@ -95,26 +95,19 @@ export class CloudflareR2ArtifactStorage {
       }
     });
 
-    if (this.guard) {
-      await this.guard.recordPutSuccess(rawBuffer.byteLength);
-    }
-
     return key;
   }
 
   public async getArtifactContent(r2Key: string): Promise<ArrayBuffer | null> {
     if (!this.r2) return null;
 
+    // Reservation-first: Durably reserve Class B operation BEFORE calling R2.get
     if (this.guard) {
-      await this.guard.checkAndValidateGet();
+      await this.guard.reserveGet();
     }
 
     const obj = await this.r2.get(r2Key);
     if (!obj) return null;
-
-    if (this.guard) {
-      await this.guard.recordGetSuccess();
-    }
 
     return obj.arrayBuffer();
   }
@@ -126,14 +119,15 @@ export class CloudflareR2ArtifactStorage {
   public async deleteArtifact(r2Key: string, sizeBytes?: number): Promise<void> {
     if (!this.r2) return;
 
+    // Reservation-first: Durably reserve Class A operation BEFORE calling R2.delete
     if (this.guard) {
-      await this.guard.checkAndValidateDelete();
+      await this.guard.reserveDelete();
     }
 
     await this.r2.delete(r2Key);
 
     if (this.guard) {
-      await this.guard.recordDeleteSuccess(sizeBytes);
+      await this.guard.confirmDelete(sizeBytes);
     }
   }
 }

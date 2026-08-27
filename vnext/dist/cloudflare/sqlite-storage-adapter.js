@@ -57,6 +57,9 @@ class CloudflareSqliteStorageAdapter {
         objectCount INTEGER NOT NULL, classAOperations INTEGER NOT NULL,
         classBOperations INTEGER NOT NULL, updatedAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS kill_switch_state (
+        id TEXT PRIMARY KEY, stateJson TEXT NOT NULL, updatedAt INTEGER NOT NULL
+      );
     `);
         // Existing Durable Object databases created by the previous build need an
         // additive migration. Ignore duplicate-column errors on fresh databases.
@@ -220,6 +223,20 @@ class CloudflareSqliteStorageAdapter {
         this.sql.exec(`INSERT OR REPLACE INTO r2_usage_accounting (
         id, monthKey, storedBytes, objectCount, classAOperations, classBOperations, updatedAt
       ) VALUES (?, ?, ?, ?, ?, ?, ?)`, 'singleton', record.monthKey, record.storedBytes, record.objectCount, record.classAOperations, record.classBOperations, record.updatedAt || Date.now());
+    }
+    async getKillSwitchState() {
+        const row = this.getFirstRow('SELECT * FROM kill_switch_state WHERE id = ?', 'singleton');
+        if (!row || !row.stateJson)
+            return undefined;
+        try {
+            return JSON.parse(row.stateJson);
+        }
+        catch {
+            return undefined;
+        }
+    }
+    async saveKillSwitchState(state) {
+        this.sql.exec(`INSERT OR REPLACE INTO kill_switch_state (id, stateJson, updatedAt) VALUES (?, ?, ?)`, 'singleton', JSON.stringify(state), Date.now());
     }
 }
 exports.CloudflareSqliteStorageAdapter = CloudflareSqliteStorageAdapter;
