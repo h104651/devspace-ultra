@@ -172,7 +172,7 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
 
     const testMasterSecret = 'test-workers-secret-32-bytes-minimum-1234567890';
     const authManager = new AuthManager(testMasterSecret);
-    const { token: clientToken } = authManager.generateToken('cf-client', 'client', ['admin']);
+    const { token: clientToken } = authManager.generateToken('cf-client', 'client', ['mcp:access', 'tasks:submit', 'tasks:read', 'kaggle:submit', 'kaggle:read', 'local:read', 'local:test']);
     const kv = new Map<string, any>();
     let alarmAt: number | null = null;
 
@@ -339,6 +339,35 @@ export async function runWorkersRuntimeTests(): Promise<{ passed: number; failed
     assert.strictEqual(crashJson.message, undefined, 'Internal exception message must NOT be in HTTP response');
     const fullResponseText = JSON.stringify(crashJson);
     assert.ok(!fullResponseText.includes(fakeSecret), 'Secret must NEVER be present in HTTP 500 response body');
+    passed++;
+
+    // 8. Kill Switch Endpoint Authorization: Normal OAuth client rejected (403), Independent Admin allowed (200)
+    const normalKsReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
+      body: JSON.stringify({ action: 'EMERGENCY_STOP' })
+    });
+    const normalKsRes = await durableObject.fetch(normalKsReq);
+    assert.strictEqual(normalKsRes.status, 403, 'Normal ChatGPT OAuth token must be rejected from admin kill switch');
+
+    const adminKsReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testMasterSecret },
+      body: JSON.stringify({ action: 'EMERGENCY_STOP', reason: 'Admin unit test' })
+    });
+    const adminKsRes = await durableObject.fetch(adminKsReq);
+    assert.strictEqual(adminKsRes.status, 200, 'Independent admin credential must be allowed to execute Kill Switch');
+    const adminKsJson = await adminKsRes.json() as any;
+    assert.strictEqual(adminKsJson.ok, true);
+
+    // Clear stop with admin credential
+    const clearKsReq = new Request('https://gateway.workers.dev/admin/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testMasterSecret },
+      body: JSON.stringify({ action: 'CLEAR_STOP' })
+    });
+    const clearKsRes = await durableObject.fetch(clearKsReq);
+    assert.strictEqual(clearKsRes.status, 200);
     passed++;
   } catch (err: any) {
     console.error('Workers runtime test failed:', err);

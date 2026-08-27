@@ -15,16 +15,6 @@ export const CHATGPT_LEAST_PRIVILEGE_SCOPES = [
   'swarm:dispatch'
 ];
 
-export const ALL_SUPPORTED_SCOPES = [
-  ...CHATGPT_LEAST_PRIVILEGE_SCOPES,
-  'admin',
-  'admin:health',
-  'admin:kill-switch',
-  'local:write',
-  'local:git_status',
-  'tasks:cancel'
-];
-
 export interface OAuthClientRegistration {
   clientId: string;
   clientSecret?: string;
@@ -159,11 +149,14 @@ export class OAuthManager {
   private sanitizeScopes(scope?: string): string[] {
     if (!scope) return [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
     const requested = scope.split(/[\s,]+/).filter(Boolean);
-    const granted = [...new Set(requested.filter(s => ALL_SUPPORTED_SCOPES.includes(s)))];
-    if (granted.length === 0) {
-      throw new Error('INVALID_SCOPE: no requested OAuth scopes are supported');
+    if (requested.length === 0) return [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
+
+    const unallowed = requested.filter(s => !CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+    if (unallowed.length > 0) {
+      throw new Error(`INVALID_SCOPE: requested scope '${unallowed.join(' ')}' is not permitted for public OAuth clients`);
     }
-    return granted;
+
+    return [...new Set(requested)];
   }
 
   public async createAuthorizationCode(params: {
@@ -184,6 +177,8 @@ export class OAuthManager {
     const resource = params.resource || this.expectedResource;
     if (resource !== this.expectedResource) throw new Error('INVALID_TARGET: resource must identify this MCP protected resource');
 
+    const grantedScopes = this.sanitizeScopes(params.scope);
+
     const code = `dsu_code_${crypto.randomUUID()}`;
     const record: OAuthCodeRecord = {
       code,
@@ -191,7 +186,7 @@ export class OAuthManager {
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
       codeChallengeMethod: 'S256',
-      scope: this.sanitizeScopes(params.scope).join(' '),
+      scope: grantedScopes.join(' '),
       state: params.state,
       resource,
       expiresAt: Date.now() + 10 * 60 * 1000
@@ -227,8 +222,12 @@ export class OAuthManager {
     if (computed !== codeRecord.codeChallenge) throw new Error('INVALID_GRANT: PKCE code_verifier challenge mismatch');
 
     await this.storage.deleteOAuthCode(params.code);
-    const scopes = codeRecord.scope.split(' ').filter((s: string) => ALL_SUPPORTED_SCOPES.includes(s));
-    const granted = scopes.length > 0 ? scopes : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
+    const codeScopes = codeRecord.scope.split(' ').filter(Boolean);
+    const unallowed = codeScopes.filter((s: string) => !CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+    if (unallowed.length > 0) {
+      throw new Error('INVALID_GRANT: authorization code contains forbidden privileged scopes');
+    }
+    const granted = codeScopes.length > 0 ? codeScopes : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
 
     const access = this.authManager.generateToken(params.clientId, 'client', granted, 60 * 60 * 1000, {
       purpose: 'access_token', resource: codeRecord.resource, clientId: params.clientId
@@ -255,8 +254,14 @@ export class OAuthManager {
     const boundResource = val.payload.metadata?.resource;
     if (boundResource !== this.expectedResource || (requestedResource && requestedResource !== boundResource)) throw new Error('INVALID_TARGET: resource mismatch');
 
-    const granted = (val.payload.scopes || []).filter(s => ALL_SUPPORTED_SCOPES.includes(s));
-    const finalScopes = granted.length > 0 ? granted : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
+    const tokenScopes = val.payload.scopes || [];
+    const unallowed = tokenScopes.filter(s => !CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+    if (unallowed.length > 0) {
+      this.authManager.revokeToken(val.payload.tokenId);
+      await this.storage.revokeToken(val.payload.tokenId);
+      throw new Error('INVALID_GRANT: refresh token contains forbidden privileged scopes; reauthorization required');
+    }
+    const finalScopes = tokenScopes.length > 0 ? tokenScopes : [...CHATGPT_LEAST_PRIVILEGE_SCOPES];
 
     this.authManager.revokeToken(val.payload.tokenId);
     await this.storage.revokeToken(val.payload.tokenId);

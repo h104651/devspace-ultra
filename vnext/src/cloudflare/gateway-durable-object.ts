@@ -613,7 +613,7 @@ export class GatewayDurableObject {
       if ((url.pathname === '/admin/kill-switch' || url.pathname === '/api/admin/kill-switch') && request.method === 'GET') {
         const auth = await this.authenticate(request);
         if (auth.error) return auth.error;
-        if (!ScopeChecker.hasScope(auth.payload!.scopes, 'admin:health') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin')) {
+        if (!ScopeChecker.hasScope(auth.payload!.scopes, 'admin:health') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin:kill-switch')) {
           return Response.json({ error: 'FORBIDDEN: admin scope required' }, { status: 403 });
         }
         return Response.json({ state: this.killSwitch.getState() });
@@ -622,7 +622,7 @@ export class GatewayDurableObject {
       if ((url.pathname === '/admin/kill-switch' || url.pathname === '/api/admin/kill-switch') && request.method === 'POST') {
         const auth = await this.authenticate(request);
         if (auth.error) return auth.error;
-        if (!ScopeChecker.hasScope(auth.payload!.scopes, 'admin:health') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin')) {
+        if (!ScopeChecker.hasScope(auth.payload!.scopes, 'admin:health') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin') && !ScopeChecker.hasScope(auth.payload!.scopes, 'admin:kill-switch')) {
           return Response.json({ error: 'FORBIDDEN: admin scope required' }, { status: 403 });
         }
         const body = await request.json() as any;

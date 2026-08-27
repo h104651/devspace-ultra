@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.OAuthManager = exports.ALL_SUPPORTED_SCOPES = exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = void 0;
+exports.OAuthManager = exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = [
     'offline_access',
@@ -16,15 +16,6 @@ exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = [
     'local:read',
     'local:test',
     'swarm:dispatch'
-];
-exports.ALL_SUPPORTED_SCOPES = [
-    ...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES,
-    'admin',
-    'admin:health',
-    'admin:kill-switch',
-    'local:write',
-    'local:git_status',
-    'tasks:cancel'
 ];
 function htmlEscape(value) {
     return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -135,11 +126,13 @@ class OAuthManager {
         if (!scope)
             return [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
         const requested = scope.split(/[\s,]+/).filter(Boolean);
-        const granted = [...new Set(requested.filter(s => exports.ALL_SUPPORTED_SCOPES.includes(s)))];
-        if (granted.length === 0) {
-            throw new Error('INVALID_SCOPE: no requested OAuth scopes are supported');
+        if (requested.length === 0)
+            return [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
+        const unallowed = requested.filter(s => !exports.CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+        if (unallowed.length > 0) {
+            throw new Error(`INVALID_SCOPE: requested scope '${unallowed.join(' ')}' is not permitted for public OAuth clients`);
         }
-        return granted;
+        return [...new Set(requested)];
     }
     async createAuthorizationCode(params) {
         if (!params.clientId)
@@ -154,6 +147,7 @@ class OAuthManager {
         const resource = params.resource || this.expectedResource;
         if (resource !== this.expectedResource)
             throw new Error('INVALID_TARGET: resource must identify this MCP protected resource');
+        const grantedScopes = this.sanitizeScopes(params.scope);
         const code = `dsu_code_${crypto_1.default.randomUUID()}`;
         const record = {
             code,
@@ -161,7 +155,7 @@ class OAuthManager {
             redirectUri: params.redirectUri,
             codeChallenge: params.codeChallenge,
             codeChallengeMethod: 'S256',
-            scope: this.sanitizeScopes(params.scope).join(' '),
+            scope: grantedScopes.join(' '),
             state: params.state,
             resource,
             expiresAt: Date.now() + 10 * 60 * 1000
@@ -193,8 +187,12 @@ class OAuthManager {
         if (computed !== codeRecord.codeChallenge)
             throw new Error('INVALID_GRANT: PKCE code_verifier challenge mismatch');
         await this.storage.deleteOAuthCode(params.code);
-        const scopes = codeRecord.scope.split(' ').filter((s) => exports.ALL_SUPPORTED_SCOPES.includes(s));
-        const granted = scopes.length > 0 ? scopes : [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
+        const codeScopes = codeRecord.scope.split(' ').filter(Boolean);
+        const unallowed = codeScopes.filter((s) => !exports.CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+        if (unallowed.length > 0) {
+            throw new Error('INVALID_GRANT: authorization code contains forbidden privileged scopes');
+        }
+        const granted = codeScopes.length > 0 ? codeScopes : [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
         const access = this.authManager.generateToken(params.clientId, 'client', granted, 60 * 60 * 1000, {
             purpose: 'access_token', resource: codeRecord.resource, clientId: params.clientId
         });
@@ -220,8 +218,14 @@ class OAuthManager {
         const boundResource = val.payload.metadata?.resource;
         if (boundResource !== this.expectedResource || (requestedResource && requestedResource !== boundResource))
             throw new Error('INVALID_TARGET: resource mismatch');
-        const granted = (val.payload.scopes || []).filter(s => exports.ALL_SUPPORTED_SCOPES.includes(s));
-        const finalScopes = granted.length > 0 ? granted : [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
+        const tokenScopes = val.payload.scopes || [];
+        const unallowed = tokenScopes.filter(s => !exports.CHATGPT_LEAST_PRIVILEGE_SCOPES.includes(s));
+        if (unallowed.length > 0) {
+            this.authManager.revokeToken(val.payload.tokenId);
+            await this.storage.revokeToken(val.payload.tokenId);
+            throw new Error('INVALID_GRANT: refresh token contains forbidden privileged scopes; reauthorization required');
+        }
+        const finalScopes = tokenScopes.length > 0 ? tokenScopes : [...exports.CHATGPT_LEAST_PRIVILEGE_SCOPES];
         this.authManager.revokeToken(val.payload.tokenId);
         await this.storage.revokeToken(val.payload.tokenId);
         const access = this.authManager.generateToken(val.payload.subjectId, 'client', finalScopes, 60 * 60 * 1000, {
