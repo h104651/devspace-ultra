@@ -744,6 +744,7 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
 
   /**
    * Lists files contained in a specific dataset version.
+   * Auto-paginates all pages when pageToken is omitted up to safety limit of 50 pages.
    */
   public async listDatasetFiles(
     owner: string,
@@ -763,6 +764,12 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
           for (const [name, buf] of verData.files.entries()) {
             files.push({ name, totalBytes: buf.length });
           }
+          if (pageToken) {
+            const offset = parseInt(pageToken, 10) || 0;
+            const slice = files.slice(offset, offset + pageSize);
+            const nextTok = (offset + pageSize < files.length) ? String(offset + pageSize) : undefined;
+            return { datasetFiles: slice, nextPageToken: nextTok };
+          }
           return { datasetFiles: files };
         }
       }
@@ -774,6 +781,35 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       };
     }
 
+    if (pageToken) {
+      return this.fetchSingleDatasetFilesPage(owner, slug, version, pageSize, pageToken);
+    }
+
+    // Auto-paginate through all pages up to hard safety limit (50 pages / 5,000 files)
+    const allFiles: KaggleDatasetFileEntry[] = [];
+    let curToken: string | undefined = undefined;
+    let pageCount = 0;
+    const MAX_PAGES = 50;
+
+    do {
+      const pageResult = await this.fetchSingleDatasetFilesPage(owner, slug, version, pageSize, curToken);
+      allFiles.push(...pageResult.datasetFiles);
+      curToken = pageResult.nextPageToken;
+      pageCount++;
+    } while (curToken && pageCount < MAX_PAGES);
+
+    return {
+      datasetFiles: allFiles
+    };
+  }
+
+  private async fetchSingleDatasetFilesPage(
+    owner: string,
+    slug: string,
+    version?: number,
+    pageSize = 100,
+    pageToken?: string
+  ): Promise<{ datasetFiles: KaggleDatasetFileEntry[]; nextPageToken?: string }> {
     const url = `${this.baseUrl}/datasets.DatasetApiService/ListDatasetFiles`;
     const reqBody: any = {
       ownerSlug: owner,

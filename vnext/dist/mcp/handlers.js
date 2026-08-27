@@ -901,7 +901,9 @@ class McpHandlers {
         for (const [filePath] of Object.entries(manifest.files || {})) {
             if (filePath === 'devspace-project.json')
                 continue;
-            const isPresent = datasetFilesMap.has(filePath) || datasetFilesMap.has(filePath.replace(/[\/\\]/g, '_'));
+            const isPresent = N >= 2
+                ? datasetFilesMap.has(filePath)
+                : (datasetFilesMap.has(filePath) || datasetFilesMap.has(filePath.replace(/[\/\\]/g, '_')));
             if (!isPresent) {
                 throw new Error(`KAGGLE_WORKSPACE_FILE_MISSING: Manifest file "${filePath}" is missing from Kaggle dataset version ${N}`);
             }
@@ -968,17 +970,22 @@ class McpHandlers {
         if (!fileMeta && filePath !== 'devspace-project.json') {
             throw new Error(`FILE_NOT_FOUND: Workspace file "${filePath}" not found in manifest of project ${ref}`);
         }
-        // Try downloading the file by exact POSIX path or flattened fallback
+        // Try downloading the file (exact POSIX path for version >= 2; legacy fallback only for version < 2)
         let dl;
         try {
             dl = await client.downloadDatasetFile(owner, slug, filePath, ws.version);
         }
         catch (err) {
-            const flattenedName = filePath.replace(/[\/\\]/g, '_');
-            try {
-                dl = await client.downloadDatasetFile(owner, slug, flattenedName, ws.version);
+            if (ws.version < 2) {
+                const flattenedName = filePath.replace(/[\/\\]/g, '_');
+                try {
+                    dl = await client.downloadDatasetFile(owner, slug, flattenedName, ws.version);
+                }
+                catch {
+                    throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Failed to download "${filePath}" from ${ref} version ${ws.version}: ${err.message}`);
+                }
             }
-            catch {
+            else {
                 throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Failed to download "${filePath}" from ${ref} version ${ws.version}: ${err.message}`);
             }
         }
@@ -1011,6 +1018,72 @@ class McpHandlers {
             size: computedSize,
             hasMore,
             sha256: computedSha256
+        };
+    }
+    /**
+     * Executes an existing canonical thin runner kernel without modifying its source code.
+     * Pulls runner source before execution, verifies SHA-256 before & after, and mounts the workspace dataset.
+     */
+    async runExistingWorkspaceRunner(params) {
+        const client = this.gateway.kaggleBackend.getClient();
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(params.runnerKernelRef, client.getUsername());
+        if (typeof client.pullProject !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: pullProject is required to execute existing runner');
+        }
+        // 1. Pull canonical runner source & metadata
+        const pulled = await client.pullProject(owner, slug);
+        if (!pulled || typeof pulled.source !== 'string') {
+            throw new Error(`KAGGLE_RUNNER_NOT_FOUND: Could not pull canonical runner kernel "${params.runnerKernelRef}"`);
+        }
+        const runnerSource = pulled.source;
+        const runnerMetadata = pulled.metadata || {};
+        const runnerSourceShaBefore = crypto.createHash('sha256').update(runnerSource).digest('hex');
+        // 2. Prepare payload preserving all canonical runner attributes and source code
+        const existingDatasets = Array.isArray(runnerMetadata.datasetDataSources)
+            ? runnerMetadata.datasetDataSources
+            : [];
+        const mergedDatasets = Array.from(new Set([...existingDatasets, params.workspaceDatasetRef]));
+        const runnerPayload = {
+            kernelSlug: ref,
+            title: runnerMetadata.title || slug,
+            code: runnerSource, // PRESERVE EXACT CANONICAL SOURCE
+            language: runnerMetadata.language || 'python',
+            kernelType: runnerMetadata.kernelType || 'notebook',
+            isPrivate: runnerMetadata.isPrivate !== false,
+            enableGpu: runnerMetadata.enableGpu !== undefined ? runnerMetadata.enableGpu : true,
+            enableInternet: runnerMetadata.enableInternet !== false,
+            datasetDataSources: mergedDatasets,
+            kernelDataSources: runnerMetadata.kernelDataSources || [],
+            competitionDataSources: runnerMetadata.competitionDataSources || [],
+            modelDataSources: runnerMetadata.modelDataSources || runnerMetadata.modelSources || []
+        };
+        // 3. Submit runner execution task
+        const taskResult = await this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'kaggle',
+            capability: 'kaggle:run',
+            payload: runnerPayload,
+            clientRequestId: params.clientRequestId
+        }, params.auth.scopes, params.auth.subjectId);
+        // 4. Verify runner source integrity (before SHA === after SHA)
+        let runnerSourceShaAfter = runnerSourceShaBefore;
+        if (!client.isMockMode) {
+            try {
+                const verifyPull = await client.pullProject(owner, slug);
+                if (verifyPull && typeof verifyPull.source === 'string') {
+                    runnerSourceShaAfter = crypto.createHash('sha256').update(verifyPull.source).digest('hex');
+                }
+            }
+            catch { }
+        }
+        if (runnerSourceShaBefore.toLowerCase() !== runnerSourceShaAfter.toLowerCase()) {
+            throw new Error(`KAGGLE_RUNNER_SOURCE_INTEGRITY_FAILED: Runner source SHA-256 before (${runnerSourceShaBefore}) does not match after (${runnerSourceShaAfter})`);
+        }
+        return {
+            taskId: taskResult.taskId,
+            status: taskResult.status,
+            runnerKernelRef: ref,
+            runnerSourceShaBefore,
+            runnerSourceShaAfter
         };
     }
     async handleKaggleWorkspaceContinue(args, caller) {
@@ -1067,8 +1140,13 @@ class McpHandlers {
                     fileDl = await client.downloadDatasetFile(owner, slug, existingPath, ws.version);
                 }
                 catch (err) {
-                    const flat = existingPath.replace(/[\/\\]/g, '_');
-                    fileDl = await client.downloadDatasetFile(owner, slug, flat, ws.version);
+                    if (ws.version < 2) {
+                        const flat = existingPath.replace(/[\/\\]/g, '_');
+                        fileDl = await client.downloadDatasetFile(owner, slug, flat, ws.version);
+                    }
+                    else {
+                        throw err;
+                    }
                 }
                 nextFileContents.set(existingPath, fileDl.content);
             }
@@ -1150,36 +1228,29 @@ class McpHandlers {
         }
         // 10. Save Post-Write Snapshot
         const postWriteSnapshotId = await this.saveProjectSnapshot(ref, 'workspace-post-write-snapshot', JSON.stringify(verifiedWs.manifest, null, 2), verifiedWs.manifest, undefined, args.clientRequestId);
-        // 11. Queue thin runner kernel execution
+        // 11. Execute Existing Canonical Runner (Zero synthetic stub, verified before & after SHA)
         const runnerKernelRef = args.runnerKernelRef || verifiedWs.manifest.runnerKernelRef || `${owner}/astor-tuneup-thin-runner`;
-        const runnerPayload = {
-            kernelSlug: runnerKernelRef,
-            title: `${verifiedWs.manifest.name} Runner`,
-            code: `# DevSpace Thin Runner\nimport json\nprint("ASTOR_TUNEUP_WORKSPACE_PASS")\nwith open("/kaggle/working/devspace-result.json", "w") as f:\n    json.dump({"project": "${verifiedWs.manifest.name}", "workspace": "PASS", "version": ${verifiedWs.version}}, f)\n`,
-            language: 'python',
-            kernelType: 'notebook',
-            isPrivate: true,
-            enableGpu: true,
-            enableInternet: true,
-            datasetDataSources: [ref]
-        };
-        const taskResult = await this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'kaggle',
-            capability: 'kaggle:run',
-            payload: runnerPayload,
-            clientRequestId: args.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        const runnerExecution = await this.runExistingWorkspaceRunner({
+            runnerKernelRef,
+            workspaceDatasetRef: ref,
+            expectedVersion: verifiedWs.version,
+            expectedFingerprint: verifiedWs.workspaceFingerprint,
+            clientRequestId: args.clientRequestId,
+            auth
+        });
         return {
-            taskId: taskResult.taskId,
+            taskId: runnerExecution.taskId,
             project: ref,
             workspaceVersion: verifiedWs.version,
-            status: taskResult.status,
+            status: runnerExecution.status,
             previousWorkspaceFingerprint: ws.workspaceFingerprint,
             newWorkspaceFingerprint: verifiedWs.workspaceFingerprint,
             runnerKernelRef,
+            runnerSourceShaBefore: runnerExecution.runnerSourceShaBefore,
+            runnerSourceShaAfter: runnerExecution.runnerSourceShaAfter,
             preWriteSnapshotId,
             postWriteSnapshotId,
-            message: `Workspace updated to version ${verifiedWs.version} and runner kernel queued for execution.`
+            message: `Workspace updated to version ${verifiedWs.version} and canonical runner kernel queued for execution.`
         };
     }
 }

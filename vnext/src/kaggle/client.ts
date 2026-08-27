@@ -373,6 +373,12 @@ export class KaggleClient {
         for (const [name, buf] of verData.files.entries()) {
           files.push({ name, totalBytes: buf.length });
         }
+        if (pageToken) {
+          const offset = parseInt(pageToken, 10) || 0;
+          const slice = files.slice(offset, offset + pageSize);
+          const nextTok = (offset + pageSize < files.length) ? String(offset + pageSize) : undefined;
+          return { datasetFiles: slice, nextPageToken: nextTok };
+        }
         return { datasetFiles: files };
       }
     }

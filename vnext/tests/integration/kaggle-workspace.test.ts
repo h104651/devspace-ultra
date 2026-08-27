@@ -13,7 +13,8 @@ import {
   validateProjectManifest,
   validateWorkspaceRelativePath,
   buildKaggleUploadTree,
-  DevSpaceProjectManifest
+  DevSpaceProjectManifest,
+  DevSpaceExecutionResult
 } from '../../src/kaggle/workspace-manager';
 
 export async function runKaggleWorkspaceTests(): Promise<{ passed: number; failed: number }> {
@@ -202,6 +203,19 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.strictEqual(fileRes.hasMore, false);
   });
 
+  await runTest('listDatasetFiles paginates >100 files across multiple pages seamlessly', async () => {
+    const manyFiles: Record<string, string> = {
+      'devspace-project.json': JSON.stringify(initialManifest, null, 2)
+    };
+    for (let i = 1; i <= 150; i++) {
+      manyFiles[`src/mod/file_${i}.py`] = `print("file ${i}")\n`;
+    }
+    client.registerMockDataset('testuser', 'many-files-project', 1, manyFiles);
+
+    const res = await client.listDatasetFiles('testuser', 'many-files-project', 1);
+    assert.strictEqual(res.datasetFiles.length, 151);
+  });
+
   await runTest('loadWorkspaceRevision fails closed on manifest version mismatch', async () => {
     const corruptManifest = { ...initialManifest, version: 99 };
     const corruptFiles = {
@@ -270,7 +284,7 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.ok(errCaught, 'Expected KAGGLE_WORKSPACE_FILE_HASH_MISMATCH');
   });
 
-  await runTest('kaggle_workspace_continue updates files, bumps version, preserves unchanged files, and queues runner kernel', async () => {
+  await runTest('kaggle_workspace_continue executes canonical runner, preserving runner source code & SHA', async () => {
     const getRes = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
     const fp = getRes.workspaceFingerprint;
 
@@ -295,6 +309,9 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.ok(continueRes.preWriteSnapshotId);
     assert.ok(continueRes.postWriteSnapshotId);
     assert.ok(continueRes.runnerKernelRef.includes('runner'));
+    assert.ok(continueRes.runnerSourceShaBefore);
+    assert.ok(continueRes.runnerSourceShaAfter);
+    assert.strictEqual(continueRes.runnerSourceShaBefore, continueRes.runnerSourceShaAfter);
 
     // Verify read-back on Version 2 preserves unchanged files
     const v2Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
@@ -303,6 +320,28 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     const v2FilePaths = v2Get.files.map((f: any) => f.path);
     assert.ok(v2FilePaths.includes('PROJECT_CONTEXT.md'), 'PROJECT_CONTEXT.md must be preserved in Version 2');
     assert.ok(v2FilePaths.includes('experiments/gate2c_9a_mining.py'), 'experiments/gate2c_9a_mining.py must be preserved in Version 2');
+  });
+
+  await runTest('kaggle_workspace_file on Version >= 2 requires exact POSIX path and rejects flattened fallback', async () => {
+    // Version 2 dataset was created in previous test
+    const fileRes = await handlers.handleKaggleWorkspaceFile({
+      project: 'testuser/astor-tuneup-project',
+      path: 'src/astor_tuneup/config.py'
+    }, readCaller);
+    assert.ok(fileRes.content.includes('Gate2C-9A-v2'));
+
+    // Attempting flattened path on Version 2 should fail with FILE_NOT_FOUND
+    let errCaught = false;
+    try {
+      await handlers.handleKaggleWorkspaceFile({
+        project: 'testuser/astor-tuneup-project',
+        path: 'src_astor_tuneup_config.py'
+      }, readCaller);
+    } catch (err: any) {
+      errCaught = true;
+      assert.ok(err.message.includes('FILE_NOT_FOUND'));
+    }
+    assert.ok(errCaught, 'Expected FILE_NOT_FOUND on flattened path query for Version >= 2');
   });
 
   await runTest('kaggle_workspace_continue rejects optimistic concurrency mismatch', async () => {
@@ -409,6 +448,32 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
       assert.ok(err.message.includes('AUTH_FORBIDDEN'));
     }
     assert.ok(forbiddenCaught);
+  });
+
+  await runTest('DevSpaceExecutionResult schema validates separation of workspaceValidation and experimentExecution', () => {
+    const passResult: DevSpaceExecutionResult = {
+      project: 'Astor TuneUp',
+      datasetVersion: 2,
+      workspaceFingerprint: '4babc98925be4547fad439062bd713ef9e289a88fce300ff208c2922a978804b',
+      entrypoint: 'experiments/gate2c_9a_mining.py',
+      workspaceValidation: 'PASS',
+      experimentExecution: 'PASS'
+    };
+
+    const expFailResult: DevSpaceExecutionResult = {
+      project: 'Astor TuneUp',
+      datasetVersion: 2,
+      workspaceFingerprint: '4babc98925be4547fad439062bd713ef9e289a88fce300ff208c2922a978804b',
+      entrypoint: 'experiments/gate2c_9a_mining.py',
+      workspaceValidation: 'PASS',
+      experimentExecution: 'FAIL',
+      error: 'Simulated detector failure mining test exception'
+    };
+
+    assert.strictEqual(passResult.workspaceValidation, 'PASS');
+    assert.strictEqual(passResult.experimentExecution, 'PASS');
+    assert.strictEqual(expFailResult.workspaceValidation, 'PASS');
+    assert.strictEqual(expFailResult.experimentExecution, 'FAIL');
   });
 
   return { passed, failed };

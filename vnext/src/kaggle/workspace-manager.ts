@@ -32,6 +32,17 @@ export interface DevSpaceProjectManifest {
   metadata?: Record<string, any>;
 }
 
+export interface DevSpaceExecutionResult {
+  project: string;
+  datasetVersion: number;
+  workspaceFingerprint: string;
+  entrypoint: string;
+  workspaceValidation: 'PASS' | 'FAIL';
+  experimentExecution: 'PASS' | 'FAIL';
+  error?: string;
+  timestamp?: number;
+}
+
 /**
  * Computes canonical workspace fingerprint from project manifest file mappings.
  */
