@@ -988,52 +988,7 @@ class GatewayDurableObject {
         return { payload };
     }
     getToolsList() {
-        return [
-            { name: 'remote_task_submit', description: 'Submit durable task to local agent, Kaggle, browser, or swarm backend', inputSchema: tools.REMOTE_TASK_SUBMIT_SCHEMA },
-            { name: 'remote_task_status', description: 'Query durable task status', inputSchema: tools.REMOTE_TASK_STATUS_SCHEMA },
-            { name: 'remote_task_logs', description: 'Fetch task execution logs', inputSchema: tools.REMOTE_TASK_LOGS_SCHEMA },
-            { name: 'remote_task_artifacts', description: 'List task artifacts', inputSchema: tools.REMOTE_TASK_ARTIFACTS_SCHEMA },
-            { name: 'remote_task_cancel', description: 'Cancel active task', inputSchema: tools.REMOTE_TASK_CANCEL_SCHEMA },
-            { name: 'kaggle_run', description: 'Run code on Kaggle backend', inputSchema: tools.KAGGLE_RUN_SCHEMA },
-            { name: 'kaggle_status', description: 'Check Kaggle execution status', inputSchema: tools.KAGGLE_STATUS_SCHEMA },
-            { name: 'kaggle_logs', description: 'Fetch Kaggle execution logs', inputSchema: tools.KAGGLE_LOGS_SCHEMA },
-            { name: 'kaggle_result', description: 'Retrieve Kaggle results and artifacts', inputSchema: tools.KAGGLE_RESULT_SCHEMA },
-            { name: 'kaggle_project_list', description: 'Discover existing Kaggle notebooks and scripts', inputSchema: tools.KAGGLE_PROJECT_LIST_SCHEMA },
-            { name: 'kaggle_project_get', description: 'Retrieve current Kaggle project metadata and optimistic concurrency fingerprint', inputSchema: tools.KAGGLE_PROJECT_GET_SCHEMA },
-            { name: 'kaggle_project_source', description: 'Read current or known-version project source code with notebook cell structure', inputSchema: tools.KAGGLE_PROJECT_SOURCE_SCHEMA },
-            { name: 'kaggle_project_files', description: 'List latest kernel output file metadata', inputSchema: tools.KAGGLE_PROJECT_FILES_SCHEMA },
-            { name: 'kaggle_project_output', description: 'Retrieve output from latest run of an existing kernel directly by project ref', inputSchema: tools.KAGGLE_PROJECT_OUTPUT_SCHEMA },
-            { name: 'kaggle_project_logs', description: 'Retrieve latest kernel execution logs directly by project ref', inputSchema: tools.KAGGLE_PROJECT_LOGS_SCHEMA },
-            { name: 'kaggle_project_continue', description: 'Safely continue an existing persistent Kaggle project with conflict and ownership protection', inputSchema: tools.KAGGLE_PROJECT_CONTINUE_SCHEMA },
-            { name: 'kaggle_project_restore', description: 'Explicitly restore an owned Kaggle project from trusted source when remote state is corrupted or suspicious', inputSchema: tools.KAGGLE_PROJECT_RESTORE_SCHEMA },
-            { name: 'kaggle_workspace_get', description: 'Retrieve Kaggle dataset-backed project workspace manifest, fingerprint, and file outline', inputSchema: tools.KAGGLE_WORKSPACE_GET_SCHEMA },
-            { name: 'kaggle_workspace_file', description: 'Read a specific file from the project workspace with bounded chunking', inputSchema: tools.KAGGLE_WORKSPACE_FILE_SCHEMA },
-            { name: 'kaggle_workspace_continue', description: 'Atomically update project workspace dataset version, apply file changes, and trigger thin runner execution', inputSchema: tools.KAGGLE_WORKSPACE_CONTINUE_SCHEMA },
-            { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: tools.CHAT_SWARM_CREATE_SCHEMA },
-            { name: 'chat_swarm_join', description: 'Join an existing Chat Swarm worker slot using its invite code', inputSchema: tools.CHAT_SWARM_JOIN_SCHEMA },
-            { name: 'chat_swarm_dock', description: 'Mount the persistent Worker Dock stream for an existing worker token', inputSchema: tools.CHAT_SWARM_DOCK_SCHEMA },
-            { name: 'chat_swarm_join_browser', description: 'Join a Chat Swarm and prepare the browser wake bridge binding marker', inputSchema: tools.CHAT_SWARM_JOIN_BROWSER_SCHEMA },
-            { name: 'chat_swarm_status', description: 'Return durable Chat Swarm roster, capacity and task counts', inputSchema: tools.CHAT_SWARM_STATUS_SCHEMA },
-            { name: 'chat_swarm_resize', description: 'Resize an active Chat Swarm without interrupting protected workers', inputSchema: tools.CHAT_SWARM_RESIZE_SCHEMA },
-            { name: 'chat_swarm_dispatch', description: 'Atomically dispatch a batch of idempotent Chat Swarm tasks', inputSchema: tools.CHAT_SWARM_DISPATCH_SCHEMA },
-            { name: 'chat_swarm_claim', description: 'Claim one immediately available task for an existing worker token', inputSchema: tools.CHAT_SWARM_CLAIM_SCHEMA },
-            { name: 'chat_swarm_ack', description: 'Acknowledge that a claimed worker task actually resumed execution', inputSchema: tools.CHAT_SWARM_ACK_SCHEMA },
-            { name: 'chat_swarm_next', description: 'Park for one bounded worker checkpoint and claim work when it arrives', inputSchema: tools.CHAT_SWARM_NEXT_SCHEMA },
-            { name: 'chat_swarm_recover', description: 'Recover an interrupted worker wait with one bounded checkpoint', inputSchema: tools.CHAT_SWARM_RECOVER_SCHEMA },
-            { name: 'chat_swarm_submit_once', description: 'Submit one browser/dock-woken worker result without re-parking', inputSchema: tools.CHAT_SWARM_SUBMIT_ONCE_SCHEMA },
-            { name: 'chat_swarm_submit', description: 'Submit a worker result and immediately re-park for the next bounded checkpoint', inputSchema: tools.CHAT_SWARM_SUBMIT_SCHEMA },
-            { name: 'chat_swarm_collect', description: 'Collect selected Chat Swarm task results with optional bounded waiting', inputSchema: tools.CHAT_SWARM_COLLECT_SCHEMA },
-            { name: 'chat_swarm_cancel', description: 'Cancel queued or claimed Chat Swarm tasks', inputSchema: tools.CHAT_SWARM_CANCEL_SCHEMA },
-            { name: 'chat_swarm_recycle_worker', description: 'Recycle a dead worker and safely requeue unacknowledged work', inputSchema: tools.CHAT_SWARM_RECYCLE_WORKER_SCHEMA },
-            { name: 'chat_swarm_leave', description: 'Leave a Chat Swarm worker slot and requeue safe in-flight work', inputSchema: tools.CHAT_SWARM_LEAVE_SCHEMA },
-            { name: 'chat_swarm_close', description: 'Close a Chat Swarm and optionally cancel pending work', inputSchema: tools.CHAT_SWARM_CLOSE_SCHEMA },
-            { name: 'chat_swarm_wake_bridge', description: 'Report Cloudflare Browser Wake Bridge and Worker Dock stream endpoint status', inputSchema: tools.CHAT_SWARM_WAKE_BRIDGE_SCHEMA },
-            { name: 'chat_swarm_runtime_status', description: 'Query connected outbound Windows agent/runtime status', inputSchema: tools.CHAT_SWARM_RUNTIME_STATUS_SCHEMA },
-            { name: 'swarm_dispatch', description: 'Dispatch simplified vNext swarm task', inputSchema: tools.SWARM_DISPATCH_SCHEMA },
-            { name: 'swarm_status', description: 'Check simplified vNext swarm status', inputSchema: tools.SWARM_STATUS_SCHEMA },
-            { name: 'device_status', description: 'Inspect local agent status', inputSchema: tools.DEVICE_STATUS_SCHEMA },
-            { name: 'kill_switch_trigger', description: 'Administrative emergency-stop and revocation control', inputSchema: tools.KILL_SWITCH_TRIGGER_SCHEMA }
-        ];
+        return tools.getCanonicalToolsList();
     }
     requireSwarmScope(auth) {
         if (!scope_checker_1.ScopeChecker.hasScope(auth.scopes, 'swarm:dispatch')) {
@@ -1141,7 +1096,7 @@ class GatewayDurableObject {
         const caller = { scopes: auth.scopes, subjectId: auth.subjectId };
         const wrap = (value) => modern ? (0, protocol_1.modernResult)(value) : value;
         const wrapList = (value) => modern
-            ? (0, protocol_1.modernCacheableResult)(value, { ttlMs: 300000, cacheScope: 'private' })
+            ? (0, protocol_1.modernCacheableResult)(value, { ttlMs: 0, cacheScope: 'private' })
             : value;
         if (method === 'server/discover') {
             if (!modern) {
@@ -1158,10 +1113,11 @@ class GatewayDurableObject {
                         prompts: { listChanged: false }
                     },
                     _meta: {
-                        'io.modelcontextprotocol/serverInfo': { name: 'DevSpace Ultra vNext', version: '2.0.1' }
+                        'io.modelcontextprotocol/serverInfo': { name: 'DevSpace Ultra vNext', version: '2.1.0' }
                     },
+                    tools: this.getToolsList(),
                     instructions: 'Secure DevSpace Ultra gateway for durable remote tasks, Kaggle compute, local agents and Chat Swarm.'
-                }, { ttlMs: 300000, cacheScope: 'private' })
+                }, { ttlMs: 0, cacheScope: 'private' })
             }, { headers });
         }
         if (method === 'initialize') {
@@ -1178,7 +1134,8 @@ class GatewayDurableObject {
                         resources: { subscribe: false, listChanged: false },
                         prompts: { listChanged: false }
                     },
-                    serverInfo: { name: 'DevSpace Ultra vNext', version: '2.0.1' }
+                    serverInfo: { name: 'DevSpace Ultra vNext', version: '2.1.0' },
+                    tools: this.getToolsList()
                 }
             }, { headers });
         }

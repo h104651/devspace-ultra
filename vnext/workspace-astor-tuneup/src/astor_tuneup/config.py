@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 PROJECT_NAME = "Astor TuneUp"
@@ -12,4 +13,26 @@ INFER_MAX_DET = 300
 
 INPUT_ROOT = Path("/kaggle/input")
 WORK_ROOT = Path("/kaggle/working")
-DATASET_ROOT = Path("/kaggle/input/astor-tuneup-project")
+
+
+def _resolve_project_root() -> Path:
+    env_root = os.getenv("ASTOR_TUNEUP_PROJECT_ROOT")
+    if env_root and Path(env_root).exists():
+        return Path(env_root).resolve()
+
+    # Derive relative to installed source file (parents[2] from src/astor_tuneup/config.py)
+    source_root = Path(__file__).resolve().parents[2]
+    if (source_root / "devspace-project.json").exists():
+        return source_root
+
+    # Robust fallback: search /kaggle/input for devspace-project.json
+    if INPUT_ROOT.exists():
+        matches = list(INPUT_ROOT.rglob("devspace-project.json"))
+        if matches:
+            return matches[0].parent
+
+    return source_root
+
+
+PROJECT_ROOT = _resolve_project_root()
+DATASET_ROOT = PROJECT_ROOT  # Backward-compatibility alias

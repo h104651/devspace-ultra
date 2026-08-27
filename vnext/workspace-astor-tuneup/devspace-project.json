@@ -2,10 +2,10 @@
   "name": "Astor TuneUp",
   "slug": "astor-tuneup-project",
   "owner": "astorhsu",
-  "version": 1,
+  "version": 2,
   "type": "workspace",
   "entrypoint": "experiments/gate2c_9a_mining.py",
-  "runnerKernelRef": "astorhsu/astor-tuneup-runner",
+  "runnerKernelRef": "astorhsu/astor-tuneup-thin-runner",
   "archiveMaster": {
     "filename": "archive/astor-tuneup-original.ipynb",
     "size": 14276636,
@@ -38,8 +38,8 @@
       "sha256": "5d31facb87ff05f879f9e5562a51b70c1d81579ebc63038d57e19aa9e8add990"
     },
     "src/astor_tuneup/config.py": {
-      "size": 420,
-      "sha256": "5747ca975b9c402d4d292181a06ec8bde601d0c57d3e2873cc414f52915649a5"
+      "size": 1128,
+      "sha256": "5619481cb52576c91c8aed980162205bdf574d832a418213134d8d88d84ab953"
     },
     "src/astor_tuneup/detector_mining.py": {
       "size": 262,
@@ -62,5 +62,5 @@
       "sha256": "3660ad4bddeb52d4fe8d025c1dbc35ebbd62e7f87c16202377cb2c29ba889bcd"
     }
   },
-  "updatedAt": "2026-08-27T09:53:09.174Z"
+  "updatedAt": "2026-08-27T11:51:17.836Z"
 }

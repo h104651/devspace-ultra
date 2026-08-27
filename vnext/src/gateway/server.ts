@@ -108,36 +108,7 @@ export class GatewayServer {
   }
 
   private getToolsList() {
-    return [
-      { name: 'remote_task_submit', description: 'Submit durable task to supported backends', inputSchema: tools.REMOTE_TASK_SUBMIT_SCHEMA },
-      { name: 'remote_task_status', description: 'Query durable task status', inputSchema: tools.REMOTE_TASK_STATUS_SCHEMA },
-      { name: 'remote_task_logs', description: 'Fetch task logs', inputSchema: tools.REMOTE_TASK_LOGS_SCHEMA },
-      { name: 'remote_task_artifacts', description: 'List task artifacts', inputSchema: tools.REMOTE_TASK_ARTIFACTS_SCHEMA },
-      { name: 'remote_task_cancel', description: 'Cancel a task', inputSchema: tools.REMOTE_TASK_CANCEL_SCHEMA },
-      { name: 'kaggle_run', description: 'Run code on Kaggle', inputSchema: tools.KAGGLE_RUN_SCHEMA },
-      { name: 'kaggle_status', description: 'Check Kaggle task', inputSchema: tools.KAGGLE_STATUS_SCHEMA },
-      { name: 'kaggle_logs', description: 'Fetch Kaggle logs', inputSchema: tools.KAGGLE_LOGS_SCHEMA },
-      { name: 'kaggle_result', description: 'Fetch Kaggle result', inputSchema: tools.KAGGLE_RESULT_SCHEMA },
-      { name: 'kaggle_project_list', description: 'Discover existing Kaggle notebooks and scripts', inputSchema: tools.KAGGLE_PROJECT_LIST_SCHEMA },
-      { name: 'kaggle_project_get', description: 'Retrieve current Kaggle project metadata and optimistic concurrency fingerprint', inputSchema: tools.KAGGLE_PROJECT_GET_SCHEMA },
-      { name: 'kaggle_project_source', description: 'Read current or known-version project source code with notebook cell structure', inputSchema: tools.KAGGLE_PROJECT_SOURCE_SCHEMA },
-      { name: 'kaggle_project_files', description: 'List latest kernel output file metadata', inputSchema: tools.KAGGLE_PROJECT_FILES_SCHEMA },
-      { name: 'kaggle_project_output', description: 'Retrieve output from latest run of an existing kernel directly by project ref', inputSchema: tools.KAGGLE_PROJECT_OUTPUT_SCHEMA },
-      { name: 'kaggle_project_logs', description: 'Retrieve latest kernel execution logs directly by project ref', inputSchema: tools.KAGGLE_PROJECT_LOGS_SCHEMA },
-      { name: 'kaggle_project_continue', description: 'Safely continue an existing persistent Kaggle project with conflict and ownership protection', inputSchema: tools.KAGGLE_PROJECT_CONTINUE_SCHEMA },
-      { name: 'swarm_dispatch', description: 'Dispatch swarm task', inputSchema: tools.SWARM_DISPATCH_SCHEMA },
-      { name: 'swarm_status', description: 'Check swarm status', inputSchema: tools.SWARM_STATUS_SCHEMA },
-      { name: 'chat_swarm_dispatch', description: 'Dispatch Chat Swarm task', inputSchema: tools.CHAT_SWARM_DISPATCH_SCHEMA },
-      { name: 'chat_swarm_status', description: 'Check Chat Swarm status', inputSchema: tools.CHAT_SWARM_STATUS_SCHEMA },
-      { name: 'chat_swarm_claim', description: 'Register and claim vNext swarm worker work', inputSchema: tools.CHAT_SWARM_CLAIM_SCHEMA },
-      { name: 'chat_swarm_next', description: 'Claim next worker task', inputSchema: tools.CHAT_SWARM_NEXT_SCHEMA },
-      { name: 'chat_swarm_submit', description: 'Submit worker result', inputSchema: tools.CHAT_SWARM_SUBMIT_SCHEMA },
-      { name: 'chat_swarm_cancel', description: 'Cancel swarm task', inputSchema: tools.CHAT_SWARM_CANCEL_SCHEMA },
-      { name: 'chat_swarm_wake_bridge', description: 'Check wake bridge', inputSchema: tools.CHAT_SWARM_WAKE_BRIDGE_SCHEMA },
-      { name: 'chat_swarm_runtime_status', description: 'Check runtime workers', inputSchema: tools.CHAT_SWARM_RUNTIME_STATUS_SCHEMA },
-      { name: 'device_status', description: 'Inspect local agent devices', inputSchema: tools.DEVICE_STATUS_SCHEMA },
-      { name: 'kill_switch_trigger', description: 'Administrative kill switch', inputSchema: tools.KILL_SWITCH_TRIGGER_SCHEMA }
-    ];
+    return tools.getCanonicalToolsList();
   }
 
   private async callTool(name: string, args: any, caller: McpCallerContext): Promise<any> {
@@ -158,6 +129,10 @@ export class GatewayServer {
       case 'kaggle_project_output': return this.mcpHandlers.handleKaggleProjectOutput(args, caller);
       case 'kaggle_project_logs': return this.mcpHandlers.handleKaggleProjectLogs(args, caller);
       case 'kaggle_project_continue': return this.mcpHandlers.handleKaggleProjectContinue(args, caller);
+      case 'kaggle_project_restore': return this.mcpHandlers.handleKaggleProjectRestore(args, caller);
+      case 'kaggle_workspace_get': return this.mcpHandlers.handleKaggleWorkspaceGet(args, caller);
+      case 'kaggle_workspace_file': return this.mcpHandlers.handleKaggleWorkspaceFile(args, caller);
+      case 'kaggle_workspace_continue': return this.mcpHandlers.handleKaggleWorkspaceContinue(args, caller);
       case 'swarm_dispatch': return this.mcpHandlers.handleSwarmDispatch(args, caller);
       case 'swarm_status': return this.mcpHandlers.handleSwarmStatus(caller);
       case 'chat_swarm_dispatch': return this.mcpHandlers.handleChatSwarmDispatch(args, caller);
@@ -176,7 +151,7 @@ export class GatewayServer {
 
   private setupRoutes() {
     this.app.get('/health', (_req, res) => res.json({ ok: true }));
-    this.app.get('/admin/health', this.authenticate('admin:health'), (_req, res) => res.json({ status: 'healthy', service: 'devspace-ultra-gateway', version: '2.0.1', timestamp: Date.now(), connectedAgents: this.connectionManager.getConnectedAgents().length }));
+    this.app.get('/admin/health', this.authenticate('admin:health'), (_req, res) => res.json({ status: 'healthy', service: 'devspace-ultra-gateway', version: '2.1.0', timestamp: Date.now(), connectedAgents: this.connectionManager.getConnectedAgents().length }));
 
     const handleRemoteMcp = async (req: Request, res: Response) => {
       const auth: TokenPayload = (req as any).auth;
@@ -190,15 +165,15 @@ export class GatewayServer {
       const method = body?.method;
       const caller = { scopes: auth.scopes, subjectId: auth.subjectId };
       const wrap = (value: any) => modern ? modernResult(value) : value;
-      const wrapList = (value: any) => modern ? modernCacheableResult(value, { ttlMs: 300000, cacheScope: 'private' }) : value;
+      const wrapList = (value: any) => modern ? modernCacheableResult(value, { ttlMs: 0, cacheScope: 'private' }) : value;
 
       if (method === 'server/discover') {
         if (!modern) return res.status(404).json({ jsonrpc, id, error: { code: -32601, message: 'server/discover requires MCP 2026-07-28' } });
-        return res.json({ jsonrpc, id, result: modernCacheableResult({ supportedVersions: [...MCP_SUPPORTED_MODERN_VERSIONS], capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } }, _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'DevSpace Ultra vNext', version: '2.0.1' } } }, { ttlMs: 300000, cacheScope: 'private' }) });
+        return res.json({ jsonrpc, id, result: modernCacheableResult({ supportedVersions: [...MCP_SUPPORTED_MODERN_VERSIONS], capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } }, _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'DevSpace Ultra vNext', version: '2.1.0' } }, tools: this.getToolsList() }, { ttlMs: 0, cacheScope: 'private' }) });
       }
       if (method === 'initialize') {
         if (modern) return res.status(404).json({ jsonrpc, id, error: { code: -32601, message: 'Use server/discover with MCP 2026-07-28' } });
-        return res.json({ jsonrpc, id, result: { protocolVersion: validation.protocolVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'DevSpace Ultra vNext', version: '2.0.1' } } });
+        return res.json({ jsonrpc, id, result: { protocolVersion: validation.protocolVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'DevSpace Ultra vNext', version: '2.1.0' }, tools: this.getToolsList() } });
       }
       if (method === 'ping') return res.json({ jsonrpc, id, result: wrap({}) });
       if (method === 'tools/list') return res.json({ jsonrpc, id, result: wrapList({ tools: this.getToolsList() }) });

@@ -22,12 +22,13 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     kagglePollIntervalMs: 50
   });
 
-  const makeMcpRequest = (path: string, body: any, token?: string): Promise<{ statusCode: number; body: any }> => {
+  const makeMcpRequest = (path: string, body: any, token?: string, extraHeaders?: Record<string, string>): Promise<{ statusCode: number; body: any }> => {
     return new Promise((resolve, reject) => {
       const data = JSON.stringify(body);
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data).toString()
+        'Content-Length': Buffer.byteLength(data).toString(),
+        ...(extraHeaders || {})
       };
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
@@ -63,7 +64,7 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
   try {
     await server.start();
 
-    const { token: clientToken } = server.authManager.registerClient('ChatGPT Remote Client', ['admin']);
+    const { token: clientToken } = server.authManager.registerClient('ChatGPT Remote Client', ['admin', 'kaggle:read', 'kaggle:submit', 'tasks:read', 'tasks:submit']);
 
     // Test 1: Anonymous request to /mcp rejected with 401
     const anonRes = await makeMcpRequest('/mcp', { method: 'tools/list' });
@@ -74,11 +75,14 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     // Test 2: Authenticated tools/list via Remote MCP
     const listRes = await makeMcpRequest('/mcp', { method: 'tools/list' }, clientToken);
     assert.strictEqual(listRes.statusCode, 200);
-    assert.ok(listRes.body.result?.tools?.length >= 8);
+    assert.ok(listRes.body.result?.tools?.length >= 40);
     const toolNames = listRes.body.result.tools.map((t: any) => t.name);
     assert.ok(toolNames.includes('kaggle_run'));
     assert.ok(toolNames.includes('remote_task_submit'));
     assert.ok(toolNames.includes('remote_task_status'));
+    assert.ok(toolNames.includes('kaggle_workspace_get'));
+    assert.ok(toolNames.includes('kaggle_workspace_file'));
+    assert.ok(toolNames.includes('kaggle_workspace_continue'));
     passed++;
 
     // Test 3: Authenticated tools/call for remote_task_submit
@@ -125,6 +129,67 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     const kaggleResult = JSON.parse(kaggleCall.body.result.content[0].text);
     assert.ok(kaggleResult.taskId);
     assert.strictEqual(kaggleResult.status, 'running');
+    passed++;
+
+    // Test 5: Server discover exposes version 2.1.0 and full tools list
+    const discoverRes = await makeMcpRequest(
+      '/mcp',
+      {
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'server/discover',
+        params: {
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities': { tools: {} }
+          }
+        }
+      },
+      clientToken,
+      { 'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': 'server/discover' }
+    );
+
+    assert.strictEqual(discoverRes.statusCode, 200);
+    assert.strictEqual(discoverRes.body.result._meta['io.modelcontextprotocol/serverInfo'].version, '2.1.0');
+    assert.strictEqual(discoverRes.body.result.ttlMs, 0);
+    assert.ok(Array.isArray(discoverRes.body.result.tools));
+    const discToolNames = discoverRes.body.result.tools.map((t: any) => t.name);
+    assert.ok(discToolNames.includes('kaggle_workspace_get'));
+    assert.ok(discToolNames.includes('kaggle_workspace_file'));
+    assert.ok(discToolNames.includes('kaggle_workspace_continue'));
+    passed++;
+
+    // Test 6: Authenticated tools/call for workspace tools dispatch correctly
+    const wsGetCall = await makeMcpRequest(
+      '/mcp',
+      {
+        method: 'tools/call',
+        params: {
+          name: 'kaggle_workspace_get',
+          arguments: { project: 'testuser/astor-tuneup-project' }
+        }
+      },
+      clientToken
+    );
+    assert.strictEqual(wsGetCall.statusCode, 200);
+    const wsGetParsed = JSON.parse(wsGetCall.body.result.content[0].text);
+    assert.strictEqual(wsGetParsed.name, 'Astor TuneUp');
+    passed++;
+
+    const wsFileCall = await makeMcpRequest(
+      '/mcp',
+      {
+        method: 'tools/call',
+        params: {
+          name: 'kaggle_workspace_file',
+          arguments: { project: 'testuser/astor-tuneup-project', path: 'PROJECT_CONTEXT.md' }
+        }
+      },
+      clientToken
+    );
+    assert.strictEqual(wsFileCall.statusCode, 200);
+    const wsFileParsed = JSON.parse(wsFileCall.body.result.content[0].text);
+    assert.strictEqual(wsFileParsed.path, 'PROJECT_CONTEXT.md');
     passed++;
   } catch (err: any) {
     console.error('Remote MCP HTTP test failed:', err);

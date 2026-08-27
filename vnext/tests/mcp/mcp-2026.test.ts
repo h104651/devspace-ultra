@@ -72,6 +72,26 @@ export async function runMcp2026Tests(): Promise<{ passed: number; failed: numbe
     const toolResult = modernResult({ content: [] });
     assert.strictEqual(toolResult.resultType, 'complete');
     passed++;
+
+    // Regression: Tool surface integrity and uniqueness
+    const canonicalTools = (await import('../../src/mcp/tools')).getCanonicalToolsList();
+    const toolNames = canonicalTools.map(t => t.name);
+    const uniqueNames = new Set(toolNames);
+    assert.strictEqual(uniqueNames.size, toolNames.length, 'No duplicate tool names allowed in canonical tools list');
+    assert.ok(toolNames.includes('kaggle_workspace_get'), 'kaggle_workspace_get must be present in canonical tools');
+    assert.ok(toolNames.includes('kaggle_workspace_file'), 'kaggle_workspace_file must be present in canonical tools');
+    assert.ok(toolNames.includes('kaggle_workspace_continue'), 'kaggle_workspace_continue must be present in canonical tools');
+
+    const toolsModule = await import('../../src/mcp/tools');
+    assert.ok(toolsModule.KAGGLE_WORKSPACE_GET_SCHEMA, 'KAGGLE_WORKSPACE_GET_SCHEMA must exist');
+    assert.ok(toolsModule.KAGGLE_WORKSPACE_FILE_SCHEMA, 'KAGGLE_WORKSPACE_FILE_SCHEMA must exist');
+    assert.ok(toolsModule.KAGGLE_WORKSPACE_CONTINUE_SCHEMA, 'KAGGLE_WORKSPACE_CONTINUE_SCHEMA must exist');
+
+    for (const t of canonicalTools) {
+      assert.ok(t.inputSchema, `Tool ${t.name} must have inputSchema`);
+      assert.strictEqual(t.inputSchema.type, 'object', `Tool ${t.name} inputSchema must have type object`);
+    }
+    passed++;
   } catch (err: any) {
     console.error('MCP 2026 protocol test failed:', err);
     failed++;
