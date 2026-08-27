@@ -1005,6 +1005,7 @@ class GatewayDurableObject {
             { name: 'kaggle_project_output', description: 'Retrieve output from latest run of an existing kernel directly by project ref', inputSchema: tools.KAGGLE_PROJECT_OUTPUT_SCHEMA },
             { name: 'kaggle_project_logs', description: 'Retrieve latest kernel execution logs directly by project ref', inputSchema: tools.KAGGLE_PROJECT_LOGS_SCHEMA },
             { name: 'kaggle_project_continue', description: 'Safely continue an existing persistent Kaggle project with conflict and ownership protection', inputSchema: tools.KAGGLE_PROJECT_CONTINUE_SCHEMA },
+            { name: 'kaggle_project_restore', description: 'Explicitly restore an owned Kaggle project from trusted source when remote state is corrupted or suspicious', inputSchema: tools.KAGGLE_PROJECT_RESTORE_SCHEMA },
             { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: tools.CHAT_SWARM_CREATE_SCHEMA },
             { name: 'chat_swarm_join', description: 'Join an existing Chat Swarm worker slot using its invite code', inputSchema: tools.CHAT_SWARM_JOIN_SCHEMA },
             { name: 'chat_swarm_dock', description: 'Mount the persistent Worker Dock stream for an existing worker token', inputSchema: tools.CHAT_SWARM_DOCK_SCHEMA },
@@ -1247,6 +1248,9 @@ class GatewayDurableObject {
                             break;
                         case 'kaggle_project_continue':
                             result = await this.mcpHandlers.handleKaggleProjectContinue(args, caller);
+                            break;
+                        case 'kaggle_project_restore':
+                            result = await this.mcpHandlers.handleKaggleProjectRestore(args, caller);
                             break;
                         case 'swarm_dispatch':
                             result = await this.mcpHandlers.handleSwarmDispatch(args, caller);

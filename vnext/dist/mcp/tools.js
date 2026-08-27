@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
+exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_PROJECT_RESTORE_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
 exports.REMOTE_TASK_SUBMIT_SCHEMA = {
     type: 'object',
     properties: {
@@ -129,6 +129,29 @@ exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = {
         clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
     },
     required: ['kernelRef', 'expectedProjectFingerprint', 'mutation'],
+    additionalProperties: false
+};
+exports.KAGGLE_PROJECT_RESTORE_SCHEMA = {
+    type: 'object',
+    properties: {
+        kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
+        expectedCurrentFingerprint: { type: 'string', description: 'Expected optimistic concurrency fingerprint from kaggle_project_get' },
+        source: { type: 'string', description: 'Complete trusted notebook or script source code' },
+        sourceSha256: { type: 'string', description: 'SHA-256 hash of the provided source' },
+        kernelType: { type: 'string', enum: ['notebook', 'script'], description: 'Kernel type' },
+        language: { type: 'string', enum: ['python', 'r'], default: 'python' },
+        enableGpu: { type: 'boolean', description: 'Enable GPU acceleration' },
+        enableInternet: { type: 'boolean', description: 'Enable Internet access' },
+        machineShape: { type: 'string', description: 'Hardware shape (e.g. NvidiaTeslaT4)' },
+        datasetDataSources: { type: 'array', items: { type: 'string' } },
+        competitionDataSources: { type: 'array', items: { type: 'string' } },
+        kernelDataSources: { type: 'array', items: { type: 'string' } },
+        modelDataSources: { type: 'array', items: { type: 'string' } },
+        settings: { type: 'object', description: 'Optional project settings dictionary' },
+        reason: { type: 'string', description: 'Explicit reason for restore operation' },
+        clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
+    },
+    required: ['kernelRef', 'expectedCurrentFingerprint', 'source', 'sourceSha256', 'kernelType', 'reason'],
     additionalProperties: false
 };
 exports.SWARM_DISPATCH_SCHEMA = {

@@ -261,7 +261,81 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 11. MachineShape & ModelSources preservation
+  // 11. Explicit Restore: Happy Path & Override of Suspicious State
+  await runTest('Explicit Restore: Overrides suspicious remote state and submits restore task with snapshots', async () => {
+    const trustedNb = JSON.stringify({
+      cells: [
+        { cell_type: 'code', execution_count: 1, metadata: {}, outputs: [], source: ['print("Restored notebook master")\n'] }
+      ],
+      metadata: { language_info: { name: 'python' } },
+      nbformat: 4,
+      nbformat_minor: 5
+    });
+    const trustedSha = crypto.createHash('sha256').update(trustedNb).digest('hex');
+
+    const customHandlers = new McpHandlers({
+      ...gatewayFacade,
+      kaggleBackend: {
+        getClient: () => ({
+          getUsername: () => 'testuser',
+          pullProject: async () => ({
+            metadata: { kernelType: 'script', isPrivate: true, title: 'Corrupted Script' },
+            source: ''
+          })
+        })
+      } as any
+    });
+
+    const getRes = await customHandlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    const restoreRes = await customHandlers.handleKaggleProjectRestore({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedCurrentFingerprint: getRes.projectFingerprint,
+      source: trustedNb,
+      sourceSha256: trustedSha,
+      kernelType: 'notebook',
+      reason: 'Disaster recovery from verified local backup',
+      clientRequestId: 'req-restore-test-1'
+    }, submitAuth);
+
+    assert.strictEqual(restoreRes.status, 'running');
+    assert.strictEqual(restoreRes.kernelRef, 'testuser/astor-tuneup');
+    assert.strictEqual(restoreRes.restoredSourceSha256, trustedSha);
+    assert.strictEqual(typeof restoreRes.preWriteSnapshotId, 'string');
+    assert.strictEqual(typeof restoreRes.postWriteSnapshotId, 'string');
+  });
+
+  // 12. Explicit Restore: Rejects SHA Mismatch
+  await runTest('Explicit Restore: Rejects source if provided SHA-256 does not match computed SHA', async () => {
+    const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedCurrentFingerprint: getRes.projectFingerprint,
+        source: 'print("Fake source")',
+        sourceSha256: 'wrong00000000000000000000000000000000000000000000000000000000000',
+        kernelType: 'script',
+        reason: 'Testing mismatch'
+      }, submitAuth),
+      /RECOVERY_MASTER_SHA_MISMATCH/
+    );
+  });
+
+  // 13. Explicit Restore: Rejects Foreign Owner
+  await runTest('Explicit Restore: Rejects restoring kernel owned by another user', async () => {
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectRestore({
+        kernelRef: 'otheruser/their-kernel',
+        expectedCurrentFingerprint: 'any',
+        source: 'print(1)',
+        sourceSha256: crypto.createHash('sha256').update('print(1)').digest('hex'),
+        kernelType: 'script',
+        reason: 'Unauthorized restore'
+      }, submitAuth),
+      /KAGGLE_PROJECT_WRITE_FORBIDDEN/
+    );
+  });
+
+  // 14. MachineShape & ModelSources preservation
   await runTest('MachineShape and modelDataSources are preserved in continue payload', async () => {
     const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
     const continueRes = await handlers.handleKaggleProjectContinue(
@@ -282,7 +356,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(task?.payload?.machineShape, 'NvidiaTeslaT4');
   });
 
-  // 12. Large output routed to R2
+  // 15. Large output routed to R2
   await runTest('Large output (>=256 KiB) routes through ArtifactStore & R2', async () => {
     const bigBuf = Buffer.alloc(300 * 1024, 'A');
     (client as any).downloadSingleOutputFile = async () => ({
@@ -299,7 +373,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(outRes.content, undefined);
   });
 
-  // 13. Pre-rejection of >20 MiB output
+  // 16. Pre-rejection of >20 MiB output
   await runTest('Output > 20 MiB is pre-rejected with KAGGLE_OUTPUT_TOO_LARGE', async () => {
     (client as any).downloadSingleOutputFile = async () => {
       throw new Error('KAGGLE_OUTPUT_TOO_LARGE: Output file "giant.zip" (25000000 bytes) exceeds the 20 MiB R2 single-object limit');
@@ -311,7 +385,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 14. Download single targeted file
+  // 17. Download single targeted file
   await runTest('Targeted output fetch selects only requested file', async () => {
     (client as any).downloadSingleOutputFile = async (owner: string, slug: string, pattern?: string) => {
       return {
@@ -327,7 +401,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(outRes.totalFiles, 3);
   });
 
-  // 15. Explicit owner honored for read
+  // 18. Explicit owner honored for read
   await runTest('Explicit owner is honored in project reads', async () => {
     let capturedOwner = '';
     (client as any).pullProject = async (owner: string, slug: string) => {
@@ -342,7 +416,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(capturedOwner, 'otherresearcher');
   });
 
-  // 16. Scope Enforcement on Read Tools
+  // 19. Scope Enforcement on Read Tools
   await runTest('Scope enforcement: Read tools reject unauthorized callers', async () => {
     await assert.rejects(
       async () => handlers.handleKaggleProjectList({}, writeForbiddenAuth),
@@ -358,7 +432,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 17. Ownership Protection in Continue
+  // 20. Ownership Protection in Continue
   await runTest('Ownership protection: Reject modifying kernel owned by another user', async () => {
     (client as any).getUsername = () => 'testuser';
     await assert.rejects(
@@ -374,7 +448,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 18. Conflict Protection in Continue (Stale Fingerprint)
+  // 21. Conflict Protection in Continue (Stale Fingerprint)
   await runTest('Conflict protection: Reject continue when fingerprint does not match', async () => {
     (client as any).getUsername = () => 'testuser';
     (client as any).pullProject = async (owner: string, slug: string) => ({
@@ -394,7 +468,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
   });
 
-  // 19. Idempotent Replay on Continue
+  // 22. Idempotent Replay on Continue
   await runTest('Idempotent replay on continue returns existing task without duplicate execution', async () => {
     (client as any).getUsername = () => 'testuser';
     (client as any).pullProject = async (owner: string, slug: string) => ({

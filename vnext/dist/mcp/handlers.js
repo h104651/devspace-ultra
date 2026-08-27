@@ -549,12 +549,16 @@ class McpHandlers {
             payload.machineShape = current.metadata.machineShape;
         if (current.metadata.modelDataSources && current.metadata.modelDataSources.length > 0)
             payload.modelDataSources = current.metadata.modelDataSources;
+        // 1. Save Pre-Write Snapshot
+        const preWriteSnapshotId = await this.saveProjectSnapshot(ref, 'pre-write-snapshot', currentRawSource, current.metadata, undefined, args.clientRequestId);
         const result = await this.gateway.taskRouter.routeTaskSubmit({
             backend: 'kaggle',
             capability: 'kaggle:run',
             payload,
             clientRequestId: args.clientRequestId
         }, auth.scopes, auth.subjectId);
+        // 2. Save Post-Write Snapshot
+        const postWriteSnapshotId = await this.saveProjectSnapshot(ref, 'post-write-snapshot', newSource, payload, result.taskId, args.clientRequestId);
         const task = this.gateway.taskStore.getTask(result.taskId);
         const actualSlug = task?.payload?.kernelSlug || ref;
         const actualRef = actualSlug.includes('/') ? actualSlug : `${owner}/${actualSlug}`;
@@ -564,9 +568,152 @@ class McpHandlers {
             status: result.status,
             previousProjectFingerprint: currentFingerprint,
             submittedSourceSha256: crypto.createHash('sha256').update(newSource).digest('hex'),
+            preWriteSnapshotId,
+            postWriteSnapshotId,
             isReplay: !!result.isReplay,
             message: 'Kaggle persistent project updated and queued for execution. Query kaggle_status for execution progress.'
         };
+    }
+    async handleKaggleProjectRestore(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:submit', 'tasks:submit');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.pullProject !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project restore is not supported by backend client');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
+        // Ownership protection: only owner can restore
+        if (owner.toLowerCase() !== client.getUsername().toLowerCase()) {
+            throw new Error(`KAGGLE_PROJECT_WRITE_FORBIDDEN: Cannot restore kernel owned by '${owner}' (authenticated user is '${client.getUsername()}')`);
+        }
+        if (!args.source) {
+            throw new Error('INVALID_RESTORE_REQUEST: source is required for kaggle_project_restore');
+        }
+        if (!args.sourceSha256) {
+            throw new Error('INVALID_RESTORE_REQUEST: sourceSha256 is required for kaggle_project_restore');
+        }
+        if (!args.reason) {
+            throw new Error('INVALID_RESTORE_REQUEST: explicit restore reason is required');
+        }
+        if (!args.kernelType || !['notebook', 'script'].includes(args.kernelType)) {
+            throw new Error('INVALID_RESTORE_REQUEST: kernelType ("notebook" or "script") is required');
+        }
+        // Verify incoming source SHA256 integrity
+        const computedIncomingSha256 = crypto.createHash('sha256').update(args.source).digest('hex');
+        if (computedIncomingSha256.toLowerCase() !== args.sourceSha256.toLowerCase()) {
+            throw new Error(`RECOVERY_MASTER_SHA_MISMATCH: Computed source SHA-256 (${computedIncomingSha256}) does not match expected (${args.sourceSha256})`);
+        }
+        // If notebook, verify cell structure
+        if (args.kernelType === 'notebook') {
+            const parsed = (0, project_manager_1.parseNotebookCells)(args.source, { includeCells: false });
+            if (!parsed || parsed.totalCells === 0) {
+                throw new Error('INVALID_RESTORE_SOURCE: Provided source is not a valid Jupyter Notebook structure');
+            }
+        }
+        // Read current remote project
+        const current = await client.pullProject(owner, slug);
+        const currentRawSource = current.source || '';
+        const currentSourceSha256 = crypto.createHash('sha256').update(currentRawSource).digest('hex');
+        const currentFingerprint = (0, project_manager_1.computeProjectFingerprint)({
+            sourceSha256: currentSourceSha256,
+            kernelType: current.metadata.kernelType,
+            language: current.metadata.language,
+            isPrivate: current.metadata.isPrivate,
+            enableGpu: current.metadata.enableGpu,
+            enableInternet: current.metadata.enableInternet,
+            machineShape: current.metadata.machineShape,
+            datasetSources: current.metadata.datasetDataSources,
+            competitionSources: current.metadata.competitionDataSources,
+            kernelSources: current.metadata.kernelDataSources,
+            modelSources: current.metadata.modelDataSources
+        });
+        // Concurrency conflict check
+        if (args.expectedCurrentFingerprint && args.expectedCurrentFingerprint !== currentFingerprint) {
+            throw new Error(JSON.stringify({
+                error: 'KAGGLE_PROJECT_CONFLICT',
+                message: 'Project source or settings have changed since last inspection',
+                expectedFingerprint: args.expectedCurrentFingerprint,
+                currentFingerprint
+            }));
+        }
+        // 1. Save Pre-Write Snapshot
+        const preWriteSnapshotId = await this.saveProjectSnapshot(ref, 'pre-write-snapshot', currentRawSource, current.metadata, undefined, args.clientRequestId);
+        // Build payload for durable submission
+        const settings = args.settings || {};
+        const title = settings.title || current.metadata.title || slug;
+        const isPrivate = settings.isPrivate !== undefined ? settings.isPrivate : (current.metadata.isPrivate !== false);
+        const enableGpu = settings.enableGpu !== undefined ? settings.enableGpu : (args.enableGpu !== undefined ? args.enableGpu : (args.kernelType === 'notebook'));
+        const enableInternet = settings.enableInternet !== undefined ? settings.enableInternet : (args.enableInternet !== undefined ? args.enableInternet : true);
+        const machineShape = settings.machineShape || args.machineShape || current.metadata.machineShape;
+        const datasetDataSources = settings.datasetDataSources || args.datasetDataSources || current.metadata.datasetDataSources;
+        const competitionDataSources = settings.competitionDataSources || args.competitionDataSources || current.metadata.competitionDataSources;
+        const kernelDataSources = settings.kernelDataSources || args.kernelDataSources || current.metadata.kernelDataSources;
+        const modelDataSources = settings.modelDataSources || args.modelDataSources || current.metadata.modelDataSources;
+        const payload = {
+            kernelSlug: ref,
+            title,
+            code: args.source,
+            language: args.language || current.metadata.language || 'python',
+            kernelType: args.kernelType,
+            isPrivate,
+            enableGpu,
+            enableInternet,
+            datasetDataSources,
+            competitionDataSources,
+            kernelDataSources,
+            modelDataSources
+        };
+        if (machineShape)
+            payload.machineShape = machineShape;
+        // Route task submit
+        const result = await this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'kaggle',
+            capability: 'kaggle:run',
+            payload,
+            clientRequestId: args.clientRequestId
+        }, auth.scopes, auth.subjectId);
+        // 2. Save Post-Write Snapshot
+        const postWriteSnapshotId = await this.saveProjectSnapshot(ref, 'post-write-snapshot', args.source, payload, result.taskId, args.clientRequestId);
+        const task = this.gateway.taskStore.getTask(result.taskId);
+        const actualSlug = task?.payload?.kernelSlug || ref;
+        const actualRef = actualSlug.includes('/') ? actualSlug : `${owner}/${actualSlug}`;
+        return {
+            taskId: result.taskId,
+            kernelRef: actualRef,
+            status: result.status,
+            previousProjectFingerprint: currentFingerprint,
+            restoredSourceSha256: computedIncomingSha256,
+            preWriteSnapshotId,
+            postWriteSnapshotId,
+            reason: args.reason,
+            isReplay: !!result.isReplay,
+            message: 'Kaggle persistent project restored and queued for execution. Query kaggle_status for execution progress.'
+        };
+    }
+    async saveProjectSnapshot(kernelRef, snapshotType, source, metadata, taskId, clientRequestId) {
+        try {
+            const rawSource = source || '';
+            const buf = Buffer.from(rawSource, 'utf-8');
+            const isNotebook = metadata?.kernelType === 'notebook' || (metadata?.codeFile?.endsWith('.ipynb'));
+            const safeRef = kernelRef.replace(/[^a-zA-Z0-9_\-]/g, '_');
+            const fileName = `${safeRef}_${snapshotType}_${Date.now()}.${isNotebook ? 'ipynb' : 'py'}`;
+            const artifactType = isNotebook ? 'notebook' : 'binary';
+            const mimeType = isNotebook ? 'application/x-ipynb+json' : 'text/plain';
+            const art = this.gateway.artifactStore.saveArtifact(taskId || 'project-snapshot', fileName, buf, artifactType, mimeType);
+            if (this.gateway.r2Storage && buf.byteLength <= 20971520) {
+                try {
+                    await this.gateway.r2Storage.putArtifact(art, buf);
+                }
+                catch (err) {
+                    console.warn('Failed to upload project snapshot to R2:', err);
+                }
+            }
+            return art.id;
+        }
+        catch (err) {
+            console.warn('Error creating project snapshot:', err.message);
+            return '';
+        }
     }
     async handleSwarmDispatch(args, caller) {
         const auth = this.requireCaller(caller);
