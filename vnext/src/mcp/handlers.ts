@@ -1034,7 +1034,7 @@ export class McpHandlers {
 
     // 7. File presence guard: every file declared in manifest must exist in dataset file listing
     for (const [filePath] of Object.entries(manifest.files || {})) {
-      if (filePath === 'devspace-project.json') continue;
+      if (filePath === 'devspace-project.json' || filePath === 'devspace-execution-context.json') continue;
       const isPresent = datasetFilesMap.has(filePath) || datasetFilesMap.has(filePath.replace(/[\/\\]/g, '_'));
       if (!isPresent) {
         throw new Error(`KAGGLE_WORKSPACE_FILE_MISSING: Manifest file "${filePath}" is missing from Kaggle dataset version ${N}`);
@@ -1366,10 +1366,21 @@ export class McpHandlers {
 
     const nextFingerprint = computeWorkspaceFingerprint(nextManifest);
 
-    // Include devspace-project.json in upload contents
+    // Include devspace-project.json and devspace-execution-context.json in upload contents
     const nextManifestText = JSON.stringify(nextManifest, null, 2);
     const nextManifestBuf = Buffer.from(nextManifestText, 'utf-8');
     nextFileContents.set('devspace-project.json', nextManifestBuf);
+
+    const executionContext = {
+      project: nextManifest.name,
+      slug: nextManifest.slug,
+      expectedDatasetVersion: nextVersion,
+      expectedWorkspaceFingerprint: nextFingerprint,
+      entrypoint: nextManifest.entrypoint,
+      createdAt: new Date().toISOString()
+    };
+    const executionContextBuf = Buffer.from(JSON.stringify(executionContext, null, 2), 'utf-8');
+    nextFileContents.set('devspace-execution-context.json', executionContextBuf);
 
     // 5. Upload blobs for ALL files
     const flatUploadedEntries: Array<{ relPath: string; token: string }> = [];
