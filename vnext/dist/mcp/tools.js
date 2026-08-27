@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
+exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
 exports.REMOTE_TASK_SUBMIT_SCHEMA = {
     type: 'object',
     properties: {
@@ -34,6 +34,98 @@ exports.KAGGLE_RUN_SCHEMA = {
 exports.KAGGLE_STATUS_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'], additionalProperties: false };
 exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA;
 exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_STATUS_SCHEMA;
+exports.KAGGLE_PROJECT_LIST_SCHEMA = {
+    type: 'object',
+    properties: {
+        search: { type: 'string', description: 'Search term to filter notebooks/scripts' },
+        mine: { type: 'boolean', description: 'Only list own kernels (default: true)', default: true },
+        kernelType: { type: 'string', enum: ['all', 'notebook', 'script'], default: 'all' },
+        language: { type: 'string', description: 'Programming language (e.g. python, r)' },
+        sortBy: { type: 'string', enum: ['hotness', 'commentCount', 'dateCreated', 'dateRun', 'scoreDescending', 'viewCount', 'voteCount'], default: 'dateRun' },
+        pageSize: { type: 'number', minimum: 1, maximum: 50, default: 20 },
+        pageToken: { type: 'string' }
+    },
+    additionalProperties: false
+};
+exports.KAGGLE_PROJECT_GET_SCHEMA = {
+    type: 'object',
+    properties: {
+        kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' }
+    },
+    required: ['kernelRef'],
+    additionalProperties: false
+};
+exports.KAGGLE_PROJECT_SOURCE_SCHEMA = {
+    type: 'object',
+    properties: {
+        kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
+        version: { type: 'number', description: 'Known historical version number if pulling specific version' },
+        offset: { type: 'number', minimum: 0, default: 0, description: 'Character offset for pagination' },
+        limit: { type: 'number', minimum: 1, maximum: 100000, default: 50000, description: 'Maximum characters to return in chunk (max 100000)' }
+    },
+    required: ['kernelRef'],
+    additionalProperties: false
+};
+exports.KAGGLE_PROJECT_FILES_SCHEMA = {
+    type: 'object',
+    properties: {
+        kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
+        pageSize: { type: 'number', default: 50 },
+        pageToken: { type: 'string' }
+    },
+    required: ['kernelRef'],
+    additionalProperties: false
+};
+exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = {
+    type: 'object',
+    properties: {
+        kernelRef: { type: 'string', description: 'Kaggle project reference' },
+        filePattern: { type: 'string', description: 'Filename or pattern to retrieve' },
+        maxBytes: { type: 'number', default: 1048576, description: 'Maximum bytes for direct inline return (default 1MB)' }
+    },
+    required: ['kernelRef'],
+    additionalProperties: false
+};
+exports.KAGGLE_PROJECT_LOGS_SCHEMA = {
+    type: 'object',
+    properties: {
+        kernelRef: { type: 'string', description: 'Kaggle project reference' },
+        limit: { type: 'number', default: 100, description: 'Maximum log lines' }
+    },
+    required: ['kernelRef'],
+    additionalProperties: false
+};
+exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = {
+    type: 'object',
+    properties: {
+        kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
+        expectedProjectFingerprint: { type: 'string', description: 'Expected optimistic concurrency fingerprint from kaggle_project_get' },
+        mutation: {
+            type: 'object',
+            properties: {
+                type: { type: 'string', enum: ['append_notebook_cells', 'append_script', 'replace_source'] },
+                cells: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            cellType: { type: 'string', enum: ['code', 'markdown'] },
+                            source: { type: 'string' }
+                        },
+                        required: ['source']
+                    }
+                },
+                code: { type: 'string' },
+                source: { type: 'string' }
+            },
+            required: ['type'],
+            additionalProperties: false
+        },
+        clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
+    },
+    required: ['kernelRef', 'expectedProjectFingerprint', 'mutation'],
+    additionalProperties: false
+};
 exports.SWARM_DISPATCH_SCHEMA = {
     type: 'object',
     properties: {

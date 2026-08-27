@@ -34,6 +34,105 @@ export const KAGGLE_STATUS_SCHEMA = { type: 'object', properties: { taskId: { ty
 export const KAGGLE_LOGS_SCHEMA = KAGGLE_STATUS_SCHEMA;
 export const KAGGLE_RESULT_SCHEMA = KAGGLE_STATUS_SCHEMA;
 
+export const KAGGLE_PROJECT_LIST_SCHEMA = {
+  type: 'object',
+  properties: {
+    search: { type: 'string', description: 'Search term to filter notebooks/scripts' },
+    mine: { type: 'boolean', description: 'Only list own kernels (default: true)', default: true },
+    kernelType: { type: 'string', enum: ['all', 'notebook', 'script'], default: 'all' },
+    language: { type: 'string', description: 'Programming language (e.g. python, r)' },
+    sortBy: { type: 'string', enum: ['hotness', 'commentCount', 'dateCreated', 'dateRun', 'scoreDescending', 'viewCount', 'voteCount'], default: 'dateRun' },
+    pageSize: { type: 'number', minimum: 1, maximum: 50, default: 20 },
+    pageToken: { type: 'string' }
+  },
+  additionalProperties: false
+};
+
+export const KAGGLE_PROJECT_GET_SCHEMA = {
+  type: 'object',
+  properties: {
+    kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' }
+  },
+  required: ['kernelRef'],
+  additionalProperties: false
+};
+
+export const KAGGLE_PROJECT_SOURCE_SCHEMA = {
+  type: 'object',
+  properties: {
+    kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
+    version: { type: 'number', description: 'Known historical version number if pulling specific version' },
+    offset: { type: 'number', minimum: 0, default: 0, description: 'Character offset for pagination' },
+    limit: { type: 'number', minimum: 1, maximum: 100000, default: 50000, description: 'Maximum characters to return in chunk (max 100000)' }
+  },
+  required: ['kernelRef'],
+  additionalProperties: false
+};
+
+export const KAGGLE_PROJECT_FILES_SCHEMA = {
+  type: 'object',
+  properties: {
+    kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
+    pageSize: { type: 'number', default: 50 },
+    pageToken: { type: 'string' }
+  },
+  required: ['kernelRef'],
+  additionalProperties: false
+};
+
+export const KAGGLE_PROJECT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    kernelRef: { type: 'string', description: 'Kaggle project reference' },
+    filePattern: { type: 'string', description: 'Filename or pattern to retrieve' },
+    maxBytes: { type: 'number', default: 1048576, description: 'Maximum bytes for direct inline return (default 1MB)' }
+  },
+  required: ['kernelRef'],
+  additionalProperties: false
+};
+
+export const KAGGLE_PROJECT_LOGS_SCHEMA = {
+  type: 'object',
+  properties: {
+    kernelRef: { type: 'string', description: 'Kaggle project reference' },
+    limit: { type: 'number', default: 100, description: 'Maximum log lines' }
+  },
+  required: ['kernelRef'],
+  additionalProperties: false
+};
+
+export const KAGGLE_PROJECT_CONTINUE_SCHEMA = {
+  type: 'object',
+  properties: {
+    kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
+    expectedProjectFingerprint: { type: 'string', description: 'Expected optimistic concurrency fingerprint from kaggle_project_get' },
+    mutation: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['append_notebook_cells', 'append_script', 'replace_source'] },
+        cells: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              cellType: { type: 'string', enum: ['code', 'markdown'] },
+              source: { type: 'string' }
+            },
+            required: ['source']
+          }
+        },
+        code: { type: 'string' },
+        source: { type: 'string' }
+      },
+      required: ['type'],
+      additionalProperties: false
+    },
+    clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
+  },
+  required: ['kernelRef', 'expectedProjectFingerprint', 'mutation'],
+  additionalProperties: false
+};
+
 export const SWARM_DISPATCH_SCHEMA = {
   type: 'object',
   properties: {

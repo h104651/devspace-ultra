@@ -1,8 +1,43 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.McpHandlers = void 0;
+const crypto = __importStar(require("crypto"));
 const redactor_1 = require("../security/redactor");
 const scope_checker_1 = require("../security/scope-checker");
+const project_manager_1 = require("../kaggle/project-manager");
 class McpHandlers {
     gateway;
     constructor(gateway) {
@@ -130,10 +165,16 @@ class McpHandlers {
             },
             clientRequestId: args.clientRequestId
         }, auth.scopes, auth.subjectId);
+        const task = this.gateway.taskStore.getTask(result.taskId);
+        const actualSlug = task?.payload?.kernelSlug || args.kernelSlug;
+        const client = this.gateway.kaggleBackend.getClient();
+        const username = client?.getUsername ? client.getUsername() : 'user';
+        const kernelRef = actualSlug.includes('/') ? actualSlug : `${username}/${actualSlug}`;
         return {
             taskId: result.taskId,
             status: result.status,
-            kernelSlug: args.kernelSlug,
+            kernelSlug: actualSlug,
+            kernelRef,
             message: 'Kaggle task submitted. Query kaggle_status for execution progress.'
         };
     }
@@ -154,6 +195,268 @@ class McpHandlers {
         const status = await this.handleRemoteTaskStatus(args, elevatedRead);
         const artifacts = await this.handleRemoteTaskArtifacts(args, elevatedRead);
         return { taskId: args.taskId, status: status.status, result: status.result, error: status.error, artifacts: artifacts.artifacts };
+    }
+    async handleKaggleProjectList(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.listProjects !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project list is not supported by backend client');
+        }
+        const projects = await client.listProjects(args || {});
+        return { total: projects.length, projects };
+    }
+    async handleKaggleProjectGet(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.pullProject !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project get is not supported by backend client');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
+        const { metadata, source } = await client.pullProject(owner, slug);
+        const sourceSha256 = crypto.createHash('sha256').update(source || '').digest('hex');
+        const metadataSha256 = crypto.createHash('sha256').update(JSON.stringify(metadata || {})).digest('hex');
+        const projectFingerprint = (0, project_manager_1.computeProjectFingerprint)({
+            sourceSha256,
+            kernelType: metadata.kernelType,
+            language: metadata.language,
+            isPrivate: metadata.isPrivate,
+            enableGpu: metadata.enableGpu,
+            enableInternet: metadata.enableInternet,
+            machineShape: metadata.machineShape,
+            datasetSources: metadata.datasetDataSources,
+            competitionSources: metadata.competitionDataSources,
+            kernelSources: metadata.kernelDataSources,
+            modelSources: metadata.modelDataSources
+        });
+        return {
+            kernelRef: ref,
+            title: metadata.title || slug,
+            owner,
+            slug,
+            kernelType: metadata.kernelType || 'script',
+            language: metadata.language || 'python',
+            isPrivate: metadata.isPrivate !== false,
+            enableGpu: !!metadata.enableGpu,
+            enableInternet: metadata.enableInternet !== false,
+            machineShape: metadata.machineShape,
+            datasetSources: metadata.datasetDataSources || [],
+            competitionSources: metadata.competitionDataSources || [],
+            kernelSources: metadata.kernelDataSources || [],
+            modelSources: metadata.modelDataSources || [],
+            latestStatus: metadata.lastRunStatus,
+            codeFile: metadata.codeFile,
+            sourceSize: Buffer.byteLength(source || '', 'utf-8'),
+            sourceSha256,
+            metadataSha256,
+            projectFingerprint
+        };
+    }
+    async handleKaggleProjectSource(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.pullProject !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project source is not supported by backend client');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
+        const { metadata, source } = await client.pullProject(owner, slug, args.version);
+        const rawSource = source || '';
+        const sourceSha256 = crypto.createHash('sha256').update(rawSource).digest('hex');
+        const projectFingerprint = (0, project_manager_1.computeProjectFingerprint)({
+            sourceSha256,
+            kernelType: metadata.kernelType,
+            language: metadata.language,
+            isPrivate: metadata.isPrivate,
+            enableGpu: metadata.enableGpu,
+            enableInternet: metadata.enableInternet,
+            machineShape: metadata.machineShape,
+            datasetSources: metadata.datasetDataSources,
+            competitionSources: metadata.competitionDataSources,
+            kernelSources: metadata.kernelDataSources,
+            modelSources: metadata.modelDataSources
+        });
+        const cells = (0, project_manager_1.parseNotebookCells)(rawSource);
+        const offset = Math.max(0, Number(args.offset) || 0);
+        const limit = Math.min(Math.max(1, Number(args.limit) || 50000), 100000);
+        const chunk = rawSource.substring(offset, offset + limit);
+        const nextOffset = (offset + limit < rawSource.length) ? (offset + limit) : undefined;
+        return {
+            kernelRef: ref,
+            requestedVersion: args.version,
+            kernelType: metadata.kernelType || (cells ? 'notebook' : 'script'),
+            sourceFormat: cells ? 'ipynb' : 'script',
+            sourceSha256,
+            projectFingerprint,
+            totalLength: rawSource.length,
+            offset,
+            content: chunk,
+            nextOffset,
+            cells: (offset === 0 && cells) ? cells : undefined
+        };
+    }
+    async handleKaggleProjectFiles(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.getProjectOutputFiles !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project files is not supported by backend client');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
+        const res = await client.getProjectOutputFiles(owner, slug);
+        return {
+            kernelRef: ref,
+            filesCount: res.files.length,
+            files: res.files
+        };
+    }
+    async handleKaggleProjectOutput(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
+        const outputRes = await client.downloadKernelOutput(slug);
+        if (!outputRes.success || !Array.isArray(outputRes.files) || outputRes.files.length === 0) {
+            return {
+                kernelRef: ref,
+                filesCount: 0,
+                message: outputRes.error || 'No output files available for this project'
+            };
+        }
+        const filePattern = (args.filePattern || '').toLowerCase();
+        let targetFile = outputRes.files[0];
+        if (filePattern) {
+            const match = outputRes.files.find((f) => (f.name || '').toLowerCase().includes(filePattern));
+            if (match)
+                targetFile = match;
+        }
+        const content = targetFile.content ? (Buffer.isBuffer(targetFile.content) ? targetFile.content.toString('utf-8') : String(targetFile.content)) : '';
+        const maxBytes = args.maxBytes || 1048576;
+        const isTruncated = content.length > maxBytes;
+        const returnContent = isTruncated ? content.substring(0, maxBytes) : content;
+        return {
+            kernelRef: ref,
+            fileName: targetFile.name,
+            sizeBytes: targetFile.sizeBytes || content.length,
+            content: returnContent,
+            isTruncated,
+            totalFiles: outputRes.files.length,
+            allFileNames: outputRes.files.map((f) => f.name)
+        };
+    }
+    async handleKaggleProjectLogs(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        const client = this.gateway.kaggleBackend.getClient();
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
+        if (typeof client.getProjectLogs !== 'function') {
+            return { kernelRef: ref, logs: [], available: false, message: 'KAGGLE_LOGS_NOT_AVAILABLE' };
+        }
+        const logsRes = await client.getProjectLogs(owner, slug);
+        if (!logsRes.available || !Array.isArray(logsRes.logs) || logsRes.logs.length === 0) {
+            return { kernelRef: ref, logs: [], available: false, message: 'KAGGLE_LOGS_NOT_AVAILABLE' };
+        }
+        const limit = Math.min(Math.max(1, Number(args.limit) || 100), 500);
+        return {
+            kernelRef: ref,
+            available: true,
+            totalLines: logsRes.logs.length,
+            logs: logsRes.logs.slice(-limit).map((l) => (0, redactor_1.redactObject)(l))
+        };
+    }
+    async handleKaggleProjectContinue(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:submit', 'tasks:submit');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.pullProject !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project continue is not supported by backend client');
+        }
+        const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.kernelRef, client.getUsername());
+        // Ownership protection: only owner can modify
+        if (owner.toLowerCase() !== client.getUsername().toLowerCase()) {
+            throw new Error(`KAGGLE_PROJECT_WRITE_FORBIDDEN: Cannot modify kernel owned by '${owner}' (authenticated user is '${client.getUsername()}')`);
+        }
+        // Fetch CURRENT project source & metadata
+        const current = await client.pullProject(owner, slug);
+        const currentRawSource = current.source || '';
+        const currentSourceSha256 = crypto.createHash('sha256').update(currentRawSource).digest('hex');
+        const currentFingerprint = (0, project_manager_1.computeProjectFingerprint)({
+            sourceSha256: currentSourceSha256,
+            kernelType: current.metadata.kernelType,
+            language: current.metadata.language,
+            isPrivate: current.metadata.isPrivate,
+            enableGpu: current.metadata.enableGpu,
+            enableInternet: current.metadata.enableInternet,
+            machineShape: current.metadata.machineShape,
+            datasetSources: current.metadata.datasetDataSources,
+            competitionSources: current.metadata.competitionDataSources,
+            kernelSources: current.metadata.kernelDataSources,
+            modelSources: current.metadata.modelDataSources
+        });
+        // Conflict check (optimistic concurrency guard)
+        if (args.expectedProjectFingerprint && args.expectedProjectFingerprint !== currentFingerprint) {
+            throw new Error(JSON.stringify({
+                error: 'KAGGLE_PROJECT_CONFLICT',
+                message: 'Project source or settings have changed since last inspection',
+                expectedFingerprint: args.expectedProjectFingerprint,
+                currentFingerprint
+            }));
+        }
+        // Prepare mutated source
+        const mutation = args.mutation || {};
+        let newSource = '';
+        if (mutation.type === 'append_notebook_cells') {
+            if (!Array.isArray(mutation.cells) || mutation.cells.length === 0) {
+                throw new Error('INVALID_MUTATION: cells array is required for append_notebook_cells');
+            }
+            newSource = (0, project_manager_1.appendCellsToNotebook)(currentRawSource, mutation.cells);
+        }
+        else if (mutation.type === 'append_script') {
+            const codeToAppend = mutation.code || mutation.source || '';
+            newSource = currentRawSource + (currentRawSource.endsWith('\n') ? '\n' : '\n\n') + codeToAppend;
+        }
+        else if (mutation.type === 'replace_source') {
+            newSource = mutation.source || mutation.code || '';
+            if (!newSource) {
+                throw new Error('INVALID_MUTATION: source is required for replace_source');
+            }
+        }
+        else {
+            throw new Error(`INVALID_MUTATION_TYPE: Unknown mutation type '${mutation.type}'`);
+        }
+        // Submit task reusing existing durable pipeline
+        const payload = {
+            kernelSlug: ref,
+            title: current.metadata.title || slug,
+            code: newSource,
+            language: current.metadata.language || 'python',
+            kernelType: current.metadata.kernelType || 'notebook',
+            isPrivate: current.metadata.isPrivate !== false,
+            enableGpu: !!current.metadata.enableGpu,
+            enableInternet: current.metadata.enableInternet !== false,
+            datasetDataSources: current.metadata.datasetDataSources,
+            competitionDataSources: current.metadata.competitionDataSources,
+            kernelDataSources: current.metadata.kernelDataSources
+        };
+        const result = await this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'kaggle',
+            capability: 'kaggle:run',
+            payload,
+            clientRequestId: args.clientRequestId
+        }, auth.scopes, auth.subjectId);
+        const task = this.gateway.taskStore.getTask(result.taskId);
+        const actualSlug = task?.payload?.kernelSlug || ref;
+        const actualRef = actualSlug.includes('/') ? actualSlug : `${owner}/${actualSlug}`;
+        return {
+            taskId: result.taskId,
+            kernelRef: actualRef,
+            status: result.status,
+            previousProjectFingerprint: currentFingerprint,
+            submittedSourceSha256: crypto.createHash('sha256').update(newSource).digest('hex'),
+            isReplay: !!result.isReplay,
+            message: 'Kaggle persistent project updated and queued for execution. Query kaggle_status for execution progress.'
+        };
     }
     async handleSwarmDispatch(args, caller) {
         const auth = this.requireCaller(caller);

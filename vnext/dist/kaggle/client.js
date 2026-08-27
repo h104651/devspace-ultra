@@ -210,5 +210,74 @@ class KaggleClient {
             });
         });
     }
+    async listProjects(params = {}) {
+        const mockProjects = [
+            {
+                ref: `${this.getUsername()}/astor-tuneup`,
+                slug: 'astor-tuneup',
+                owner: this.getUsername(),
+                title: 'Astor TuneUp',
+                kernelType: 'notebook',
+                language: 'python',
+                lastRunTime: '2026-08-24T06:18:15.053Z',
+                isPrivate: true
+            },
+            {
+                ref: `${this.getUsername()}/devspace-project-control-e2e`,
+                slug: 'devspace-project-control-e2e',
+                owner: this.getUsername(),
+                title: 'DevSpace Project Control E2E',
+                kernelType: 'script',
+                language: 'python',
+                lastRunTime: '2026-08-27T04:20:00.000Z',
+                isPrivate: true
+            }
+        ];
+        const search = (params.search || '').toLowerCase();
+        if (!search)
+            return mockProjects;
+        return mockProjects.filter(p => p.title.toLowerCase().includes(search) || p.slug.toLowerCase().includes(search));
+    }
+    async pullProject(owner, slug, version) {
+        const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
+        const mockSource = isNotebook
+            ? JSON.stringify({
+                cells: [
+                    { cell_type: 'code', execution_count: 1, metadata: {}, outputs: [], source: ['print("Astor TuneUp initialized")\n'] }
+                ],
+                metadata: { language_info: { name: 'python' }, kernelspec: { display_name: 'Python 3', language: 'python', name: 'python3' } },
+                nbformat: 4,
+                nbformat_minor: 5
+            }, null, 1)
+            : 'print("Mock script project source")\n';
+        const mockMetadata = {
+            title: slug.includes('tuneup') ? 'Astor TuneUp' : slug,
+            slug,
+            author: owner,
+            kernelType: isNotebook ? 'notebook' : 'script',
+            language: 'python',
+            isPrivate: true,
+            enableGpu: isNotebook,
+            enableInternet: true,
+            machineShape: isNotebook ? 'NvidiaTeslaT4' : undefined,
+            datasetDataSources: isNotebook ? ['astorhsu/astor-gate2c-8g-kaggle-package'] : [],
+            competitionDataSources: [],
+            kernelDataSources: [],
+            modelSources: []
+        };
+        return { metadata: mockMetadata, source: mockSource };
+    }
+    async getProjectOutputFiles(owner, slug) {
+        return {
+            files: [
+                { name: 'stdout.log', size: 1024, creationTime: new Date().toISOString() },
+                { name: 'metrics.json', size: 128, creationTime: new Date().toISOString() }
+            ],
+            log: 'Mock log line 1\nMock log line 2'
+        };
+    }
+    async getProjectLogs(owner, slug) {
+        return { logs: ['Mock log line 1', 'Mock log line 2'], available: true };
+    }
 }
 exports.KaggleClient = KaggleClient;

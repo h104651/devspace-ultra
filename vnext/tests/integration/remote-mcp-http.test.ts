@@ -12,9 +12,10 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     fs.rmSync(testDir, { recursive: true, force: true });
   }
 
-  const port = 49300 + Math.floor(Math.random() * 1000);
+  let port = 0;
   const server = new GatewayServer({
-    port,
+    port: 0,
+    host: '127.0.0.1',
     storageDir: testDir,
     masterSecret: 'test-secret',
     kaggleMockMode: true,
@@ -35,7 +36,7 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
       const req = http.request(
         {
           hostname: '127.0.0.1',
-          port,
+          port: port || (server.httpServer.address() as any).port,
           path,
           method: 'POST',
           headers

@@ -64,6 +64,7 @@ export class KaggleBackend {
     }
 
     const actualSlug = pushResult.kernelSlug || payload.kernelSlug;
+    payload.kernelSlug = actualSlug;
     this.taskStore.startTask(task.taskId, 'kaggle-backend');
     this.taskStore.appendLogs(task.taskId, [`Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`, 'Scheduling Kaggle status monitor.']);
     await this.schedulePoll(task.taskId, actualSlug);

@@ -1044,6 +1044,14 @@ export class GatewayDurableObject {
       { name: 'kaggle_logs', description: 'Fetch Kaggle execution logs', inputSchema: tools.KAGGLE_LOGS_SCHEMA },
       { name: 'kaggle_result', description: 'Retrieve Kaggle results and artifacts', inputSchema: tools.KAGGLE_RESULT_SCHEMA },
 
+      { name: 'kaggle_project_list', description: 'Discover existing Kaggle notebooks and scripts', inputSchema: tools.KAGGLE_PROJECT_LIST_SCHEMA },
+      { name: 'kaggle_project_get', description: 'Retrieve current Kaggle project metadata and optimistic concurrency fingerprint', inputSchema: tools.KAGGLE_PROJECT_GET_SCHEMA },
+      { name: 'kaggle_project_source', description: 'Read current or known-version project source code with notebook cell structure', inputSchema: tools.KAGGLE_PROJECT_SOURCE_SCHEMA },
+      { name: 'kaggle_project_files', description: 'List latest kernel output file metadata', inputSchema: tools.KAGGLE_PROJECT_FILES_SCHEMA },
+      { name: 'kaggle_project_output', description: 'Retrieve output from latest run of an existing kernel directly by project ref', inputSchema: tools.KAGGLE_PROJECT_OUTPUT_SCHEMA },
+      { name: 'kaggle_project_logs', description: 'Retrieve latest kernel execution logs directly by project ref', inputSchema: tools.KAGGLE_PROJECT_LOGS_SCHEMA },
+      { name: 'kaggle_project_continue', description: 'Safely continue an existing persistent Kaggle project with conflict and ownership protection', inputSchema: tools.KAGGLE_PROJECT_CONTINUE_SCHEMA },
+
       { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: tools.CHAT_SWARM_CREATE_SCHEMA },
       { name: 'chat_swarm_join', description: 'Join an existing Chat Swarm worker slot using its invite code', inputSchema: tools.CHAT_SWARM_JOIN_SCHEMA },
       { name: 'chat_swarm_dock', description: 'Mount the persistent Worker Dock stream for an existing worker token', inputSchema: tools.CHAT_SWARM_DOCK_SCHEMA },
@@ -1258,6 +1266,13 @@ export class GatewayDurableObject {
             case 'kaggle_status': result = await this.mcpHandlers.handleKaggleStatus(args, caller); break;
             case 'kaggle_logs': result = await this.mcpHandlers.handleKaggleLogs(args, caller); break;
             case 'kaggle_result': result = await this.mcpHandlers.handleKaggleResult(args, caller); break;
+            case 'kaggle_project_list': result = await this.mcpHandlers.handleKaggleProjectList(args, caller); break;
+            case 'kaggle_project_get': result = await this.mcpHandlers.handleKaggleProjectGet(args, caller); break;
+            case 'kaggle_project_source': result = await this.mcpHandlers.handleKaggleProjectSource(args, caller); break;
+            case 'kaggle_project_files': result = await this.mcpHandlers.handleKaggleProjectFiles(args, caller); break;
+            case 'kaggle_project_output': result = await this.mcpHandlers.handleKaggleProjectOutput(args, caller); break;
+            case 'kaggle_project_logs': result = await this.mcpHandlers.handleKaggleProjectLogs(args, caller); break;
+            case 'kaggle_project_continue': result = await this.mcpHandlers.handleKaggleProjectContinue(args, caller); break;
             case 'swarm_dispatch': result = await this.mcpHandlers.handleSwarmDispatch(args, caller); break;
             case 'swarm_status': result = await this.mcpHandlers.handleSwarmStatus(caller); break;
             case 'chat_swarm_runtime_status': result = await this.mcpHandlers.handleChatSwarmRuntimeStatus(caller); break;

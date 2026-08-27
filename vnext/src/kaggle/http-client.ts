@@ -52,8 +52,10 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       const url = `${this.baseUrl}/kernels/push`;
       const fullSlug = payload.kernelSlug.includes('/') ? payload.kernelSlug : `${this.username}/${payload.kernelSlug}`;
       const rawSlug = payload.kernelSlug.includes('/') ? payload.kernelSlug.split('/')[1] : payload.kernelSlug;
+      const rawTitle = payload.title || rawSlug;
+      const title = rawTitle.length > 50 ? rawTitle.substring(0, 50) : rawTitle;
       const body = {
-        newTitle: payload.title || rawSlug,
+        newTitle: title,
         text: payload.code,
         slug: fullSlug,
         language: payload.language || 'python',
@@ -104,10 +106,19 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
         if (parts.length > 1) actualSlug = parts[1];
       }
 
+      const versionNumber = typeof resData.versionNumber === 'number'
+        ? resData.versionNumber
+        : typeof resData.version_number === 'number'
+          ? resData.version_number
+          : typeof resData.version === 'number'
+            ? resData.version
+            : undefined;
+
       return {
         success: true,
         kernelUrl: resData.url || `https://www.kaggle.com/code/${this.username}/${actualSlug}`,
-        kernelSlug: actualSlug
+        kernelSlug: actualSlug,
+        versionNumber
       };
     } catch (err: any) {
       return {
@@ -179,7 +190,8 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
             content: JSON.stringify({ accuracy: 0.985, val_loss: 0.042 }, null, 2),
             sizeBytes: 46
           }
-        ]
+        ],
+        log: 'Mock Kaggle output stdout: Execution success\nLoss: 0.042'
       };
     }
 
@@ -237,9 +249,236 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
         }
       }
 
-      return { success: true, files };
+      return { success: true, files, log: typeof data.log === 'string' ? data.log : undefined };
     } catch (err: any) {
       return { success: false, files: [], error: err.message };
+    }
+  }
+
+  /**
+   * Lists/searches Kaggle projects.
+   */
+  public async listProjects(params: {
+    search?: string;
+    mine?: boolean;
+    user?: string;
+    kernelType?: string;
+    language?: string;
+    sortBy?: string;
+    pageSize?: number;
+    pageToken?: string;
+  } = {}): Promise<any[]> {
+    if (this.isMockMode) {
+      const mockProjects = [
+        {
+          ref: `${this.getUsername()}/astor-tuneup`,
+          slug: 'astor-tuneup',
+          owner: this.getUsername(),
+          title: 'Astor TuneUp',
+          kernelType: 'notebook',
+          language: 'python',
+          lastRunTime: '2026-08-24T06:18:15.053Z',
+          isPrivate: true
+        },
+        {
+          ref: `${this.getUsername()}/devspace-project-control-e2e`,
+          slug: 'devspace-project-control-e2e',
+          owner: this.getUsername(),
+          title: 'DevSpace Project Control E2E',
+          kernelType: 'script',
+          language: 'python',
+          lastRunTime: '2026-08-27T04:20:00.000Z',
+          isPrivate: true
+        }
+      ];
+      const search = (params.search || '').toLowerCase();
+      if (!search) return mockProjects;
+      return mockProjects.filter(p => p.title.toLowerCase().includes(search) || p.slug.toLowerCase().includes(search));
+    }
+
+    try {
+      const queryParams = new URLSearchParams();
+      const targetUser = (params.mine !== false || params.user) ? (params.user || this.username) : undefined;
+      if (targetUser) queryParams.set('user', targetUser);
+      if (params.search) queryParams.set('search', params.search);
+      if (params.kernelType && params.kernelType !== 'all') queryParams.set('kernelType', params.kernelType);
+      if (params.language) queryParams.set('language', params.language);
+      if (params.sortBy) queryParams.set('sortBy', params.sortBy);
+      const pageSize = Math.min(params.pageSize || 20, 50);
+      queryParams.set('pageSize', String(pageSize));
+      if (params.pageToken) queryParams.set('page', params.pageToken);
+
+      const url = `${this.baseUrl}/kernels/list?${queryParams.toString()}`;
+      const res = await fetch(url, {
+        headers: { 'Authorization': this.getAuthHeader() }
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`KAGGLE_LIST_FAILED: HTTP ${res.status}: ${errText}`);
+      }
+
+      const list = await res.json() as any[];
+      if (!Array.isArray(list)) return [];
+
+      return list.map(item => {
+        const ref = item.ref || `${item.author || this.username}/${item.slug || 'kernel'}`;
+        const parts = ref.split('/');
+        const owner = parts[0] || item.author || this.username;
+        const slug = parts.slice(1).join('/') || item.slug || '';
+        return {
+          ref,
+          slug,
+          owner,
+          title: item.title || slug,
+          kernelType: item.kernelType || (item.hasKernelType ? item.kernelType : 'script'),
+          language: item.language || 'python',
+          lastRunTime: item.lastRunTime,
+          isPrivate: item.isPrivate ?? (item.hasIsPrivate ? item.isPrivate : undefined)
+        };
+      });
+    } catch (err: any) {
+      throw new Error(`KAGGLE_PROJECT_LIST_ERROR: ${err.message}`);
+    }
+  }
+
+  /**
+   * Pulls current or known version source and metadata.
+   */
+  public async pullProject(owner: string, slug: string, version?: number): Promise<{ metadata: any; source: string }> {
+    if (this.isMockMode) {
+      const isNotebook = slug.includes('tuneup') || slug.includes('notebook');
+      const mockSource = isNotebook
+        ? JSON.stringify({
+            cells: [
+              { cell_type: 'code', execution_count: 1, metadata: {}, outputs: [], source: ['print("Astor TuneUp initialized")\n'] }
+            ],
+            metadata: { language_info: { name: 'python' }, kernelspec: { display_name: 'Python 3', language: 'python', name: 'python3' } },
+            nbformat: 4,
+            nbformat_minor: 5
+          }, null, 1)
+        : 'print("Mock script project source")\n';
+
+      const mockMetadata = {
+        title: slug.includes('tuneup') ? 'Astor TuneUp' : slug,
+        slug,
+        author: owner,
+        kernelType: isNotebook ? 'notebook' : 'script',
+        language: 'python',
+        isPrivate: true,
+        enableGpu: isNotebook,
+        enableInternet: true,
+        machineShape: isNotebook ? 'NvidiaTeslaT4' : undefined,
+        datasetDataSources: isNotebook ? ['astorhsu/astor-gate2c-8g-kaggle-package'] : [],
+        competitionDataSources: [],
+        kernelDataSources: [],
+        modelDataSources: []
+      };
+
+      return { metadata: mockMetadata, source: mockSource };
+    }
+
+    try {
+      const url = `${this.baseUrl}/kernels/pull?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(slug)}`;
+      const res = await fetch(url, {
+        headers: { 'Authorization': this.getAuthHeader() }
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`KAGGLE_PULL_FAILED: HTTP ${res.status}: ${errText}`);
+      }
+
+      const data = await res.json() as any;
+      const metadata = data.metadata || {};
+      const source = data.blob?.source || '';
+
+      return { metadata, source };
+    } catch (err: any) {
+      throw new Error(`KAGGLE_PROJECT_PULL_ERROR: ${err.message}`);
+    }
+  }
+
+  /**
+   * Retrieves output files metadata for a project.
+   */
+  public async getProjectOutputFiles(owner: string, slug: string): Promise<{ files: any[]; log?: string }> {
+    if (this.isMockMode) {
+      return {
+        files: [
+          { name: 'stdout.log', size: 1024, creationTime: new Date().toISOString() },
+          { name: 'metrics.json', size: 128, creationTime: new Date().toISOString() }
+        ],
+        log: 'Mock log line 1\nMock log line 2'
+      };
+    }
+
+    try {
+      const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(slug)}`;
+      const res = await fetch(url, {
+        headers: { 'Authorization': this.getAuthHeader() }
+      });
+
+      if (res.status === 404) {
+        return { files: [] };
+      }
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`KAGGLE_OUTPUT_FAILED: HTTP ${res.status}: ${errText}`);
+      }
+
+      const data = await res.json() as any;
+      const files: any[] = [];
+
+      if (Array.isArray(data.files)) {
+        for (const f of data.files) {
+          files.push({
+            name: f.fileName || f.name || 'output',
+            size: f.size || 0,
+            url: f.url
+          });
+        }
+      }
+
+      return { files, log: typeof data.log === 'string' ? data.log : undefined };
+    } catch (err: any) {
+      throw new Error(`KAGGLE_PROJECT_FILES_ERROR: ${err.message}`);
+    }
+  }
+
+  /**
+   * Retrieves project execution logs.
+   */
+  public async getProjectLogs(owner: string, slug: string): Promise<{ logs: string[]; available: boolean }> {
+    if (this.isMockMode) {
+      return { logs: ['Mock log: execution complete', 'Memory: 1.2GB'], available: true };
+    }
+
+    try {
+      const url = `${this.baseUrl}/kernels/output?userName=${encodeURIComponent(owner)}&kernelSlug=${encodeURIComponent(slug)}`;
+      const res = await fetch(url, {
+        headers: { 'Authorization': this.getAuthHeader() }
+      });
+
+      if (res.status === 404 || !res.ok) {
+        return { logs: [], available: false };
+      }
+
+      const data = await res.json() as any;
+      let logText = typeof data.log === 'string' ? data.log : '';
+      if (!logText && Array.isArray(data.log)) {
+        logText = data.log.map((item: any) => item.data || '').join('');
+      }
+
+      if (!logText) {
+        return { logs: [], available: false };
+      }
+
+      const logs = logText.split('\n').filter((l: string) => l.trim().length > 0);
+      return { logs, available: true };
+    } catch {
+      return { logs: [], available: false };
     }
   }
 }

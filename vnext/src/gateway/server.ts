@@ -118,6 +118,13 @@ export class GatewayServer {
       { name: 'kaggle_status', description: 'Check Kaggle task', inputSchema: tools.KAGGLE_STATUS_SCHEMA },
       { name: 'kaggle_logs', description: 'Fetch Kaggle logs', inputSchema: tools.KAGGLE_LOGS_SCHEMA },
       { name: 'kaggle_result', description: 'Fetch Kaggle result', inputSchema: tools.KAGGLE_RESULT_SCHEMA },
+      { name: 'kaggle_project_list', description: 'Discover existing Kaggle notebooks and scripts', inputSchema: tools.KAGGLE_PROJECT_LIST_SCHEMA },
+      { name: 'kaggle_project_get', description: 'Retrieve current Kaggle project metadata and optimistic concurrency fingerprint', inputSchema: tools.KAGGLE_PROJECT_GET_SCHEMA },
+      { name: 'kaggle_project_source', description: 'Read current or known-version project source code with notebook cell structure', inputSchema: tools.KAGGLE_PROJECT_SOURCE_SCHEMA },
+      { name: 'kaggle_project_files', description: 'List latest kernel output file metadata', inputSchema: tools.KAGGLE_PROJECT_FILES_SCHEMA },
+      { name: 'kaggle_project_output', description: 'Retrieve output from latest run of an existing kernel directly by project ref', inputSchema: tools.KAGGLE_PROJECT_OUTPUT_SCHEMA },
+      { name: 'kaggle_project_logs', description: 'Retrieve latest kernel execution logs directly by project ref', inputSchema: tools.KAGGLE_PROJECT_LOGS_SCHEMA },
+      { name: 'kaggle_project_continue', description: 'Safely continue an existing persistent Kaggle project with conflict and ownership protection', inputSchema: tools.KAGGLE_PROJECT_CONTINUE_SCHEMA },
       { name: 'swarm_dispatch', description: 'Dispatch swarm task', inputSchema: tools.SWARM_DISPATCH_SCHEMA },
       { name: 'swarm_status', description: 'Check swarm status', inputSchema: tools.SWARM_STATUS_SCHEMA },
       { name: 'chat_swarm_dispatch', description: 'Dispatch Chat Swarm task', inputSchema: tools.CHAT_SWARM_DISPATCH_SCHEMA },
@@ -144,6 +151,13 @@ export class GatewayServer {
       case 'kaggle_status': return this.mcpHandlers.handleKaggleStatus(args, caller);
       case 'kaggle_logs': return this.mcpHandlers.handleKaggleLogs(args, caller);
       case 'kaggle_result': return this.mcpHandlers.handleKaggleResult(args, caller);
+      case 'kaggle_project_list': return this.mcpHandlers.handleKaggleProjectList(args, caller);
+      case 'kaggle_project_get': return this.mcpHandlers.handleKaggleProjectGet(args, caller);
+      case 'kaggle_project_source': return this.mcpHandlers.handleKaggleProjectSource(args, caller);
+      case 'kaggle_project_files': return this.mcpHandlers.handleKaggleProjectFiles(args, caller);
+      case 'kaggle_project_output': return this.mcpHandlers.handleKaggleProjectOutput(args, caller);
+      case 'kaggle_project_logs': return this.mcpHandlers.handleKaggleProjectLogs(args, caller);
+      case 'kaggle_project_continue': return this.mcpHandlers.handleKaggleProjectContinue(args, caller);
       case 'swarm_dispatch': return this.mcpHandlers.handleSwarmDispatch(args, caller);
       case 'swarm_status': return this.mcpHandlers.handleSwarmStatus(caller);
       case 'chat_swarm_dispatch': return this.mcpHandlers.handleChatSwarmDispatch(args, caller);

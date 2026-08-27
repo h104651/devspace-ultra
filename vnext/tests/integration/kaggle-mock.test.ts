@@ -11,9 +11,9 @@ export async function runKaggleIntegrationTests(): Promise<{ passed: number; fai
     fs.rmSync(testDir, { recursive: true, force: true });
   }
 
-  const port = 49200 + Math.floor(Math.random() * 1000);
   const server = new GatewayServer({
-    port,
+    port: 0,
+    host: '127.0.0.1',
     storageDir: testDir,
     masterSecret: 'test-secret',
     kaggleMockMode: true,
