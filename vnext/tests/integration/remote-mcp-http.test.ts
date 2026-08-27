@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import http from 'http';
 import { GatewayServer } from '../../src/gateway/server';
@@ -160,6 +161,28 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     passed++;
 
     // Test 6: Authenticated tools/call for workspace tools dispatch correctly
+    const kClient = (server.kaggleBackend.getClient() as any);
+    if (kClient && typeof kClient.registerMockDataset === 'function') {
+      const contextText = '# Astor TuneUp Context Header\n';
+      const contextSha = crypto.createHash('sha256').update(contextText).digest('hex');
+      const mockManifest = {
+        name: 'Astor TuneUp',
+        slug: 'astor-tuneup-project',
+        owner: 'testuser',
+        version: 1,
+        type: 'workspace',
+        entrypoint: 'experiments/gate2c_9a_mining.py',
+        runnerKernelRef: 'testuser/astor-tuneup-thin-runner',
+        files: {
+          'PROJECT_CONTEXT.md': { size: Buffer.byteLength(contextText), sha256: contextSha }
+        }
+      };
+      kClient.registerMockDataset('testuser', 'astor-tuneup-project', 1, {
+        'devspace-project.json': JSON.stringify(mockManifest, null, 2),
+        'PROJECT_CONTEXT.md': contextText
+      });
+    }
+
     const wsGetCall = await makeMcpRequest(
       '/mcp',
       {

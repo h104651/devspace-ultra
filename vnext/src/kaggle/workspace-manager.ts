@@ -76,3 +76,105 @@ export function validateProjectManifest(manifest: any): DevSpaceProjectManifest 
   }
   return manifest as DevSpaceProjectManifest;
 }
+
+/**
+ * Validates and normalizes relative POSIX workspace path.
+ * Rejects absolute paths, .., path traversal, empty paths, backslashes, and control characters.
+ */
+export function validateWorkspaceRelativePath(relPath: string): string {
+  if (!relPath || typeof relPath !== 'string') {
+    throw new Error('INVALID_WORKSPACE_PATH: Path must be a non-empty string');
+  }
+
+  // Reject backslashes to enforce POSIX relative paths
+  if (relPath.includes('\\')) {
+    throw new Error(`INVALID_WORKSPACE_PATH: Backslashes are not permitted in workspace paths: "${relPath}"`);
+  }
+
+  // Reject absolute paths
+  if (relPath.startsWith('/')) {
+    throw new Error(`INVALID_WORKSPACE_PATH: Absolute paths are not permitted: "${relPath}"`);
+  }
+
+  // Reject control characters or null bytes
+  if (/[\x00-\x1f\x7f]/.test(relPath)) {
+    throw new Error(`INVALID_WORKSPACE_PATH: Path contains illegal control characters: "${relPath}"`);
+  }
+
+  const parts = relPath.split('/');
+  for (const part of parts) {
+    if (!part || part === '.' || part === '..') {
+      throw new Error(`INVALID_WORKSPACE_PATH: Path contains invalid traversal segment "${part}" in "${relPath}"`);
+    }
+  }
+
+  return relPath;
+}
+
+export interface KaggleUploadTree {
+  files: Array<{ token: string; description: string }>;
+  directories: Array<{
+    name: string;
+    directories: any[];
+    files: Array<{ token: string; description: string }>;
+  }>;
+}
+
+/**
+ * Builds hierarchical Kaggle ApiUploadDirectoryInfo tree from flat list of relative paths and tokens.
+ */
+export function buildKaggleUploadTree(fileEntries: Array<{ relPath: string; token: string }>): KaggleUploadTree {
+  const rootFiles: Array<{ token: string; description: string }> = [];
+  const rootDirs = new Map<string, any>();
+
+  function getOrCreateDirNode(parentMap: Map<string, any>, dirName: string) {
+    if (!parentMap.has(dirName)) {
+      parentMap.set(dirName, {
+        name: dirName,
+        subDirs: new Map<string, any>(),
+        files: [] as Array<{ token: string; description: string }>
+      });
+    }
+    return parentMap.get(dirName);
+  }
+
+  for (const entry of fileEntries) {
+    const validPath = validateWorkspaceRelativePath(entry.relPath);
+    const parts = validPath.split('/');
+    const fileName = parts.pop()!;
+
+    if (parts.length === 0) {
+      rootFiles.push({
+        token: entry.token,
+        description: fileName
+      });
+    } else {
+      let currentMap = rootDirs;
+      let currentDirNode: any = null;
+      for (const seg of parts) {
+        currentDirNode = getOrCreateDirNode(currentMap, seg);
+        currentMap = currentDirNode.subDirs;
+      }
+      currentDirNode.files.push({
+        token: entry.token,
+        description: fileName
+      });
+    }
+  }
+
+  function serializeDir(node: any): any {
+    const subDirs = Array.from(node.subDirs.values()).map(serializeDir);
+    return {
+      name: node.name,
+      directories: subDirs,
+      files: node.files
+    };
+  }
+
+  const directories = Array.from(rootDirs.values()).map(serializeDir);
+
+  return {
+    files: rootFiles,
+    directories
+  };
+}

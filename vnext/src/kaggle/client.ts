@@ -4,6 +4,7 @@ import * as os from 'os';
 import { exec, spawn } from 'child_process';
 import { KaggleExecutionStatus, KaggleTaskPayload, KaggleTaskResult } from '../types/kaggle';
 import { NotebookBuilder } from './notebook-builder';
+import { KaggleDatasetMetadata, KaggleDatasetFileEntry } from './kaggle-client.interface';
 
 export interface KaggleCredentials {
   username: string;
@@ -293,15 +294,141 @@ export class KaggleClient {
     };
   }
 
-  public async uploadBlob(fileName: string, content: Buffer | string): Promise<string> {
-    return `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  private mockBlobs: Map<string, { fileName: string; content: Buffer }> = new Map();
+  private mockDatasets: Map<string, {
+    metadata: KaggleDatasetMetadata;
+    currentVersion: number;
+    versions: Map<number, { files: Map<string, Buffer> }>;
+  }> = new Map();
+
+  public registerMockDataset(
+    owner: string,
+    slug: string,
+    version: number,
+    files: Map<string, Buffer | string> | Record<string, string | Buffer>,
+    metadata?: Partial<KaggleDatasetMetadata>
+  ): void {
+    const key = `${owner}/${slug}`;
+    const filesMap = new Map<string, Buffer>();
+    if (files instanceof Map) {
+      for (const [k, v] of files.entries()) {
+        filesMap.set(k, Buffer.isBuffer(v) ? v : Buffer.from(v, 'utf-8'));
+      }
+    } else {
+      for (const [k, v] of Object.entries(files)) {
+        filesMap.set(k, Buffer.isBuffer(v) ? v : Buffer.from(v, 'utf-8'));
+      }
+    }
+
+    let ds = this.mockDatasets.get(key);
+    if (!ds) {
+      ds = {
+        metadata: {
+          ref: key,
+          title: slug,
+          currentVersionNumber: version,
+          isPrivate: true,
+          totalBytes: 0,
+          ...metadata
+        },
+        currentVersion: version,
+        versions: new Map()
+      };
+      this.mockDatasets.set(key, ds);
+    }
+    ds.currentVersion = Math.max(ds.currentVersion, version);
+    ds.metadata.currentVersionNumber = ds.currentVersion;
+    ds.versions.set(version, { files: filesMap });
   }
 
-  public async createDataset(slug: string, title: string, files: { token: string; description?: string }[], isPrivate = true): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
+  public async getDataset(owner: string, slug: string): Promise<KaggleDatasetMetadata> {
+    const key = `${owner}/${slug}`;
+    const mockDs = this.mockDatasets.get(key);
+    if (mockDs) {
+      return mockDs.metadata;
+    }
+    return {
+      ref: key,
+      title: slug,
+      currentVersionNumber: 1,
+      isPrivate: true,
+      totalBytes: 1024
+    };
+  }
+
+  public async listDatasetFiles(
+    owner: string,
+    slug: string,
+    version?: number,
+    pageSize = 100,
+    pageToken?: string
+  ): Promise<{ datasetFiles: KaggleDatasetFileEntry[]; nextPageToken?: string }> {
+    const key = `${owner}/${slug}`;
+    const mockDs = this.mockDatasets.get(key);
+    if (mockDs) {
+      const verNum = version || mockDs.currentVersion;
+      const verData = mockDs.versions.get(verNum);
+      if (verData) {
+        const files: KaggleDatasetFileEntry[] = [];
+        for (const [name, buf] of verData.files.entries()) {
+          files.push({ name, totalBytes: buf.length });
+        }
+        return { datasetFiles: files };
+      }
+    }
+    return {
+      datasetFiles: [
+        { name: 'devspace-project.json', totalBytes: 1024 },
+        { name: 'PROJECT_CONTEXT.md', totalBytes: 4096 }
+      ]
+    };
+  }
+
+  public async downloadDatasetFile(
+    owner: string,
+    slug: string,
+    fileName: string,
+    version?: number
+  ): Promise<{ content: Buffer; sizeBytes: number }> {
+    const key = `${owner}/${slug}`;
+    const mockDs = this.mockDatasets.get(key);
+    if (mockDs) {
+      const verNum = version || mockDs.currentVersion;
+      const verData = mockDs.versions.get(verNum);
+      if (verData) {
+        const buf = verData.files.get(fileName);
+        if (buf) {
+          return { content: buf, sizeBytes: buf.length };
+        }
+      }
+    }
+    const def = Buffer.from(`# File ${fileName} for ${owner}/${slug}\n`, 'utf-8');
+    return { content: def, sizeBytes: def.length };
+  }
+
+  public async uploadBlob(fileName: string, content: Buffer | string): Promise<string> {
+    const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
+    const token = `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.mockBlobs.set(token, { fileName, content: buf });
+    return token;
+  }
+
+  public async createDataset(
+    slug: string,
+    title: string,
+    files: { token: string; description?: string }[],
+    directories?: any[],
+    isPrivate = true
+  ): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
     return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
   }
 
-  public async createDatasetVersion(slug: string, versionNotes: string, files: { token: string; description?: string }[]): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
+  public async createDatasetVersion(
+    slug: string,
+    versionNotes: string,
+    files: { token: string; description?: string }[],
+    directories?: any[]
+  ): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
     return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
   }
 

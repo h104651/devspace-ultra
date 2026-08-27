@@ -852,56 +852,69 @@ class McpHandlers {
         }
         return { status: 'OK', killSwitchState: this.gateway.killSwitch.getState() };
     }
-    // --- Large Project Workspace Handlers ---
-    mockWorkspaces = new Map();
-    getOrCreateWorkspace(projectRef, owner, slug) {
-        if (!this.mockWorkspaces.has(projectRef)) {
-            const isAstor = projectRef.includes('astor') || slug.includes('astor');
-            const manifest = {
-                name: isAstor ? 'Astor TuneUp' : slug,
-                slug: slug,
-                owner: owner,
-                version: 1,
-                type: 'workspace',
-                entrypoint: 'experiments/gate2c_9a_mining.py',
-                runnerKernelRef: `${owner}/${slug}-runner`,
-                archiveMaster: isAstor ? {
-                    filename: 'archive/astor-tuneup-original.ipynb',
-                    size: 14276636,
-                    sha256: '9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450',
-                    cellCount: 139
-                } : undefined,
-                files: {
-                    'devspace-project.json': { size: 1024, sha256: 'abc111' },
-                    'PROJECT_CONTEXT.md': { size: 4096, sha256: 'abc222', description: 'Comprehensive project background, lineage and active experiment documentation' },
-                    'archive/astor-tuneup-original.ipynb': { size: 14276636, sha256: '9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450', description: 'Original 139-cell notebook master' },
-                    'src/astor_tuneup/__init__.py': { size: 256, sha256: 'abc333' },
-                    'src/astor_tuneup/config.py': { size: 1024, sha256: 'abc444' },
-                    'src/astor_tuneup/hash_utils.py': { size: 2048, sha256: 'abc555' },
-                    'src/astor_tuneup/video_decode.py': { size: 4096, sha256: 'abc666' },
-                    'src/astor_tuneup/detector_mining.py': { size: 8192, sha256: 'abc777' },
-                    'src/astor_tuneup/packaging.py': { size: 4096, sha256: 'abc888' },
-                    'experiments/gate2c_9a_mining.py': { size: 12288, sha256: 'abc999', description: 'Active Gate 2C-9A detector failure mining experiment' },
-                    'experiments/current.py': { size: 512, sha256: 'abcaaa' },
-                    'config/project.json': { size: 512, sha256: 'abcbbb' }
-                }
-            };
-            const files = {
-                'devspace-project.json': JSON.stringify(manifest, null, 2),
-                'PROJECT_CONTEXT.md': `# Astor TuneUp — Project Context\n\n## Goal\nContinuous training and detector failure mining on real CCTV/mobile video feeds.\n\n## Lineage\nGate 2C-8G -> Gate 2C-8H -> Gate 2C-9A (Active)\n\n## Active Experiment\nGate 2C-9A detector failure mining and human label packaging.\n`,
-                'src/astor_tuneup/__init__.py': `"""Astor TuneUp modular project package."""\n__version__ = "1.0.0"\n`,
-                'src/astor_tuneup/config.py': `import os\nPROJECT_NAME = "Astor TuneUp"\nGATE_VERSION = "Gate2C-9A"\n`,
-                'src/astor_tuneup/hash_utils.py': `import hashlib\ndef compute_file_sha256(path):\n    h = hashlib.sha256()\n    with open(path, "rb") as f:\n        for chunk in iter(lambda: f.read(65536), b""):\n            h.update(chunk)\n    return h.hexdigest()\n`,
-                'src/astor_tuneup/video_decode.py': `def decode_video_frames(video_path, max_frames=300):\n    return []\n`,
-                'src/astor_tuneup/detector_mining.py': `def run_detector_failure_mining(frames, detector_model):\n    return {"mined_failures": 0}\n`,
-                'src/astor_tuneup/packaging.py': `def package_human_label_pack(candidates, out_zip):\n    return {"pack_size": 0}\n`,
-                'experiments/gate2c_9a_mining.py': `"""Gate 2C-9A Detector Failure Mining Entrypoint."""\nfrom astor_tuneup import config\nprint(f"Executing {config.PROJECT_NAME} {config.GATE_VERSION}")\n`,
-                'experiments/current.py': `from experiments.gate2c_9a_mining import *\n`,
-                'config/project.json': JSON.stringify({ name: 'Astor TuneUp', target_fps: 10 }, null, 2)
-            };
-            this.mockWorkspaces.set(projectRef, { manifest, files });
+    // --- Large Project Workspace Handlers (Real Kaggle Dataset Control Plane) ---
+    /**
+     * Version-pins and validates an authoritative Kaggle Workspace revision.
+     * Fails closed if manifest is corrupted, missing, version-mismatched, or file is absent.
+     */
+    async loadWorkspaceRevision(owner, slug) {
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.getDataset !== 'function' || typeof client.listDatasetFiles !== 'function' || typeof client.downloadDatasetFile !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle Dataset control plane is not supported by backend client');
         }
-        return this.mockWorkspaces.get(projectRef);
+        // 1. Get Dataset metadata
+        const ds = await client.getDataset(owner, slug);
+        const N = ds.currentVersionNumber || 1;
+        // 2. List Dataset files explicitly pinned to version N
+        const fileListing = await client.listDatasetFiles(owner, slug, N);
+        const datasetFiles = fileListing.datasetFiles || [];
+        const datasetFilesMap = new Map(datasetFiles.map((f) => [f.name, f.totalBytes]));
+        // 3. Download devspace-project.json explicitly pinned to version N
+        let manifestDl;
+        try {
+            manifestDl = await client.downloadDatasetFile(owner, slug, 'devspace-project.json', N);
+        }
+        catch (err) {
+            throw new Error(`KAGGLE_WORKSPACE_MANIFEST_MISSING: Could not download devspace-project.json from ${owner}/${slug} version ${N}: ${err.message}`);
+        }
+        // 4. Parse and validate manifest schema
+        let rawParsed;
+        try {
+            rawParsed = JSON.parse(manifestDl.content.toString('utf-8'));
+        }
+        catch (e) {
+            throw new Error(`KAGGLE_WORKSPACE_MANIFEST_CORRUPTED: devspace-project.json is not valid JSON in ${owner}/${slug} version ${N}`);
+        }
+        const manifest = (0, workspace_manager_1.validateProjectManifest)(rawParsed);
+        // 5. Version guard: manifest.version must strictly equal dataset version N
+        if (manifest.version !== N) {
+            throw new Error(`KAGGLE_WORKSPACE_MANIFEST_VERSION_MISMATCH: Manifest version (${manifest.version}) does not match Kaggle dataset version (${N})`);
+        }
+        // 6. Identity guard: owner and slug must match requested project
+        if (manifest.slug.toLowerCase() !== slug.toLowerCase()) {
+            throw new Error(`KAGGLE_WORKSPACE_IDENTITY_MISMATCH: Manifest slug "${manifest.slug}" does not match requested slug "${slug}"`);
+        }
+        if (manifest.owner && manifest.owner.toLowerCase() !== owner.toLowerCase()) {
+            throw new Error(`KAGGLE_WORKSPACE_IDENTITY_MISMATCH: Manifest owner "${manifest.owner}" does not match requested owner "${owner}"`);
+        }
+        // 7. File presence guard: every file declared in manifest must exist in dataset file listing
+        for (const [filePath] of Object.entries(manifest.files || {})) {
+            if (filePath === 'devspace-project.json')
+                continue;
+            const isPresent = datasetFilesMap.has(filePath) || datasetFilesMap.has(filePath.replace(/[\/\\]/g, '_'));
+            if (!isPresent) {
+                throw new Error(`KAGGLE_WORKSPACE_FILE_MISSING: Manifest file "${filePath}" is missing from Kaggle dataset version ${N}`);
+            }
+        }
+        // 8. Compute real workspace fingerprint
+        const workspaceFingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(manifest);
+        return {
+            dataset: ds,
+            version: N,
+            manifest,
+            datasetFiles,
+            workspaceFingerprint
+        };
     }
     async handleKaggleWorkspaceGet(args, caller) {
         const auth = this.requireCaller(caller);
@@ -911,9 +924,8 @@ class McpHandlers {
             throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle client unavailable');
         }
         const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.project, client.getUsername());
-        const ws = this.getOrCreateWorkspace(ref, owner, slug);
-        const fingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(ws.manifest);
-        const fileList = Object.keys(ws.manifest.files).map(k => ({
+        const ws = await this.loadWorkspaceRevision(owner, slug);
+        const fileList = Object.keys(ws.manifest.files || {}).map(k => ({
             path: k,
             size: ws.manifest.files[k].size,
             sha256: ws.manifest.files[k].sha256,
@@ -925,9 +937,11 @@ class McpHandlers {
             name: ws.manifest.name,
             slug: ws.manifest.slug,
             owner: ws.manifest.owner || owner,
-            version: ws.manifest.version,
+            datasetVersion: ws.version,
+            manifestVersion: ws.manifest.version,
+            version: ws.version,
             type: ws.manifest.type,
-            workspaceFingerprint: fingerprint,
+            workspaceFingerprint: ws.workspaceFingerprint,
             entrypoint: ws.manifest.entrypoint,
             runnerKernelRef: ws.manifest.runnerKernelRef,
             archiveMaster: ws.manifest.archiveMaster,
@@ -944,30 +958,59 @@ class McpHandlers {
             throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle client unavailable');
         }
         const { owner, slug, ref } = (0, project_manager_1.parseKernelRef)(args.project, client.getUsername());
-        const ws = this.getOrCreateWorkspace(ref, owner, slug);
-        const filePath = args.path;
-        if (!filePath) {
+        const rawPath = args.path;
+        if (!rawPath) {
             throw new Error('INVALID_WORKSPACE_FILE_REQUEST: path is required');
         }
-        const content = ws.files[filePath];
-        if (content === undefined) {
-            throw new Error(`FILE_NOT_FOUND: Workspace file "${filePath}" not found in project ${ref}`);
+        const filePath = rawPath === 'devspace-project.json' ? 'devspace-project.json' : (0, workspace_manager_1.validateWorkspaceRelativePath)(rawPath);
+        const ws = await this.loadWorkspaceRevision(owner, slug);
+        const fileMeta = ws.manifest.files?.[filePath];
+        if (!fileMeta && filePath !== 'devspace-project.json') {
+            throw new Error(`FILE_NOT_FOUND: Workspace file "${filePath}" not found in manifest of project ${ref}`);
         }
+        // Try downloading the file by exact POSIX path or flattened fallback
+        let dl;
+        try {
+            dl = await client.downloadDatasetFile(owner, slug, filePath, ws.version);
+        }
+        catch (err) {
+            const flattenedName = filePath.replace(/[\/\\]/g, '_');
+            try {
+                dl = await client.downloadDatasetFile(owner, slug, flattenedName, ws.version);
+            }
+            catch {
+                throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Failed to download "${filePath}" from ${ref} version ${ws.version}: ${err.message}`);
+            }
+        }
+        const computedSha256 = crypto.createHash('sha256').update(dl.content).digest('hex');
+        const computedSize = dl.content.length;
+        // File SHA-256 and Size guards against manifest
+        if (fileMeta) {
+            if (fileMeta.sha256 && computedSha256.toLowerCase() !== fileMeta.sha256.toLowerCase()) {
+                throw new Error(`KAGGLE_WORKSPACE_FILE_HASH_MISMATCH: Downloaded file "${filePath}" SHA-256 (${computedSha256}) does not match manifest SHA-256 (${fileMeta.sha256})`);
+            }
+            if (typeof fileMeta.size === 'number' && fileMeta.size > 0 && computedSize !== fileMeta.size) {
+                throw new Error(`KAGGLE_WORKSPACE_FILE_SIZE_MISMATCH: Downloaded file "${filePath}" byte size (${computedSize}) does not match manifest byte size (${fileMeta.size})`);
+            }
+        }
+        const rawText = dl.content.toString('utf-8');
         const offset = Math.max(0, args.offset || 0);
         const limit = Math.min(Math.max(1, args.limit || 50000), 100000);
-        const chunk = content.slice(offset, offset + limit);
-        const totalLength = content.length;
+        const chunk = rawText.slice(offset, offset + limit);
+        const totalLength = rawText.length;
         const hasMore = offset + limit < totalLength;
-        const sha256 = crypto.createHash('sha256').update(content).digest('hex');
         return {
             project: ref,
+            datasetVersion: ws.version,
+            workspaceFingerprint: ws.workspaceFingerprint,
             path: filePath,
             content: chunk,
             offset,
             limit,
             totalLength,
+            size: computedSize,
             hasMore,
-            sha256
+            sha256: computedSha256
         };
     }
     async handleKaggleWorkspaceContinue(args, caller) {
@@ -990,66 +1033,129 @@ class McpHandlers {
         if (!args.expectedWorkspaceFingerprint) {
             throw new Error('INVALID_MUTATION: expectedWorkspaceFingerprint is required for optimistic concurrency protection');
         }
-        const ws = this.getOrCreateWorkspace(ref, owner, slug);
-        const currentFingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(ws.manifest);
-        if (args.expectedWorkspaceFingerprint !== currentFingerprint) {
+        // 1. Load REAL current dataset revision N
+        const ws = await this.loadWorkspaceRevision(owner, slug);
+        // 2. Concurrency Conflict Guard: verify expected fingerprint before doing ANY write or upload
+        if (args.expectedWorkspaceFingerprint !== ws.workspaceFingerprint) {
             throw new Error(JSON.stringify({
                 error: 'KAGGLE_WORKSPACE_CONFLICT',
                 message: 'Workspace files have changed since last inspection',
                 expectedFingerprint: args.expectedWorkspaceFingerprint,
-                currentFingerprint
+                currentFingerprint: ws.workspaceFingerprint
             }));
         }
-        // 1. Save Pre-Write Snapshot
+        // 3. Save Pre-Write Snapshot to storage
         const preWriteSnapshotId = await this.saveProjectSnapshot(ref, 'workspace-pre-write-snapshot', JSON.stringify(ws.manifest, null, 2), ws.manifest, undefined, args.clientRequestId);
-        // Apply file changes
-        const uploadedFiles = [];
+        // 4. Construct the complete Next Version (N + 1)
+        const nextFilesMap = { ...ws.manifest.files };
+        const nextFileContents = new Map();
+        const changesMap = new Map();
         for (const change of args.changes) {
-            const targetPath = change.path;
-            const newContent = change.content;
-            if (!targetPath || typeof newContent !== 'string') {
+            if (!change.path || typeof change.content !== 'string') {
                 throw new Error('INVALID_CHANGE_SPEC: Each change item must have string "path" and "content"');
             }
-            if (change.expectedSha256 && ws.files[targetPath]) {
-                const existingSha = crypto.createHash('sha256').update(ws.files[targetPath]).digest('hex');
-                if (existingSha.toLowerCase() !== change.expectedSha256.toLowerCase()) {
-                    throw new Error(`FILE_INTEGRITY_CONFLICT: File "${targetPath}" SHA-256 (${existingSha}) does not match expected (${change.expectedSha256})`);
+            const validPath = (0, workspace_manager_1.validateWorkspaceRelativePath)(change.path);
+            changesMap.set(validPath, change);
+        }
+        // For every unchanged file in current manifest: preserve exact content
+        for (const existingPath of Object.keys(ws.manifest.files || {})) {
+            if (existingPath === 'devspace-project.json')
+                continue;
+            if (!changesMap.has(existingPath)) {
+                let fileDl;
+                try {
+                    fileDl = await client.downloadDatasetFile(owner, slug, existingPath, ws.version);
+                }
+                catch (err) {
+                    const flat = existingPath.replace(/[\/\\]/g, '_');
+                    fileDl = await client.downloadDatasetFile(owner, slug, flat, ws.version);
+                }
+                nextFileContents.set(existingPath, fileDl.content);
+            }
+        }
+        // For every changed or added file:
+        for (const [changePath, change] of changesMap.entries()) {
+            if (change.expectedSha256 && nextFilesMap[changePath]) {
+                if (nextFilesMap[changePath].sha256.toLowerCase() !== change.expectedSha256.toLowerCase()) {
+                    throw new Error(`FILE_INTEGRITY_CONFLICT: File "${changePath}" SHA-256 (${nextFilesMap[changePath].sha256}) does not match expected (${change.expectedSha256})`);
                 }
             }
-            ws.files[targetPath] = newContent;
-            const fileSha = crypto.createHash('sha256').update(newContent).digest('hex');
-            const fileSize = Buffer.byteLength(newContent, 'utf8');
-            ws.manifest.files[targetPath] = {
-                size: fileSize,
+            const newBuf = Buffer.from(change.content, 'utf-8');
+            const fileSha = crypto.createHash('sha256').update(newBuf).digest('hex');
+            nextFileContents.set(changePath, newBuf);
+            nextFilesMap[changePath] = {
+                size: newBuf.length,
                 sha256: fileSha,
-                description: `Updated via DevSpace workspace mutation: ${args.reason}`
+                category: change.category || nextFilesMap[changePath]?.category,
+                description: change.description || `Updated via DevSpace workspace mutation: ${args.reason}`
             };
-            const token = await client.uploadBlob(targetPath.replace(/[\/\\]/g, '_'), newContent);
-            uploadedFiles.push({ token, description: targetPath });
         }
-        if (args.experimentEntrypoint) {
-            ws.manifest.entrypoint = args.experimentEntrypoint;
+        delete nextFilesMap['devspace-project.json'];
+        // Next Manifest version N + 1
+        const nextVersion = ws.version + 1;
+        const nextManifest = {
+            ...ws.manifest,
+            version: nextVersion,
+            files: nextFilesMap,
+            entrypoint: args.experimentEntrypoint || ws.manifest.entrypoint,
+            updatedAt: new Date().toISOString()
+        };
+        const nextFingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(nextManifest);
+        // Include devspace-project.json in upload contents
+        const nextManifestText = JSON.stringify(nextManifest, null, 2);
+        const nextManifestBuf = Buffer.from(nextManifestText, 'utf-8');
+        nextFileContents.set('devspace-project.json', nextManifestBuf);
+        // 5. Upload blobs for ALL files
+        const flatUploadedEntries = [];
+        for (const [filePath, buf] of nextFileContents.entries()) {
+            const fileName = filePath.split('/').pop();
+            const token = await client.uploadBlob(fileName, buf);
+            flatUploadedEntries.push({ relPath: filePath, token });
         }
-        ws.manifest.version += 1;
-        ws.manifest.updatedAt = new Date().toISOString();
-        ws.files['devspace-project.json'] = JSON.stringify(ws.manifest, null, 2);
-        const manifestToken = await client.uploadBlob('devspace-project.json', ws.files['devspace-project.json']);
-        uploadedFiles.push({ token: manifestToken, description: 'Updated project manifest' });
-        // Durably create new Kaggle dataset version
-        const datasetResult = await client.createDatasetVersion(slug, `DevSpace Workspace Version ${ws.manifest.version}: ${args.reason}`, uploadedFiles);
+        // 6. Build hierarchical upload tree preserving directory structures
+        const uploadTree = (0, workspace_manager_1.buildKaggleUploadTree)(flatUploadedEntries);
+        // 7. Create Dataset Version
+        const datasetResult = await client.createDatasetVersion(slug, `DevSpace Workspace Version ${nextVersion}: ${args.reason}`, uploadTree.files, uploadTree.directories);
         if (!datasetResult.success && datasetResult.error) {
             throw new Error(`KAGGLE_DATASET_VERSION_FAILED: ${datasetResult.error}`);
         }
-        const newFingerprint = (0, workspace_manager_1.computeWorkspaceFingerprint)(ws.manifest);
-        // 2. Save Post-Write Snapshot
-        const postWriteSnapshotId = await this.saveProjectSnapshot(ref, 'workspace-post-write-snapshot', JSON.stringify(ws.manifest, null, 2), ws.manifest, undefined, args.clientRequestId);
-        // 3. Queue thin runner kernel execution
-        const runnerKernelRef = args.runnerKernelRef || ws.manifest.runnerKernelRef || `${owner}/astor-tuneup-runner`;
-        const runnerSlug = runnerKernelRef.includes('/') ? runnerKernelRef.split('/')[1] : runnerKernelRef;
+        // 8. Poll until Dataset is READY
+        let isReady = false;
+        for (let i = 0; i < 25; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            const stat = await client.getDatasetStatus(slug, owner);
+            if (stat.isReady) {
+                isReady = true;
+                break;
+            }
+        }
+        if (!isReady) {
+            throw new Error('KAGGLE_WORKSPACE_TIMEOUT: Dataset version creation did not become READY in time');
+        }
+        // 9. Post-Write Verification before runner execution
+        const verifiedWs = await this.loadWorkspaceRevision(owner, slug);
+        if (verifiedWs.version !== nextVersion) {
+            throw new Error(`KAGGLE_WORKSPACE_POST_WRITE_VERIFY_FAILED: Readback dataset version (${verifiedWs.version}) does not match expected next version (${nextVersion})`);
+        }
+        if (verifiedWs.manifest.version !== nextVersion) {
+            throw new Error(`KAGGLE_WORKSPACE_POST_WRITE_VERIFY_FAILED: Readback manifest version (${verifiedWs.manifest.version}) does not match expected (${nextVersion})`);
+        }
+        if (verifiedWs.workspaceFingerprint !== nextFingerprint) {
+            throw new Error(`KAGGLE_WORKSPACE_POST_WRITE_VERIFY_FAILED: Readback workspace fingerprint (${verifiedWs.workspaceFingerprint}) does not match expected next fingerprint (${nextFingerprint})`);
+        }
+        if (ws.manifest.archiveMaster) {
+            if (!verifiedWs.manifest.archiveMaster || verifiedWs.manifest.archiveMaster.sha256.toLowerCase() !== ws.manifest.archiveMaster.sha256.toLowerCase()) {
+                throw new Error('KAGGLE_WORKSPACE_POST_WRITE_VERIFY_FAILED: Archive master notebook integrity compromised during workspace update');
+            }
+        }
+        // 10. Save Post-Write Snapshot
+        const postWriteSnapshotId = await this.saveProjectSnapshot(ref, 'workspace-post-write-snapshot', JSON.stringify(verifiedWs.manifest, null, 2), verifiedWs.manifest, undefined, args.clientRequestId);
+        // 11. Queue thin runner kernel execution
+        const runnerKernelRef = args.runnerKernelRef || verifiedWs.manifest.runnerKernelRef || `${owner}/astor-tuneup-thin-runner`;
         const runnerPayload = {
             kernelSlug: runnerKernelRef,
-            title: `${ws.manifest.name} Runner`,
-            code: `# DevSpace Thin Runner\nimport json\nprint("ASTOR_TUNEUP_WORKSPACE_PASS")\nwith open("/kaggle/working/devspace-result.json", "w") as f:\n    json.dump({"project": "${ws.manifest.name}", "workspace": "PASS", "version": ${ws.manifest.version}}, f)\n`,
+            title: `${verifiedWs.manifest.name} Runner`,
+            code: `# DevSpace Thin Runner\nimport json\nprint("ASTOR_TUNEUP_WORKSPACE_PASS")\nwith open("/kaggle/working/devspace-result.json", "w") as f:\n    json.dump({"project": "${verifiedWs.manifest.name}", "workspace": "PASS", "version": ${verifiedWs.version}}, f)\n`,
             language: 'python',
             kernelType: 'notebook',
             isPrivate: true,
@@ -1066,14 +1172,14 @@ class McpHandlers {
         return {
             taskId: taskResult.taskId,
             project: ref,
-            workspaceVersion: ws.manifest.version,
+            workspaceVersion: verifiedWs.version,
             status: taskResult.status,
-            previousWorkspaceFingerprint: currentFingerprint,
-            newWorkspaceFingerprint: newFingerprint,
+            previousWorkspaceFingerprint: ws.workspaceFingerprint,
+            newWorkspaceFingerprint: verifiedWs.workspaceFingerprint,
             runnerKernelRef,
             preWriteSnapshotId,
             postWriteSnapshotId,
-            message: `Workspace updated to version ${ws.manifest.version} and runner kernel queued for execution.`
+            message: `Workspace updated to version ${verifiedWs.version} and runner kernel queued for execution.`
         };
     }
 }

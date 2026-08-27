@@ -297,13 +297,102 @@ class KaggleClient {
             log: 'Mock output stdout: Execution success\nLoss: 0.042'
         };
     }
-    async uploadBlob(fileName, content) {
-        return `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    mockBlobs = new Map();
+    mockDatasets = new Map();
+    registerMockDataset(owner, slug, version, files, metadata) {
+        const key = `${owner}/${slug}`;
+        const filesMap = new Map();
+        if (files instanceof Map) {
+            for (const [k, v] of files.entries()) {
+                filesMap.set(k, Buffer.isBuffer(v) ? v : Buffer.from(v, 'utf-8'));
+            }
+        }
+        else {
+            for (const [k, v] of Object.entries(files)) {
+                filesMap.set(k, Buffer.isBuffer(v) ? v : Buffer.from(v, 'utf-8'));
+            }
+        }
+        let ds = this.mockDatasets.get(key);
+        if (!ds) {
+            ds = {
+                metadata: {
+                    ref: key,
+                    title: slug,
+                    currentVersionNumber: version,
+                    isPrivate: true,
+                    totalBytes: 0,
+                    ...metadata
+                },
+                currentVersion: version,
+                versions: new Map()
+            };
+            this.mockDatasets.set(key, ds);
+        }
+        ds.currentVersion = Math.max(ds.currentVersion, version);
+        ds.metadata.currentVersionNumber = ds.currentVersion;
+        ds.versions.set(version, { files: filesMap });
     }
-    async createDataset(slug, title, files, isPrivate = true) {
+    async getDataset(owner, slug) {
+        const key = `${owner}/${slug}`;
+        const mockDs = this.mockDatasets.get(key);
+        if (mockDs) {
+            return mockDs.metadata;
+        }
+        return {
+            ref: key,
+            title: slug,
+            currentVersionNumber: 1,
+            isPrivate: true,
+            totalBytes: 1024
+        };
+    }
+    async listDatasetFiles(owner, slug, version, pageSize = 100, pageToken) {
+        const key = `${owner}/${slug}`;
+        const mockDs = this.mockDatasets.get(key);
+        if (mockDs) {
+            const verNum = version || mockDs.currentVersion;
+            const verData = mockDs.versions.get(verNum);
+            if (verData) {
+                const files = [];
+                for (const [name, buf] of verData.files.entries()) {
+                    files.push({ name, totalBytes: buf.length });
+                }
+                return { datasetFiles: files };
+            }
+        }
+        return {
+            datasetFiles: [
+                { name: 'devspace-project.json', totalBytes: 1024 },
+                { name: 'PROJECT_CONTEXT.md', totalBytes: 4096 }
+            ]
+        };
+    }
+    async downloadDatasetFile(owner, slug, fileName, version) {
+        const key = `${owner}/${slug}`;
+        const mockDs = this.mockDatasets.get(key);
+        if (mockDs) {
+            const verNum = version || mockDs.currentVersion;
+            const verData = mockDs.versions.get(verNum);
+            if (verData) {
+                const buf = verData.files.get(fileName);
+                if (buf) {
+                    return { content: buf, sizeBytes: buf.length };
+                }
+            }
+        }
+        const def = Buffer.from(`# File ${fileName} for ${owner}/${slug}\n`, 'utf-8');
+        return { content: def, sizeBytes: def.length };
+    }
+    async uploadBlob(fileName, content) {
+        const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
+        const token = `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        this.mockBlobs.set(token, { fileName, content: buf });
+        return token;
+    }
+    async createDataset(slug, title, files, directories, isPrivate = true) {
         return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
     }
-    async createDatasetVersion(slug, versionNotes, files) {
+    async createDatasetVersion(slug, versionNotes, files, directories) {
         return { success: true, url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`, ref: `${this.getUsername()}/${slug}` };
     }
     async getDatasetStatus(slug, owner) {

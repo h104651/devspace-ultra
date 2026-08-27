@@ -21,6 +21,22 @@ export interface KaggleOutputResult {
   error?: string;
 }
 
+export interface KaggleDatasetMetadata {
+  id?: number;
+  ref: string;
+  title?: string;
+  currentVersionNumber: number;
+  totalBytes?: number;
+  isPrivate?: boolean;
+  licenseName?: string;
+  description?: string;
+}
+
+export interface KaggleDatasetFileEntry {
+  name: string;
+  totalBytes: number;
+}
+
 export interface IKaggleClient {
   hasCredentials(): boolean;
   getUsername(): string;
@@ -33,4 +49,13 @@ export interface IKaggleClient {
   getProjectOutputFiles?(owner: string, slug: string): Promise<{ files: KaggleOutputFile[]; log?: string }>;
   getProjectLogs?(owner: string, slug: string): Promise<{ logs: string[]; available: boolean }>;
   downloadSingleOutputFile?(owner: string, slug: string, fileName?: string): Promise<{ file?: { name: string; content?: string | Buffer; sizeBytes?: number; url?: string }; totalFiles: number; allFileNames: string[]; log?: string; error?: string }>;
+
+  // Dataset Control Plane methods
+  getDataset?(owner: string, slug: string): Promise<KaggleDatasetMetadata>;
+  listDatasetFiles?(owner: string, slug: string, version?: number, pageSize?: number, pageToken?: string): Promise<{ datasetFiles: KaggleDatasetFileEntry[]; nextPageToken?: string }>;
+  downloadDatasetFile?(owner: string, slug: string, fileName: string, version?: number): Promise<{ content: Buffer; sizeBytes: number }>;
+  uploadBlob?(fileName: string, content: Buffer | string): Promise<string>;
+  createDataset?(slug: string, title: string, files: Array<{ token: string; description?: string }>, directories?: any[], isPrivate?: boolean): Promise<{ success: boolean; url?: string; ref?: string; error?: string }>;
+  createDatasetVersion?(slug: string, versionNotes: string, files: Array<{ token: string; description?: string }>, directories?: any[]): Promise<{ success: boolean; url?: string; ref?: string; error?: string }>;
+  getDatasetStatus?(slug: string, owner?: string): Promise<{ status: string; isReady: boolean }>;
 }

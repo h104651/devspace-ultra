@@ -8,7 +8,13 @@ import { KaggleBackend } from '../../src/kaggle/backend';
 import { TaskRouter } from '../../src/gateway/task-router';
 import { McpHandlers } from '../../src/mcp/handlers';
 import { KillSwitch } from '../../src/security/kill-switch';
-import { computeWorkspaceFingerprint, DevSpaceProjectManifest } from '../../src/kaggle/workspace-manager';
+import {
+  computeWorkspaceFingerprint,
+  validateProjectManifest,
+  validateWorkspaceRelativePath,
+  buildKaggleUploadTree,
+  DevSpaceProjectManifest
+} from '../../src/kaggle/workspace-manager';
 
 export async function runKaggleWorkspaceTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0;
@@ -69,6 +75,43 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     subjectId: 'user-reader'
   };
 
+  // Setup mock dataset for testing
+  const initialManifest: DevSpaceProjectManifest = {
+    name: 'Astor TuneUp',
+    slug: 'astor-tuneup-project',
+    owner: 'testuser',
+    version: 1,
+    type: 'workspace',
+    entrypoint: 'experiments/gate2c_9a_mining.py',
+    runnerKernelRef: 'testuser/astor-tuneup-thin-runner',
+    archiveMaster: {
+      filename: 'archive/astor-tuneup-original.ipynb',
+      size: 14276636,
+      sha256: '9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450',
+      cellCount: 139
+    },
+    files: {
+      'devspace-project.json': { size: 1024, sha256: 'sha-manifest-v1' },
+      'PROJECT_CONTEXT.md': { size: 30, sha256: crypto.createHash('sha256').update('# Astor TuneUp Context Header\n').digest('hex') },
+      'src/astor_tuneup/config.py': { size: 45, sha256: crypto.createHash('sha256').update('import os\nPROJECT_NAME = "Astor TuneUp"\n').digest('hex') },
+      'src/astor_tuneup/__init__.py': { size: 25, sha256: crypto.createHash('sha256').update('"""Astor TuneUp init"""\n').digest('hex') },
+      'experiments/gate2c_9a_mining.py': { size: 50, sha256: crypto.createHash('sha256').update('print("Gate2C-9A failure mining entrypoint")\n').digest('hex') }
+    }
+  };
+
+  const initialFiles: Record<string, string> = {
+    'devspace-project.json': JSON.stringify(initialManifest, null, 2),
+    'PROJECT_CONTEXT.md': '# Astor TuneUp Context Header\n',
+    'src/astor_tuneup/config.py': 'import os\nPROJECT_NAME = "Astor TuneUp"\n',
+    'src/astor_tuneup/__init__.py': '"""Astor TuneUp init"""\n',
+    'experiments/gate2c_9a_mining.py': 'print("Gate2C-9A failure mining entrypoint")\n'
+  };
+
+  client.registerMockDataset('testuser', 'astor-tuneup-project', 1, initialFiles, {
+    title: 'Astor TuneUp Project',
+    currentVersionNumber: 1
+  });
+
   await runTest('computeWorkspaceFingerprint computes canonical deterministic SHA', () => {
     const manifest1: DevSpaceProjectManifest = {
       name: 'Astor TuneUp',
@@ -102,18 +145,48 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.strictEqual(fp1.length, 64);
   });
 
-  await runTest('kaggle_workspace_get returns workspace manifest, files outline, and archive master', async () => {
+  await runTest('validateWorkspaceRelativePath enforces safe POSIX relative paths', () => {
+    assert.strictEqual(validateWorkspaceRelativePath('src/pkg/a.py'), 'src/pkg/a.py');
+    assert.strictEqual(validateWorkspaceRelativePath('config.json'), 'config.json');
+
+    assert.throws(() => validateWorkspaceRelativePath('/abs/path.py'), /INVALID_WORKSPACE_PATH/);
+    assert.throws(() => validateWorkspaceRelativePath('src\\pkg\\a.py'), /INVALID_WORKSPACE_PATH/);
+    assert.throws(() => validateWorkspaceRelativePath('../outside.py'), /INVALID_WORKSPACE_PATH/);
+    assert.throws(() => validateWorkspaceRelativePath('src/../a.py'), /INVALID_WORKSPACE_PATH/);
+    assert.throws(() => validateWorkspaceRelativePath(''), /INVALID_WORKSPACE_PATH/);
+  });
+
+  await runTest('buildKaggleUploadTree constructs hierarchical directory tree for Kaggle API', () => {
+    const entries = [
+      { relPath: 'devspace-project.json', token: 't1' },
+      { relPath: 'src/pkg/a.py', token: 't2' },
+      { relPath: 'src/pkg/b.py', token: 't3' },
+      { relPath: 'config/test.json', token: 't4' }
+    ];
+    const tree = buildKaggleUploadTree(entries);
+    assert.strictEqual(tree.files.length, 1);
+    assert.strictEqual(tree.files[0].description, 'devspace-project.json');
+    assert.strictEqual(tree.directories.length, 2);
+    const srcDir = tree.directories.find(d => d.name === 'src');
+    assert.ok(srcDir);
+    assert.strictEqual(srcDir.directories.length, 1);
+    assert.strictEqual(srcDir.directories[0].name, 'pkg');
+    assert.strictEqual(srcDir.directories[0].files.length, 2);
+  });
+
+  await runTest('kaggle_workspace_get returns real dataset-backed manifest, outline and fingerprint', async () => {
     const res = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
     assert.strictEqual(res.name, 'Astor TuneUp');
-    assert.strictEqual(res.version, 1);
+    assert.strictEqual(res.datasetVersion, 1);
+    assert.strictEqual(res.manifestVersion, 1);
     assert.ok(res.workspaceFingerprint);
     assert.ok(res.archiveMaster);
     assert.strictEqual(res.archiveMaster.cellCount, 139);
     assert.strictEqual(res.archiveMaster.sha256, '9fb3664e184f0536f2fbbc31d53007c8eaa630c8391019934c3de015fc632450');
-    assert.ok(res.files.length >= 10);
+    assert.strictEqual(res.files.length, 5);
   });
 
-  await runTest('kaggle_workspace_file retrieves file content with bounded chunking and sha256', async () => {
+  await runTest('kaggle_workspace_file retrieves file content and validates SHA-256 and size', async () => {
     const fileRes = await handlers.handleKaggleWorkspaceFile({
       project: 'testuser/astor-tuneup-project',
       path: 'PROJECT_CONTEXT.md',
@@ -126,10 +199,78 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.strictEqual(fileRes.offset, 0);
     assert.strictEqual(fileRes.limit, 50);
     assert.ok(fileRes.sha256);
-    assert.strictEqual(fileRes.hasMore, true);
+    assert.strictEqual(fileRes.hasMore, false);
   });
 
-  await runTest('kaggle_workspace_continue updates files, bumps version, and queues runner kernel', async () => {
+  await runTest('loadWorkspaceRevision fails closed on manifest version mismatch', async () => {
+    const corruptManifest = { ...initialManifest, version: 99 };
+    const corruptFiles = {
+      ...initialFiles,
+      'devspace-project.json': JSON.stringify(corruptManifest, null, 2)
+    };
+    client.registerMockDataset('testuser', 'mismatch-project', 1, corruptFiles);
+
+    let errCaught = false;
+    try {
+      await handlers.loadWorkspaceRevision('testuser', 'mismatch-project');
+    } catch (err: any) {
+      errCaught = true;
+      assert.ok(err.message.includes('KAGGLE_WORKSPACE_MANIFEST_VERSION_MISMATCH'));
+    }
+    assert.ok(errCaught, 'Expected KAGGLE_WORKSPACE_MANIFEST_VERSION_MISMATCH');
+  });
+
+  await runTest('loadWorkspaceRevision fails closed on manifest file missing from dataset', async () => {
+    const corruptManifest: DevSpaceProjectManifest = {
+      ...initialManifest,
+      slug: 'missing-file-project',
+      files: {
+        ...initialManifest.files,
+        'missing_file.py': { size: 100, sha256: 'dummy' }
+      }
+    };
+    const corruptFiles = {
+      ...initialFiles,
+      'devspace-project.json': JSON.stringify(corruptManifest, null, 2)
+    };
+    client.registerMockDataset('testuser', 'missing-file-project', 1, corruptFiles);
+
+    let errCaught = false;
+    try {
+      await handlers.loadWorkspaceRevision('testuser', 'missing-file-project');
+    } catch (err: any) {
+      errCaught = true;
+      assert.ok(err.message.includes('KAGGLE_WORKSPACE_FILE_MISSING'));
+    }
+    assert.ok(errCaught, 'Expected KAGGLE_WORKSPACE_FILE_MISSING');
+  });
+
+  await runTest('kaggle_workspace_file fails closed on file SHA-256 tampering', async () => {
+    const tamperedManifest: DevSpaceProjectManifest = {
+      ...initialManifest,
+      slug: 'tampered-project'
+    };
+    const tamperedFiles = {
+      ...initialFiles,
+      'devspace-project.json': JSON.stringify(tamperedManifest, null, 2),
+      'PROJECT_CONTEXT.md': '# TAMPERED MALICIOUS CONTENT\n'
+    };
+    client.registerMockDataset('testuser', 'tampered-project', 1, tamperedFiles);
+
+    let errCaught = false;
+    try {
+      await handlers.handleKaggleWorkspaceFile({
+        project: 'testuser/tampered-project',
+        path: 'PROJECT_CONTEXT.md'
+      }, readCaller);
+    } catch (err: any) {
+      errCaught = true;
+      assert.ok(err.message.includes('KAGGLE_WORKSPACE_FILE_HASH_MISMATCH'));
+    }
+    assert.ok(errCaught, 'Expected KAGGLE_WORKSPACE_FILE_HASH_MISMATCH');
+  });
+
+  await runTest('kaggle_workspace_continue updates files, bumps version, preserves unchanged files, and queues runner kernel', async () => {
     const getRes = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
     const fp = getRes.workspaceFingerprint;
 
@@ -154,6 +295,14 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.ok(continueRes.preWriteSnapshotId);
     assert.ok(continueRes.postWriteSnapshotId);
     assert.ok(continueRes.runnerKernelRef.includes('runner'));
+
+    // Verify read-back on Version 2 preserves unchanged files
+    const v2Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    assert.strictEqual(v2Get.datasetVersion, 2);
+    assert.strictEqual(v2Get.manifestVersion, 2);
+    const v2FilePaths = v2Get.files.map((f: any) => f.path);
+    assert.ok(v2FilePaths.includes('PROJECT_CONTEXT.md'), 'PROJECT_CONTEXT.md must be preserved in Version 2');
+    assert.ok(v2FilePaths.includes('experiments/gate2c_9a_mining.py'), 'experiments/gate2c_9a_mining.py must be preserved in Version 2');
   });
 
   await runTest('kaggle_workspace_continue rejects optimistic concurrency mismatch', async () => {

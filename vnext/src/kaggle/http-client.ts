@@ -1,4 +1,11 @@
-import { IKaggleClient, KagglePushResult, KaggleStatusResult, KaggleOutputResult } from './kaggle-client.interface';
+import {
+  IKaggleClient,
+  KagglePushResult,
+  KaggleStatusResult,
+  KaggleOutputResult,
+  KaggleDatasetMetadata,
+  KaggleDatasetFileEntry
+} from './kaggle-client.interface';
 import { KaggleTaskPayload, KaggleExecutionStatus } from '../types/kaggle';
 
 export interface CloudflareKaggleConfig {
@@ -634,15 +641,257 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
     }
   }
 
+  private mockBlobs: Map<string, { fileName: string; content: Buffer }> = new Map();
+  private mockDatasets: Map<string, {
+    metadata: KaggleDatasetMetadata;
+    currentVersion: number;
+    versions: Map<number, { files: Map<string, Buffer> }>;
+  }> = new Map();
+
+  /**
+   * Registers a mock dataset for unit and integration testing.
+   */
+  public registerMockDataset(
+    owner: string,
+    slug: string,
+    version: number,
+    files: Map<string, Buffer | string> | Record<string, string | Buffer>,
+    metadata?: Partial<KaggleDatasetMetadata>
+  ): void {
+    const key = `${owner}/${slug}`;
+    const filesMap = new Map<string, Buffer>();
+    if (files instanceof Map) {
+      for (const [k, v] of files.entries()) {
+        filesMap.set(k, Buffer.isBuffer(v) ? v : Buffer.from(v, 'utf-8'));
+      }
+    } else {
+      for (const [k, v] of Object.entries(files)) {
+        filesMap.set(k, Buffer.isBuffer(v) ? v : Buffer.from(v, 'utf-8'));
+      }
+    }
+
+    let ds = this.mockDatasets.get(key);
+    if (!ds) {
+      ds = {
+        metadata: {
+          ref: key,
+          title: slug,
+          currentVersionNumber: version,
+          isPrivate: true,
+          totalBytes: 0,
+          ...metadata
+        },
+        currentVersion: version,
+        versions: new Map()
+      };
+      this.mockDatasets.set(key, ds);
+    }
+    ds.currentVersion = Math.max(ds.currentVersion, version);
+    ds.metadata.currentVersionNumber = ds.currentVersion;
+    ds.versions.set(version, { files: filesMap });
+  }
+
+  /**
+   * Retrieves dataset metadata.
+   */
+  public async getDataset(owner: string, slug: string): Promise<KaggleDatasetMetadata> {
+    if (this.isMockMode) {
+      const key = `${owner}/${slug}`;
+      const mockDs = this.mockDatasets.get(key);
+      if (mockDs) {
+        return mockDs.metadata;
+      }
+      return {
+        ref: key,
+        title: slug,
+        currentVersionNumber: 1,
+        isPrivate: true,
+        totalBytes: 1024
+      };
+    }
+
+    const url = `${this.baseUrl}/datasets.DatasetApiService/GetDataset`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.getAuthHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ownerSlug: owner, datasetSlug: slug })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`KAGGLE_GET_DATASET_FAILED: HTTP ${res.status}: Failed to get dataset ${owner}/${slug}: ${errText}`);
+    }
+
+    const data = await res.json() as any;
+    const currentVersionNumber = typeof data.currentVersionNumber === 'number'
+      ? data.currentVersionNumber
+      : (Array.isArray(data.versions) && data.versions.length > 0 ? (data.versions[data.versions.length - 1].versionNumber || 1) : 1);
+
+    return {
+      id: data.id,
+      ref: data.ref || `${owner}/${slug}`,
+      title: data.title || slug,
+      currentVersionNumber,
+      totalBytes: data.totalBytes,
+      isPrivate: data.isPrivate,
+      licenseName: data.licenseName,
+      description: data.description
+    };
+  }
+
+  /**
+   * Lists files contained in a specific dataset version.
+   */
+  public async listDatasetFiles(
+    owner: string,
+    slug: string,
+    version?: number,
+    pageSize = 100,
+    pageToken?: string
+  ): Promise<{ datasetFiles: KaggleDatasetFileEntry[]; nextPageToken?: string }> {
+    if (this.isMockMode) {
+      const key = `${owner}/${slug}`;
+      const mockDs = this.mockDatasets.get(key);
+      if (mockDs) {
+        const verNum = version || mockDs.currentVersion;
+        const verData = mockDs.versions.get(verNum);
+        if (verData) {
+          const files: KaggleDatasetFileEntry[] = [];
+          for (const [name, buf] of verData.files.entries()) {
+            files.push({ name, totalBytes: buf.length });
+          }
+          return { datasetFiles: files };
+        }
+      }
+      return {
+        datasetFiles: [
+          { name: 'devspace-project.json', totalBytes: 1024 },
+          { name: 'PROJECT_CONTEXT.md', totalBytes: 4096 }
+        ]
+      };
+    }
+
+    const url = `${this.baseUrl}/datasets.DatasetApiService/ListDatasetFiles`;
+    const reqBody: any = {
+      ownerSlug: owner,
+      datasetSlug: slug,
+      pageSize
+    };
+    if (version !== undefined && version !== null) {
+      reqBody.datasetVersionNumber = version;
+    }
+    if (pageToken) {
+      reqBody.pageToken = pageToken;
+    }
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.getAuthHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(reqBody)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP ${res.status}: ${errText}`);
+    }
+
+    const data = await res.json() as any;
+    const datasetFiles: KaggleDatasetFileEntry[] = (data.datasetFiles || []).map((f: any) => ({
+      name: f.name,
+      totalBytes: typeof f.totalBytes === 'number' ? f.totalBytes : 0
+    }));
+
+    return {
+      datasetFiles,
+      nextPageToken: data.nextPageToken
+    };
+  }
+
+  /**
+   * Downloads a specific file from a specific dataset version.
+   */
+  public async downloadDatasetFile(
+    owner: string,
+    slug: string,
+    fileName: string,
+    version?: number
+  ): Promise<{ content: Buffer; sizeBytes: number }> {
+    if (this.isMockMode) {
+      const key = `${owner}/${slug}`;
+      const mockDs = this.mockDatasets.get(key);
+      if (mockDs) {
+        const verNum = version || mockDs.currentVersion;
+        const verData = mockDs.versions.get(verNum);
+        if (verData) {
+          const buf = verData.files.get(fileName);
+          if (buf) {
+            return { content: buf, sizeBytes: buf.length };
+          }
+        }
+      }
+      if (fileName === 'devspace-project.json') {
+        const mockManifest = JSON.stringify({
+          name: slug,
+          slug,
+          owner,
+          version: version || 1,
+          type: 'workspace',
+          entrypoint: 'experiments/gate2c_9a_mining.py',
+          runnerKernelRef: `${owner}/${slug}-runner`,
+          files: {
+            'devspace-project.json': { size: 100, sha256: 'mock-sha-manifest' },
+            'PROJECT_CONTEXT.md': { size: 200, sha256: 'mock-sha-context' }
+          }
+        }, null, 2);
+        const b = Buffer.from(mockManifest, 'utf-8');
+        return { content: b, sizeBytes: b.length };
+      }
+      const defContent = Buffer.from(`# Mock content for ${fileName}\n`, 'utf-8');
+      return { content: defContent, sizeBytes: defContent.length };
+    }
+
+    const queryParams = new URLSearchParams();
+    queryParams.set('fileName', fileName);
+    if (version !== undefined && version !== null) {
+      queryParams.set('datasetVersionNumber', String(version));
+    }
+
+    const url = `${this.baseUrl}/datasets/download/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}?${queryParams.toString()}`;
+    const res = await fetch(url, {
+      headers: { 'Authorization': this.getAuthHeader() }
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`KAGGLE_DOWNLOAD_FILE_FAILED: HTTP ${res.status}: Failed to download "${fileName}" from ${owner}/${slug}: ${errText}`);
+    }
+
+    const arrayBuf = await res.arrayBuffer();
+    const content = Buffer.from(arrayBuf);
+    return {
+      content,
+      sizeBytes: content.length
+    };
+  }
+
   /**
    * Uploads a file blob to Kaggle GCS storage and returns a blob token.
    */
   public async uploadBlob(fileName: string, content: Buffer | string): Promise<string> {
+    const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
+
     if (this.isMockMode) {
-      return `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const token = `mock-blob-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      this.mockBlobs.set(token, { fileName, content: buf });
+      return token;
     }
 
-    const buf = Buffer.isBuffer(content) ? content : Buffer.from(content);
     const nowUtc = Math.floor(Date.now() / 1000);
     const startReq = {
       type: 1, // ApiBlobType.DATASET = 1
@@ -693,18 +942,41 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
     slug: string,
     title: string,
     files: { token: string; description?: string }[],
+    directories?: any[],
     isPrivate = true
   ): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
     if (this.isMockMode) {
+      const owner = this.getUsername();
+      const filesMap = new Map<string, Buffer>();
+      for (const f of files) {
+        const blob = this.mockBlobs.get(f.token);
+        if (blob) {
+          filesMap.set(f.description || blob.fileName, blob.content);
+        }
+      }
+      const extractDirs = (dirs: any[], prefix = '') => {
+        for (const d of dirs || []) {
+          const dirPrefix = prefix ? `${prefix}/${d.name}` : d.name;
+          for (const f of d.files || []) {
+            const blob = this.mockBlobs.get(f.token);
+            if (blob) filesMap.set(`${dirPrefix}/${f.description || blob.fileName}`, blob.content);
+          }
+          extractDirs(d.directories, dirPrefix);
+        }
+      };
+      extractDirs(directories || []);
+
+      this.registerMockDataset(owner, slug, 1, filesMap, { title, isPrivate });
+
       return {
         success: true,
-        url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`,
-        ref: `${this.getUsername()}/${slug}`
+        url: `https://www.kaggle.com/datasets/${owner}/${slug}`,
+        ref: `${owner}/${slug}`
       };
     }
 
     const createUrl = `${this.baseUrl}/datasets.DatasetApiService/CreateDataset`;
-    const createReq = {
+    const createReq: any = {
       title,
       slug,
       ownerSlug: this.getUsername(),
@@ -712,6 +984,9 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       isPrivate,
       files
     };
+    if (directories && directories.length > 0) {
+      createReq.directories = directories;
+    }
 
     const res = await fetch(createUrl, {
       method: 'POST',
@@ -745,24 +1020,56 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
   public async createDatasetVersion(
     slug: string,
     versionNotes: string,
-    files: { token: string; description?: string }[]
+    files: { token: string; description?: string }[],
+    directories?: any[]
   ): Promise<{ success: boolean; url?: string; ref?: string; error?: string }> {
     if (this.isMockMode) {
+      const owner = this.getUsername();
+      const key = `${owner}/${slug}`;
+      const mockDs = this.mockDatasets.get(key);
+      const nextVer = (mockDs?.currentVersion || 1) + 1;
+      const filesMap = new Map<string, Buffer>();
+
+      for (const f of files) {
+        const blob = this.mockBlobs.get(f.token);
+        if (blob) {
+          filesMap.set(f.description || blob.fileName, blob.content);
+        }
+      }
+      const extractDirs = (dirs: any[], prefix = '') => {
+        for (const d of dirs || []) {
+          const dirPrefix = prefix ? `${prefix}/${d.name}` : d.name;
+          for (const f of d.files || []) {
+            const blob = this.mockBlobs.get(f.token);
+            if (blob) filesMap.set(`${dirPrefix}/${f.description || blob.fileName}`, blob.content);
+          }
+          extractDirs(d.directories, dirPrefix);
+        }
+      };
+      extractDirs(directories || []);
+
+      this.registerMockDataset(owner, slug, nextVer, filesMap);
+
       return {
         success: true,
-        url: `https://www.kaggle.com/datasets/${this.getUsername()}/${slug}`,
-        ref: `${this.getUsername()}/${slug}`
+        url: `https://www.kaggle.com/datasets/${owner}/${slug}`,
+        ref: `${owner}/${slug}`
       };
     }
 
     const verUrl = `${this.baseUrl}/datasets.DatasetApiService/CreateDatasetVersion`;
+    const verBody: any = {
+      versionNotes,
+      files
+    };
+    if (directories && directories.length > 0) {
+      verBody.directories = directories;
+    }
+
     const verReq = {
       ownerSlug: this.getUsername(),
       datasetSlug: slug,
-      body: {
-        versionNotes,
-        files
-      }
+      body: verBody
     };
 
     const res = await fetch(verUrl, {
