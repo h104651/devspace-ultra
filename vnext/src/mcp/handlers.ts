@@ -986,6 +986,7 @@ export class McpHandlers {
     version: number;
     manifest: DevSpaceProjectManifest;
     datasetFiles: Array<{ name: string; totalBytes: number }>;
+    resolvedStorage: Map<string, { storagePath: string; storageLayout: 'exact' | 'flattened' }>;
     workspaceFingerprint: string;
   }> {
     const client = (this.gateway.kaggleBackend.getClient() as any);
@@ -1032,12 +1033,20 @@ export class McpHandlers {
       throw new Error(`KAGGLE_WORKSPACE_IDENTITY_MISMATCH: Manifest owner "${manifest.owner}" does not match requested owner "${owner}"`);
     }
 
-    // 7. File presence guard: every file declared in manifest must exist in dataset file listing
+    // 7. File presence guard & storage layout resolution
+    const resolvedStorage = new Map<string, { storagePath: string; storageLayout: 'exact' | 'flattened' }>();
+
     for (const [filePath] of Object.entries(manifest.files || {})) {
       if (filePath === 'devspace-project.json' || filePath === 'devspace-execution-context.json') continue;
-      const isPresent = datasetFilesMap.has(filePath) || datasetFilesMap.has(filePath.replace(/[\/\\]/g, '_'));
-      if (!isPresent) {
-        throw new Error(`KAGGLE_WORKSPACE_FILE_MISSING: Manifest file "${filePath}" is missing from Kaggle dataset version ${N}`);
+      if (datasetFilesMap.has(filePath)) {
+        resolvedStorage.set(filePath, { storagePath: filePath, storageLayout: 'exact' });
+      } else {
+        const flatPath = filePath.replace(/[\/\\]/g, '_');
+        if (datasetFilesMap.has(flatPath)) {
+          resolvedStorage.set(filePath, { storagePath: flatPath, storageLayout: 'flattened' });
+        } else {
+          throw new Error(`KAGGLE_WORKSPACE_FILE_MISSING: Manifest file "${filePath}" is missing from Kaggle dataset version ${N}`);
+        }
       }
     }
 
@@ -1049,6 +1058,7 @@ export class McpHandlers {
       version: N,
       manifest,
       datasetFiles,
+      resolvedStorage,
       workspaceFingerprint
     };
   }
@@ -1064,13 +1074,18 @@ export class McpHandlers {
     const { owner, slug, ref } = parseKernelRef(args.project, client.getUsername());
     const ws = await this.loadWorkspaceRevision(owner, slug);
 
-    const fileList = Object.keys(ws.manifest.files || {}).map(k => ({
-      path: k,
-      size: ws.manifest.files[k].size,
-      sha256: ws.manifest.files[k].sha256,
-      category: ws.manifest.files[k].category,
-      description: ws.manifest.files[k].description
-    }));
+    const fileList = Object.keys(ws.manifest.files || {}).map(k => {
+      const storageInfo = ws.resolvedStorage.get(k);
+      return {
+        path: k,
+        size: ws.manifest.files[k].size,
+        sha256: ws.manifest.files[k].sha256,
+        storageLayout: storageInfo?.storageLayout || 'exact',
+        storagePath: storageInfo?.storagePath || k,
+        category: ws.manifest.files[k].category,
+        description: ws.manifest.files[k].description
+      };
+    });
 
     return {
       project: ref,
@@ -1113,17 +1128,15 @@ export class McpHandlers {
       throw new Error(`FILE_NOT_FOUND: Workspace file "${filePath}" not found in manifest of project ${ref}`);
     }
 
-    // Try downloading the file by exact POSIX path first, with legacy migration fallback if needed
+    // Determine physical storage path from resolved storage map
+    const storageInfo = ws.resolvedStorage.get(filePath);
+    const storagePath = storageInfo ? storageInfo.storagePath : filePath;
+
     let dl: { content: Buffer; sizeBytes: number };
     try {
-      dl = await client.downloadDatasetFile(owner, slug, filePath, ws.version);
+      dl = await client.downloadDatasetFile(owner, slug, storagePath, ws.version);
     } catch (err: any) {
-      const flattenedName = filePath.replace(/[\/\\]/g, '_');
-      try {
-        dl = await client.downloadDatasetFile(owner, slug, flattenedName, ws.version);
-      } catch {
-        throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Failed to download "${filePath}" from ${ref} version ${ws.version}: ${err.message}`);
-      }
+      throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Failed to download "${filePath}" (storage: "${storagePath}") from ${ref} version ${ws.version}: ${err.message}`);
     }
 
     const computedSha256 = crypto.createHash('sha256').update(dl.content).digest('hex');
@@ -1151,6 +1164,8 @@ export class McpHandlers {
       datasetVersion: ws.version,
       workspaceFingerprint: ws.workspaceFingerprint,
       path: filePath,
+      storagePath,
+      storageLayout: storageInfo?.storageLayout || 'exact',
       content: chunk,
       offset,
       limit,
@@ -1163,7 +1178,7 @@ export class McpHandlers {
 
   /**
    * Executes an existing canonical thin runner kernel without modifying its source code.
-   * Pulls runner source before execution, verifies SHA-256 before & after, and mounts the workspace dataset.
+   * Pulls runner source before execution, verifies SHA-256 before & after observable submission, and mounts the workspace dataset.
    */
   public async runExistingWorkspaceRunner(params: {
     runnerKernelRef: string;
@@ -1229,19 +1244,34 @@ export class McpHandlers {
       params.auth.subjectId
     );
 
-    // 4. Verify runner source integrity (before SHA === after SHA)
+    // 4. Verify runner source integrity on the observable submitted kernel version
     let runnerSourceShaAfter = runnerSourceShaBefore;
     if (!client.isMockMode) {
-      try {
-        const verifyPull = await client.pullProject(owner, slug);
-        if (verifyPull && typeof verifyPull.source === 'string') {
-          runnerSourceShaAfter = crypto.createHash('sha256').update(verifyPull.source).digest('hex');
+      let verified = false;
+      let lastErr: string | undefined;
+
+      // Poll up to 6 attempts (with 1.5s interval) to observe the submitted version on Kaggle
+      for (let i = 0; i < 6; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+          const verifyPull = await client.pullProject(owner, slug);
+          if (verifyPull && typeof verifyPull.source === 'string') {
+            runnerSourceShaAfter = crypto.createHash('sha256').update(verifyPull.source).digest('hex');
+            verified = true;
+            break;
+          }
+        } catch (e: any) {
+          lastErr = e.message;
         }
-      } catch {}
+      }
+
+      if (!verified) {
+        throw new Error(`KAGGLE_RUNNER_VERIFICATION_TIMEOUT: Could not pull runner kernel after submission: ${lastErr || 'timeout'}`);
+      }
     }
 
     if (runnerSourceShaBefore.toLowerCase() !== runnerSourceShaAfter.toLowerCase()) {
-      throw new Error(`KAGGLE_RUNNER_SOURCE_INTEGRITY_FAILED: Runner source SHA-256 before (${runnerSourceShaBefore}) does not match after (${runnerSourceShaAfter})`);
+      throw new Error(`KAGGLE_RUNNER_SOURCE_INTEGRITY_FAILED: Runner source SHA-256 before submission (${runnerSourceShaBefore}) does not match after (${runnerSourceShaAfter})`);
     }
 
     return {
@@ -1316,19 +1346,27 @@ export class McpHandlers {
 
     // For every unchanged file in current manifest: preserve exact content
     for (const existingPath of Object.keys(ws.manifest.files || {})) {
-      if (existingPath === 'devspace-project.json') continue;
+      if (existingPath === 'devspace-project.json' || existingPath === 'devspace-execution-context.json') continue;
       if (!changesMap.has(existingPath)) {
+        const storageInfo = ws.resolvedStorage.get(existingPath);
+        const storagePath = storageInfo ? storageInfo.storagePath : existingPath;
         let fileDl: { content: Buffer; sizeBytes: number };
         try {
-          fileDl = await client.downloadDatasetFile(owner, slug, existingPath, ws.version);
+          fileDl = await client.downloadDatasetFile(owner, slug, storagePath, ws.version);
         } catch (err: any) {
-          if (ws.version < 2) {
-            const flat = existingPath.replace(/[\/\\]/g, '_');
-            fileDl = await client.downloadDatasetFile(owner, slug, flat, ws.version);
-          } else {
-            throw err;
+          throw new Error(`KAGGLE_WORKSPACE_FILE_DOWNLOAD_FAILED: Could not download unchanged file "${existingPath}" (storage: "${storagePath}") from ${ref} version ${ws.version}: ${err.message}`);
+        }
+
+        // Verify SHA and size of unchanged file against manifest
+        const meta = ws.manifest.files[existingPath];
+        if (meta) {
+          const compSha = crypto.createHash('sha256').update(fileDl.content).digest('hex');
+          if (meta.sha256 && compSha.toLowerCase() !== meta.sha256.toLowerCase()) {
+            throw new Error(`KAGGLE_WORKSPACE_FILE_HASH_MISMATCH: Unchanged file "${existingPath}" SHA (${compSha}) does not match manifest (${meta.sha256})`);
           }
         }
+
+        // Stage into next version with canonical POSIX relative path
         nextFileContents.set(existingPath, fileDl.content);
       }
     }

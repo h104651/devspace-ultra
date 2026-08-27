@@ -322,26 +322,99 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.ok(v2FilePaths.includes('experiments/gate2c_9a_mining.py'), 'experiments/gate2c_9a_mining.py must be preserved in Version 2');
   });
 
-  await runTest('kaggle_workspace_file on Version >= 2 requires exact POSIX path and rejects flattened fallback', async () => {
-    // Version 2 dataset was created in previous test
-    const fileRes = await handlers.handleKaggleWorkspaceFile({
-      project: 'testuser/astor-tuneup-project',
-      path: 'src/astor_tuneup/config.py'
-    }, readCaller);
-    assert.ok(fileRes.content.includes('Gate2C-9A-v2'));
+  await runTest('loadWorkspaceRevision correctly classifies exact vs flattened physical storage layout', async () => {
+    const mixedManifest: DevSpaceProjectManifest = {
+      name: 'Mixed Project',
+      slug: 'mixed-project',
+      owner: 'testuser',
+      version: 2,
+      type: 'workspace',
+      entrypoint: 'src/main.py',
+      runnerKernelRef: 'testuser/runner',
+      files: {
+        'src/main.py': { size: 20, sha256: crypto.createHash('sha256').update('print("main")\n').digest('hex') },
+        'PROJECT_CONTEXT.md': { size: 10, sha256: crypto.createHash('sha256').update('# context\n').digest('hex') }
+      }
+    };
 
-    // Attempting flattened path on Version 2 should fail with FILE_NOT_FOUND
-    let errCaught = false;
-    try {
-      await handlers.handleKaggleWorkspaceFile({
-        project: 'testuser/astor-tuneup-project',
-        path: 'src_astor_tuneup_config.py'
-      }, readCaller);
-    } catch (err: any) {
-      errCaught = true;
-      assert.ok(err.message.includes('FILE_NOT_FOUND'));
+    // Stored with flattened physical path for src/main.py and exact for PROJECT_CONTEXT.md
+    const physicalFiles: Record<string, string> = {
+      'devspace-project.json': JSON.stringify(mixedManifest, null, 2),
+      'src_main.py': 'print("main")\n',
+      'PROJECT_CONTEXT.md': '# context\n'
+    };
+
+    client.registerMockDataset('testuser', 'mixed-project', 2, physicalFiles, {
+      title: 'Mixed Project',
+      currentVersionNumber: 2
+    });
+
+    const ws = await handlers.loadWorkspaceRevision('testuser', 'mixed-project');
+    assert.strictEqual(ws.resolvedStorage.get('src/main.py')?.storageLayout, 'flattened');
+    assert.strictEqual(ws.resolvedStorage.get('src/main.py')?.storagePath, 'src_main.py');
+    assert.strictEqual(ws.resolvedStorage.get('PROJECT_CONTEXT.md')?.storageLayout, 'exact');
+    assert.strictEqual(ws.resolvedStorage.get('PROJECT_CONTEXT.md')?.storagePath, 'PROJECT_CONTEXT.md');
+  });
+
+  await runTest('kaggle_workspace_continue migrates flattened Version 2 dataset to exact hierarchical Version 3 dataset', async () => {
+    const v2Manifest: DevSpaceProjectManifest = {
+      name: 'Migration Fixture',
+      slug: 'migration-fixture',
+      owner: 'testuser',
+      version: 2,
+      type: 'workspace',
+      entrypoint: 'src/pkg/entry.py',
+      runnerKernelRef: 'testuser/runner',
+      files: {
+        'src/pkg/entry.py': { size: Buffer.byteLength('print("entry V2")\n'), sha256: crypto.createHash('sha256').update('print("entry V2")\n').digest('hex') },
+        'config/app.json': { size: Buffer.byteLength('{"env":"v2"}\n'), sha256: crypto.createHash('sha256').update('{"env":"v2"}\n').digest('hex') },
+        'PROJECT_CONTEXT.md': { size: Buffer.byteLength('# context\n'), sha256: crypto.createHash('sha256').update('# context\n').digest('hex') }
+      }
+    };
+
+    // Flattened physical files on Kaggle for Version 2 (matching Astor V2 condition)
+    const v2PhysicalFiles: Record<string, string> = {
+      'devspace-project.json': JSON.stringify(v2Manifest, null, 2),
+      'src_pkg_entry.py': 'print("entry V2")\n',
+      'config_app.json': '{"env":"v2"}\n',
+      'PROJECT_CONTEXT.md': '# context\n'
+    };
+
+    client.registerMockDataset('testuser', 'migration-fixture', 2, v2PhysicalFiles, {
+      title: 'Migration Fixture',
+      currentVersionNumber: 2
+    });
+
+    const v2Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/migration-fixture' }, adminCaller);
+    const fpV2 = v2Get.workspaceFingerprint;
+
+    // Mutate only src/pkg/entry.py; leave config/app.json and PROJECT_CONTEXT.md unchanged
+    const continueRes = await handlers.handleKaggleWorkspaceContinue({
+      project: 'testuser/migration-fixture',
+      expectedWorkspaceFingerprint: fpV2,
+      changes: [{ path: 'src/pkg/entry.py', content: 'print("entry V3 migrated!")\n' }],
+      reason: 'Migrate to canonical hierarchical V3'
+    }, adminCaller);
+
+    assert.strictEqual(continueRes.workspaceVersion, 3);
+
+    // Read back Version 3: all files must now have exact storageLayout and zero flattened files
+    const v3Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/migration-fixture' }, adminCaller);
+    assert.strictEqual(v3Get.datasetVersion, 3);
+    assert.strictEqual(v3Get.manifestVersion, 3);
+
+    for (const f of v3Get.files) {
+      assert.strictEqual(f.storageLayout, 'exact', `File ${f.path} must have exact storageLayout in V3`);
+      assert.strictEqual(f.storagePath, f.path, `File ${f.path} storagePath must equal logical path`);
     }
-    assert.ok(errCaught, 'Expected FILE_NOT_FOUND on flattened path query for Version >= 2');
+
+    // Verify unchanged config/app.json preserved exact SHA
+    const configV3 = await handlers.handleKaggleWorkspaceFile({
+      project: 'testuser/migration-fixture',
+      path: 'config/app.json'
+    }, readCaller);
+    assert.strictEqual(configV3.sha256, v2Manifest.files['config/app.json'].sha256);
+    assert.strictEqual(configV3.storageLayout, 'exact');
   });
 
   await runTest('kaggle_workspace_continue rejects optimistic concurrency mismatch', async () => {
