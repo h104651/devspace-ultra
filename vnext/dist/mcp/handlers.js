@@ -27,6 +27,25 @@ class McpHandlers {
             priority: args.priority,
             clientRequestId: args.clientRequestId
         }, auth.scopes, auth.subjectId);
+        if (args.backend === 'local') {
+            const devices = this.gateway.authManager.listDevices();
+            const onlineDevices = devices.filter(d => d.status === 'online');
+            if (onlineDevices.length > 0) {
+                const eligible = onlineDevices.some(d => d.capabilities?.includes(args.capability));
+                if (!eligible) {
+                    return {
+                        taskId: result.taskId,
+                        status: result.status,
+                        backend: args.backend,
+                        capability: args.capability,
+                        waitingForEligibleDevice: true,
+                        reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
+                        isReplay: !!result.isReplay,
+                        message: `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
+                    };
+                }
+            }
+        }
         return {
             taskId: result.taskId,
             status: result.status,

@@ -39,6 +39,7 @@ const r2_artifact_storage_1 = require("./r2-artifact-storage");
 const http_client_1 = require("../kaggle/http-client");
 const auth_manager_1 = require("../security/auth-manager");
 const scope_checker_1 = require("../security/scope-checker");
+const capabilities_1 = require("../local-agent/capabilities");
 const kill_switch_1 = require("../security/kill-switch");
 const rate_limiter_1 = require("../security/rate-limiter");
 const audit_logger_1 = require("../security/audit-logger");
@@ -669,11 +670,15 @@ class GatewayDurableObject {
                     return;
                 }
                 const authoritativeDeviceId = val.payload.subjectId;
-                const tokenCaps = val.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
-                const requestedCaps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
-                const authorizedCaps = requestedCaps.length > 0
-                    ? requestedCaps.filter(c => tokenCaps.includes(c) || val.payload.scopes.includes(c))
-                    : tokenCaps;
+                const requestedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
+                    ? msg.capabilities
+                    : [...capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES];
+                const authorizedCaps = requestedCaps.filter(cap => {
+                    if (!(0, capabilities_1.isLocalExecutableCapability)(cap))
+                        return false;
+                    const requiredScope = scope_checker_1.ScopeChecker.getRequiredScopeForCapability(cap);
+                    return scope_checker_1.ScopeChecker.hasScope(val.payload.scopes, requiredScope);
+                });
                 this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, msg.platform || 'windows');
                 ws.serializeAttachment({
                     deviceId: authoritativeDeviceId,

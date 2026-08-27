@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TaskRouter = void 0;
 const scope_checker_1 = require("../security/scope-checker");
+const capabilities_1 = require("../local-agent/capabilities");
 class TaskRouter {
     taskStore;
     idempotencyStore;
@@ -23,6 +24,18 @@ class TaskRouter {
             const cached = await this.idempotencyStore.getDurable(idempKey);
             if (cached)
                 return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
+        }
+        if (options.backend === 'local') {
+            if (!(0, capabilities_1.isLocalExecutableCapability)(options.capability)) {
+                this.auditLogger.log({
+                    actor: actorId,
+                    actorType: 'client',
+                    action: 'TASK_SUBMIT_DENIED',
+                    result: 'DENY',
+                    details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
+                });
+                throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+            }
         }
         const killCheck = this.killSwitch.isExecutionAllowed(options.backend);
         if (!killCheck.allowed) {

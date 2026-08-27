@@ -2,6 +2,8 @@ import { WebSocket } from 'ws';
 import { AuthManager } from '../security/auth-manager';
 import { KillSwitch } from '../security/kill-switch';
 import { AuditLogger } from '../security/audit-logger';
+import { ScopeChecker } from '../security/scope-checker';
+import { isLocalExecutableCapability, LOCAL_EXECUTABLE_CAPABILITIES } from '../local-agent/capabilities';
 import { TaskStore } from '../storage/task-store';
 import { GatewayMessage } from '../types/gateway';
 
@@ -114,11 +116,15 @@ export class ConnectionManager {
         return;
       }
 
-      const tokenCaps = auth.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
-      const requestedCaps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
-      const authorizedCaps = requestedCaps.length > 0
-        ? requestedCaps.filter(c => tokenCaps.includes(c) || auth.payload!.scopes.includes(c))
-        : tokenCaps;
+      const requestedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
+        ? msg.capabilities
+        : [...LOCAL_EXECUTABLE_CAPABILITIES];
+
+      const authorizedCaps = requestedCaps.filter(cap => {
+        if (!isLocalExecutableCapability(cap)) return false;
+        const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
+        return ScopeChecker.hasScope(auth.payload!.scopes, requiredScope);
+      });
 
       setDeviceId(authoritativeDeviceId);
       const agent: ConnectedAgent = {

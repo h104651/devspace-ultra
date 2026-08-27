@@ -24,7 +24,7 @@ export async function runIdempotencyIntegrationTests(): Promise<{ passed: number
     const res1 = await server.taskRouter.routeTaskSubmit(
       {
         backend: 'local',
-        capability: 'local:read',
+        capability: 'local:read_file',
         payload: { file: 'test.txt' },
         clientRequestId
       },
@@ -39,7 +39,7 @@ export async function runIdempotencyIntegrationTests(): Promise<{ passed: number
     const res2 = await server.taskRouter.routeTaskSubmit(
       {
         backend: 'local',
-        capability: 'local:read',
+        capability: 'local:read_file',
         payload: { file: 'test.txt' },
         clientRequestId
       },

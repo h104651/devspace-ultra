@@ -5,6 +5,7 @@ import { SwarmOrchestrator } from '../swarm/swarm-orchestrator';
 import { KillSwitch } from '../security/kill-switch';
 import { AuditLogger } from '../security/audit-logger';
 import { ScopeChecker } from '../security/scope-checker';
+import { isLocalExecutableCapability, LOCAL_EXECUTABLE_CAPABILITIES } from '../local-agent/capabilities';
 import { CreateTaskOptions, DurableTask } from '../types/task';
 import { KaggleTaskPayload } from '../types/kaggle';
 
@@ -27,6 +28,19 @@ export class TaskRouter {
     if (idempKey) {
       const cached = await this.idempotencyStore.getDurable(idempKey);
       if (cached) return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
+    }
+
+    if (options.backend === 'local') {
+      if (!isLocalExecutableCapability(options.capability)) {
+        this.auditLogger.log({
+          actor: actorId,
+          actorType: 'client',
+          action: 'TASK_SUBMIT_DENIED',
+          result: 'DENY',
+          details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
+        });
+        throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+      }
     }
 
     const killCheck = this.killSwitch.isExecutionAllowed(options.backend);

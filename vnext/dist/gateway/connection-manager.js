@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ConnectionManager = void 0;
 const ws_1 = require("ws");
+const scope_checker_1 = require("../security/scope-checker");
+const capabilities_1 = require("../local-agent/capabilities");
 class ConnectionManager {
     agents = new Map();
     authManager;
@@ -81,11 +83,15 @@ class ConnectionManager {
                 socket.close();
                 return;
             }
-            const tokenCaps = auth.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
-            const requestedCaps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
-            const authorizedCaps = requestedCaps.length > 0
-                ? requestedCaps.filter(c => tokenCaps.includes(c) || auth.payload.scopes.includes(c))
-                : tokenCaps;
+            const requestedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
+                ? msg.capabilities
+                : [...capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES];
+            const authorizedCaps = requestedCaps.filter(cap => {
+                if (!(0, capabilities_1.isLocalExecutableCapability)(cap))
+                    return false;
+                const requiredScope = scope_checker_1.ScopeChecker.getRequiredScopeForCapability(cap);
+                return scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, requiredScope);
+            });
             setDeviceId(authoritativeDeviceId);
             const agent = {
                 deviceId: authoritativeDeviceId,

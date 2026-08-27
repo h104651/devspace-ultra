@@ -37,9 +37,15 @@ exports.EnvironmentProbe = void 0;
 const os = __importStar(require("os"));
 const child_process_1 = require("child_process");
 class EnvironmentProbe {
-    static probe() {
+    static probe(options) {
         const platform = os.platform() === 'win32' ? 'windows' : os.platform() === 'darwin' ? 'darwin' : 'linux';
-        const capabilities = ['local:read', 'local:write', 'local:test', 'local:git_status'];
+        const capabilities = [
+            'local:git_status',
+            'local:read_file',
+            'local:write_file',
+            'local:patch_file',
+            'local:run_tests'
+        ];
         const tools = {};
         const checkTool = (name, cmd) => {
             try {
@@ -54,11 +60,11 @@ class EnvironmentProbe {
         checkTool('node', 'node --version');
         checkTool('python', 'python --version');
         checkTool('flutter', 'flutter --version');
-        if (tools['git']?.available) {
-            capabilities.push('local:git_diff', 'local:git_log');
-        }
-        if (tools['flutter']?.available || tools['node']?.available || tools['python']?.available) {
+        if (tools['flutter']?.available || tools['node']?.available || tools['python']?.available || tools['git']?.available) {
             capabilities.push('local:build_project');
+        }
+        if (options?.allowRawShell) {
+            capabilities.push('local:raw_shell');
         }
         return {
             platform,

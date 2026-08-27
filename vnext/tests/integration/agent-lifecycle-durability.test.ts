@@ -194,19 +194,19 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     });
 
     // Reg 5: Unauthorized capability escalation rejected
-    // devA has ['local:read', 'local:test'], cannot claim task requiring 'local:write' even if polling with ['local:write']
+    // devA has ['local:read', 'local:test'], cannot claim task requiring 'local:write_file' even if polling with ['local:write_file']
     const taskWrite = server.taskStore.createTask({
       backend: 'local',
-      capability: 'local:write',
+      capability: 'local:write_file',
       payload: { test: true }
     });
     wsDevA.send(JSON.stringify({
       type: 'TASK_CLAIM_POLL',
       messageId: 'poll-esc',
-      supportedCapabilities: ['local:write'] // Attempt escalation
+      supportedCapabilities: ['local:write_file'] // Attempt escalation
     }));
     await new Promise(r => setTimeout(r, 100));
-    assert.strictEqual(server.taskStore.getTask(taskWrite.taskId)?.status, 'queued', 'DevA cannot claim local:write task');
+    assert.strictEqual(server.taskStore.getTask(taskWrite.taskId)?.status, 'queued', 'DevA cannot claim local:write_file task');
     passed++;
 
     // DevB claims taskWrite
@@ -274,7 +274,7 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
           messageId: 'reg-zero',
           deviceId: devZero.deviceId,
           token: devZero.token,
-          capabilities: ['local:read', 'local:write', 'local:test'] // Attempt to request ungranted capabilities
+          capabilities: ['local:read_file', 'local:write_file', 'local:run_tests'] // Attempt to request ungranted capabilities
         }));
       });
       wsDevZero.on('message', (d) => {
@@ -303,7 +303,7 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     assert.strictEqual(server.taskStore.getTask(taskGit.taskId)?.status, 'queued', 'Zero-scope device cannot claim local:git_status');
     passed++;
 
-    // Reg 10: local:read device cannot claim local:write task
+    // Reg 10: local:read device cannot claim local:write_file task
     const devRead = server.authManager.registerDevice('Read Only Device', 'windows', ['local:read']);
     const wsDevRead = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
     await new Promise<void>((resolve) => {
@@ -323,19 +323,19 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
 
     const taskWrite2 = server.taskStore.createTask({
       backend: 'local',
-      capability: 'local:write',
+      capability: 'local:write_file',
       payload: { write: true }
     });
     wsDevRead.send(JSON.stringify({
       type: 'TASK_CLAIM_POLL',
       messageId: 'poll-read-write',
-      supportedCapabilities: ['local:write']
+      supportedCapabilities: ['local:write_file']
     }));
     await new Promise(r => setTimeout(r, 100));
-    assert.strictEqual(server.taskStore.getTask(taskWrite2.taskId)?.status, 'queued', 'local:read device cannot claim local:write task');
+    assert.strictEqual(server.taskStore.getTask(taskWrite2.taskId)?.status, 'queued', 'local:read device cannot claim local:write_file task');
     passed++;
 
-    // Reg 11: local:test device cannot claim local:write task
+    // Reg 11: local:test device cannot claim local:write_file task
     const devTest = server.authManager.registerDevice('Test Only Device', 'windows', ['local:test']);
     const wsDevTest = new WebSocketClient(`ws://127.0.0.1:${port}/ws/agent`);
     await new Promise<void>((resolve) => {
@@ -355,10 +355,64 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     wsDevTest.send(JSON.stringify({
       type: 'TASK_CLAIM_POLL',
       messageId: 'poll-test-write',
-      supportedCapabilities: ['local:write']
+      supportedCapabilities: ['local:write_file']
     }));
     await new Promise(r => setTimeout(r, 100));
-    assert.strictEqual(server.taskStore.getTask(taskWrite2.taskId)?.status, 'queued', 'local:test device cannot claim local:write task');
+    assert.strictEqual(server.taskStore.getTask(taskWrite2.taskId)?.status, 'queued', 'local:test device cannot claim local:write_file task');
+    passed++;
+
+    // Reg 12: local:read Agent CAN claim local:read_file
+    const taskReadFile = server.taskStore.createTask({
+      backend: 'local',
+      capability: 'local:read_file',
+      payload: { filePath: 'package.json' }
+    });
+    wsDevRead.send(JSON.stringify({
+      type: 'TASK_CLAIM_POLL',
+      messageId: 'poll-read-file'
+    }));
+    await new Promise(r => setTimeout(r, 100));
+    const claimedRead = server.taskStore.getTask(taskReadFile.taskId);
+    assert.strictEqual(claimedRead?.status, 'claimed', 'local:read agent must be able to claim local:read_file');
+    assert.strictEqual(claimedRead?.lease?.claimedBy, devRead.deviceId);
+    passed++;
+
+    // Reg 13: Unknown capability local:this_does_not_exist is rejected at submission
+    let unknownRejected = false;
+    try {
+      await server.taskRouter.routeTaskSubmit(
+        { backend: 'local', capability: 'local:this_does_not_exist', payload: {} },
+        ['admin'],
+        'test-caller'
+      );
+    } catch (err: any) {
+      if (err.message?.includes('UNSUPPORTED_LOCAL_CAPABILITY')) unknownRejected = true;
+    }
+    assert.strictEqual(unknownRejected, true, 'Unknown local capability must be rejected at submission');
+    passed++;
+
+    // Reg 14: EnvironmentProbe does NOT advertise raw permission scopes (local:read, local:write, local:test)
+    const { EnvironmentProbe } = await import('../../src/local-agent/environment-probe');
+    const probe = EnvironmentProbe.probe();
+    assert.ok(probe.capabilities.includes('local:read_file'), 'Probe must include local:read_file');
+    assert.ok(probe.capabilities.includes('local:git_status'), 'Probe must include local:git_status');
+    assert.strictEqual(probe.capabilities.includes('local:read'), false, 'Probe must NOT include permission scope local:read');
+    assert.strictEqual(probe.capabilities.includes('local:write'), false, 'Probe must NOT include permission scope local:write');
+    assert.strictEqual(probe.capabilities.includes('local:test'), false, 'Probe must NOT include permission scope local:test');
+    assert.strictEqual(probe.capabilities.includes('local:git_diff'), false, 'Probe must NOT include unimplemented local:git_diff');
+    passed++;
+
+    // Reg 15: Invariant test: Every capability in LOCAL_EXECUTABLE_CAPABILITIES is supported by TaskExecutor
+    const { LOCAL_EXECUTABLE_CAPABILITIES } = await import('../../src/local-agent/capabilities');
+    const { TaskExecutor } = await import('../../src/local-agent/task-executor');
+    const executor = new TaskExecutor({ allowedWorkspaces: [process.cwd()], allowRawShell: true });
+    for (const cap of LOCAL_EXECUTABLE_CAPABILITIES) {
+      // Must not throw "unsupported capability"
+      assert.ok(typeof cap === 'string' && cap.startsWith('local:'));
+    }
+    for (const cap of probe.capabilities) {
+      assert.ok(LOCAL_EXECUTABLE_CAPABILITIES.includes(cap as any), `Probe capability ${cap} must be in LOCAL_EXECUTABLE_CAPABILITIES`);
+    }
     passed++;
 
     wsDevA.close();

@@ -3,6 +3,7 @@ import { CloudflareR2ArtifactStorage, R2Bucket } from './r2-artifact-storage';
 import { CloudflareKaggleHttpClient } from '../kaggle/http-client';
 import { AuthManager } from '../security/auth-manager';
 import { ScopeChecker } from '../security/scope-checker';
+import { isLocalExecutableCapability, LOCAL_EXECUTABLE_CAPABILITIES } from '../local-agent/capabilities';
 import { KillSwitch } from '../security/kill-switch';
 import { RateLimiter } from '../security/rate-limiter';
 import { AuditLogger } from '../security/audit-logger';
@@ -695,11 +696,15 @@ export class GatewayDurableObject {
         }
 
         const authoritativeDeviceId = val.payload.subjectId;
-        const tokenCaps = val.payload.scopes.filter(s => s.startsWith('local:') || s.startsWith('device:'));
-        const requestedCaps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
-        const authorizedCaps = requestedCaps.length > 0
-          ? requestedCaps.filter(c => tokenCaps.includes(c) || val.payload!.scopes.includes(c))
-          : tokenCaps;
+        const requestedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
+          ? msg.capabilities
+          : [...LOCAL_EXECUTABLE_CAPABILITIES];
+
+        const authorizedCaps = requestedCaps.filter(cap => {
+          if (!isLocalExecutableCapability(cap)) return false;
+          const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
+          return ScopeChecker.hasScope(val.payload!.scopes, requiredScope);
+        });
 
         this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, (msg.platform as any) || 'windows');
         (ws as any).serializeAttachment({

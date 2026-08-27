@@ -58,7 +58,7 @@ export class LocalAgentClient {
   private connect(): void {
     if (!this.isRunning) return;
 
-    const probe = EnvironmentProbe.probe();
+    const probe = EnvironmentProbe.probe({ allowRawShell: this.config.allowRawShell });
     const WSClass = (WebSocket as any).WebSocket || WebSocket;
     this.ws = new WSClass(this.config.gatewayUrl);
 

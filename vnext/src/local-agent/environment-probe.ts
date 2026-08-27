@@ -11,10 +11,20 @@ export interface LocalEnvironmentReport {
   timestamp: number;
 }
 
+export interface ProbeOptions {
+  allowRawShell?: boolean;
+}
+
 export class EnvironmentProbe {
-  static probe(): LocalEnvironmentReport {
+  static probe(options?: ProbeOptions): LocalEnvironmentReport {
     const platform = os.platform() === 'win32' ? 'windows' : os.platform() === 'darwin' ? 'darwin' : 'linux';
-    const capabilities: string[] = ['local:read', 'local:write', 'local:test', 'local:git_status'];
+    const capabilities: string[] = [
+      'local:git_status',
+      'local:read_file',
+      'local:write_file',
+      'local:patch_file',
+      'local:run_tests'
+    ];
 
     const tools: Record<string, { available: boolean; version?: string }> = {};
 
@@ -32,11 +42,12 @@ export class EnvironmentProbe {
     checkTool('python', 'python --version');
     checkTool('flutter', 'flutter --version');
 
-    if (tools['git']?.available) {
-      capabilities.push('local:git_diff', 'local:git_log');
-    }
-    if (tools['flutter']?.available || tools['node']?.available || tools['python']?.available) {
+    if (tools['flutter']?.available || tools['node']?.available || tools['python']?.available || tools['git']?.available) {
       capabilities.push('local:build_project');
+    }
+
+    if (options?.allowRawShell) {
+      capabilities.push('local:raw_shell');
     }
 
     return {
