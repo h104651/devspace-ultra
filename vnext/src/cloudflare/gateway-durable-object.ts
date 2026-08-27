@@ -675,11 +675,12 @@ export class GatewayDurableObject {
       const msg: GatewayMessage = JSON.parse(text);
       if (msg.type === 'AGENT_REGISTER') {
         const val = this.authManager.validateToken(msg.token);
-        if (!val.valid || val.payload?.type !== 'device' || await this.storage.isTokenRevoked(val.payload.tokenId)) {
+        if (!val.valid || (val.payload?.type !== 'device' && val.payload?.type !== 'client') || await this.storage.isTokenRevoked(val.payload.tokenId)) {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'AUTH_FAILED' }));
           ws.close(1008, 'Authentication failed');
           return;
         }
+        this.authManager.rememberAuthenticatedDevice(msg.token, msg.deviceId, msg.name, msg.capabilities, msg.platform as any);
         (ws as any).serializeAttachment({ deviceId: msg.deviceId, name: msg.name, capabilities: msg.capabilities });
         ws.send(JSON.stringify({
           type: 'AGENT_REGISTERED',
