@@ -236,14 +236,20 @@ export class TaskStore {
     return true;
   }
 
-  public failTask(taskId: string, error: { code: string; message: string; details?: any }): boolean {
+  public failTask(
+    taskId: string,
+    error: { code: string; message: string; details?: any },
+    options?: { retryable?: boolean }
+  ): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
     task.error = error;
     task.completedAt = Date.now();
 
-    if (task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
+    const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+
+    if (isRetryable) {
       task.retryPolicy.retryCount++;
       task.lease = undefined;
 
@@ -270,6 +276,10 @@ export class TaskStore {
 
     this.saveTask(task);
     return true;
+  }
+
+  public failTaskTerminal(taskId: string, error: { code: string; message: string; details?: any }): boolean {
+    return this.failTask(taskId, error, { retryable: false });
   }
 
   public cancelTask(taskId: string, reason = 'User requested cancellation'): boolean {

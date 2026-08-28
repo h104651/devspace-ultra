@@ -247,13 +247,14 @@ class TaskStore {
         this.saveTask(task);
         return true;
     }
-    failTask(taskId, error) {
+    failTask(taskId, error, options) {
         const task = this.tasks.get(taskId);
         if (!task)
             return false;
         task.error = error;
         task.completedAt = Date.now();
-        if (task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
+        const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+        if (isRetryable) {
             task.retryPolicy.retryCount++;
             task.lease = undefined;
             // File-backed local runtimes can honor the requested backoff timer. Durable
@@ -280,6 +281,9 @@ class TaskStore {
         }
         this.saveTask(task);
         return true;
+    }
+    failTaskTerminal(taskId, error) {
+        return this.failTask(taskId, error, { retryable: false });
     }
     cancelTask(taskId, reason = 'User requested cancellation') {
         const task = this.tasks.get(taskId);

@@ -242,7 +242,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'script', isPrivate: true },
+            metadata: { kernelType: 'script', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
             source: ''
           })
         })
@@ -280,7 +280,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'script', isPrivate: true, title: 'Corrupted Script' },
+            metadata: { kernelType: 'script', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true, title: 'Corrupted Script' },
             source: ''
           })
         })
@@ -460,7 +460,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
   await runTest('Conflict protection: Reject continue when fingerprint does not match', async () => {
     (client as any).getUsername = () => 'testuser';
     (client as any).pullProject = async (owner: string, slug: string) => ({
-      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true },
+      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
       source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
     });
     await assert.rejects(
@@ -481,7 +481,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
   await runTest('Idempotent replay on continue returns existing task without duplicate execution', async () => {
     (client as any).getUsername = () => 'testuser';
     (client as any).pullProject = async (owner: string, slug: string) => ({
-      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, title: 'Astor TuneUp' },
+      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true, title: 'Astor TuneUp' },
       source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
     });
     const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
@@ -524,7 +524,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     const testKaggleClient: any = {
       getUsername: () => 'testuser',
       pullProject: async () => ({
-        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true },
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
         source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
       }),
       pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
@@ -571,7 +571,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'script', language: 'python', isPrivate: true },
+            metadata: { kernelType: 'script', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
             source: 'print("Original script")\n'
           })
         })
@@ -601,7 +601,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'notebook', language: 'python', isPrivate: true },
+            metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
             source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
           })
         })
@@ -628,7 +628,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'notebook', language: 'python', isPrivate: true },
+            metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
             source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
           })
         })
@@ -767,26 +767,205 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
   });
 
   // ==========================================
-  // P0-4: PRIVACY TRI-STATE & FAIL-CLOSED
+  // BLOCKERS 1 & 2: TERMINAL ERRORS & CANCELLATION
   // ==========================================
-  await runTest('P0-4: Project get returns tri-state privacy and metadata', async () => {
-    const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
-    assert.strictEqual(typeof getRes.isPrivate, 'boolean');
-    assert.strictEqual(getRes.privacyKnown, true);
-    assert.strictEqual(getRes.privacySource, 'kaggle_metadata');
-    assert.strictEqual(getRes.persistedSourceVisibility, 'AVAILABLE');
-    assert.strictEqual(getRes.browserDraftVisibility, 'UNAVAILABLE');
-    assert.strictEqual(getRes.externalDraftConflictRisk, true);
+  await runTest('Blocker 1 & 2: Remote ERROR is terminal, bypasses generic retry (no requeue), zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'error', rawMessage: 'SyntaxError: unexpected EOF' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      maxRetries: 3,
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, false);
+
+    const failedTask = tStore.getTask(task.taskId);
+    assert.strictEqual(failedTask?.status, 'failed');
+    assert.strictEqual(failedTask?.retryPolicy.retryCount, 0, 'Generic retry must be bypassed');
+    assert.strictEqual(failedTask?.externalRun?.reconciliationState, 'failed');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
   });
 
-  await runTest('P0-4: Unknown privacy fails closed with KAGGLE_PRIVACY_STATE_UNKNOWN on continue', async () => {
+  await runTest('Blocker 1 & 2: Remote quotaExceeded is terminal, zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'quotaExceeded', rawMessage: 'GPU limit reached' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      maxRetries: 3,
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, false);
+
+    const failedTask = tStore.getTask(task.taskId);
+    assert.strictEqual(failedTask?.status, 'failed');
+    assert.strictEqual(failedTask?.retryPolicy.retryCount, 0);
+    assert.strictEqual(failedTask?.error?.code, 'RESOURCE_QUOTA_EXCEEDED');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  await runTest('Blocker 1: Remote cancelled maps to local terminal cancelled, zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'cancelled', rawMessage: 'Cancelled by user' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, false);
+
+    const cancelledTask = tStore.getTask(task.taskId);
+    assert.strictEqual(cancelledTask?.status, 'cancelled');
+    assert.strictEqual(cancelledTask?.externalRun?.reconciliationState, 'failed');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  // ==========================================
+  // BLOCKER 3: STARTUP / HYDRATION RECONCILIATION
+  // ==========================================
+  await runTest('Blocker 3: Hydration reconcileDanglingTasks discovers non-terminal Kaggle run and finalizes remote COMPLETE', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'complete' }),
+      downloadKernelOutput: async () => ({ success: true, files: [{ name: 'out.txt', content: 'done' }] })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+
+    // 1. Create and submit external task
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+    await tBackend.submitKaggleTask(task);
+    assert.strictEqual(pushCount, 1);
+
+    // 2. Simulate process/DO restart & hydration into fresh TaskStore
+    const serializedTasks = tStore.listTasks();
+    const hydratedStore = new TaskStore();
+    hydratedStore.hydrate(serializedTasks);
+    hydratedStore.recoverStaleTasks();
+
+    const hydratedBackend = new KaggleBackend(hydratedStore, aStore, testKClient);
+
+    // 3. Production startup discovers dangling Kaggle task and reconciles
+    const reconResult = await hydratedBackend.reconcileDanglingTasks();
+    assert.strictEqual(reconResult.reconciledCount, 1);
+
+    const finalized = hydratedStore.getTask(task.taskId);
+    assert.strictEqual(finalized?.status, 'succeeded');
+    assert.strictEqual(finalized?.externalRun?.reconciliationState, 'completed');
+    assert.strictEqual(pushCount, 1, 'Zero re-push after restart/hydration');
+  });
+
+  await runTest('Blocker 3: Hydration reconcileDanglingTasks handles remote RUNNING without repush', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'running', rawMessage: 'Running epoch 1' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+    await tBackend.submitKaggleTask(task);
+
+    // Simulate restart
+    const hydratedStore = new TaskStore();
+    hydratedStore.hydrate(tStore.listTasks());
+    const hydratedBackend = new KaggleBackend(hydratedStore, aStore, testKClient);
+
+    const reconResult = await hydratedBackend.reconcileDanglingTasks();
+    assert.strictEqual(reconResult.reconciledCount, 1);
+
+    const running = hydratedStore.getTask(task.taskId);
+    assert.strictEqual(running?.status, 'running');
+    assert.strictEqual(running?.externalRun?.lastRemoteStatus, 'running');
+    assert.strictEqual(pushCount, 1, 'Zero re-push');
+  });
+
+  await runTest('Blocker 3: Hydration reconcileDanglingTasks handles remote UNKNOWN/network failure without repush', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => { throw new Error('Network timeout'); }
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+    await tBackend.submitKaggleTask(task);
+
+    // Simulate restart
+    const hydratedStore = new TaskStore();
+    hydratedStore.hydrate(tStore.listTasks());
+    const hydratedBackend = new KaggleBackend(hydratedStore, aStore, testKClient);
+
+    const reconResult = await hydratedBackend.reconcileDanglingTasks();
+    assert.strictEqual(reconResult.reconciledCount, 1);
+
+    const pending = hydratedStore.getTask(task.taskId);
+    assert.strictEqual(pending?.status, 'running');
+    assert.strictEqual(pending?.externalRun?.reconciliationState, 'pending');
+    assert.strictEqual(pushCount, 1, 'Zero re-push');
+  });
+
+  // ==========================================
+  // BLOCKER 4: UNKNOWN SETTINGS FAIL CLOSED
+  // ==========================================
+  await runTest('Blocker 4: Unknown settings fail closed with KAGGLE_PROJECT_SETTINGS_UNKNOWN on continue', async () => {
     const customHandlers = new McpHandlers({
       ...gatewayFacade,
       kaggleBackend: {
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'notebook', language: 'python', isPrivate: undefined },
+            metadata: { title: 'Test', isPrivate: true, language: 'python', kernelType: 'notebook' }, // missing enableGpu & enableInternet
             source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
           })
         })
@@ -802,8 +981,119 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
           cells: [{ cellType: 'code', source: 'print(1)' }]
         }
       }, submitAuth),
-      /KAGGLE_PRIVACY_STATE_UNKNOWN/
+      /KAGGLE_PROJECT_SETTINGS_UNKNOWN/
     );
+  });
+
+  await runTest('Blocker 4: Unknown settings fail closed with KAGGLE_PROJECT_SETTINGS_UNKNOWN on restore', async () => {
+    const customHandlers = new McpHandlers({
+      ...gatewayFacade,
+      kaggleBackend: {
+        getClient: () => ({
+          getUsername: () => 'testuser',
+          pullProject: async () => ({
+            metadata: { title: 'Test', isPrivate: true }, // missing enableGpu, enableInternet, language, kernelType
+            source: 'print(1)'
+          })
+        })
+      } as any
+    });
+
+    await assert.rejects(
+      async () => customHandlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        source: 'print("Restored")',
+        sourceSha256: crypto.createHash('sha256').update('print("Restored")').digest('hex'),
+        acknowledgeUnobservedBrowserDraft: true,
+        reason: 'Restoring'
+      }, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_UNKNOWN/
+    );
+  });
+
+  // ==========================================
+  // BLOCKER 5: SHARED NOTEBOOK VALIDATOR
+  // ==========================================
+  await runTest('Blocker 5: Shared notebook validator rejects missing nbformat', async () => {
+    const invalidNb = JSON.stringify({
+      cells: [{ cell_type: 'code', source: ['print(1)'] }]
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: invalidNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+  });
+
+  await runTest('Blocker 5: Shared notebook validator rejects invalid float or unsupported nbformat', async () => {
+    const floatNb = JSON.stringify({
+      cells: [{ cell_type: 'code', source: ['print(1)'] }],
+      nbformat: 4.5
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: floatNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+
+    const oldNb = JSON.stringify({
+      cells: [{ cell_type: 'code', source: ['print(1)'] }],
+      nbformat: 3
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: oldNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+  });
+
+  await runTest('Blocker 5: Shared notebook validator rejects missing cells array', async () => {
+    const noCellsNb = JSON.stringify({
+      nbformat: 4,
+      nbformat_minor: 5
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: noCellsNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+  });
+
+  // ==========================================
+  // P0-4: PRIVACY TRI-STATE & METADATA
+  // ==========================================
+  await runTest('P0-4: Project get returns tri-state privacy and metadata', async () => {
+    const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    assert.strictEqual(typeof getRes.isPrivate, 'boolean');
+    assert.strictEqual(getRes.privacyKnown, true);
+    assert.strictEqual(getRes.privacySource, 'kaggle_metadata');
+    assert.strictEqual(getRes.persistedSourceVisibility, 'AVAILABLE');
+    assert.strictEqual(getRes.browserDraftVisibility, 'UNAVAILABLE');
+    assert.strictEqual(getRes.externalDraftConflictRisk, true);
   });
 
   // ==========================================

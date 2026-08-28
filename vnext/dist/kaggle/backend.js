@@ -161,10 +161,10 @@ class KaggleBackend {
                     message: statusRes.status === 'quotaExceeded'
                         ? 'Kaggle GPU quota limit exceeded during execution'
                         : `Kaggle execution resulted in error: ${statusRes.rawMessage}`
-                });
+                }, { retryable: false });
                 return false;
             }
-            if (statusRes.status === 'cancelAcknowledged') {
+            if (statusRes.status === 'cancelled' || statusRes.status === 'cancelAcknowledged') {
                 updatedExternalRun.reconciliationState = 'failed';
                 this.taskStore.setExternalRun(taskId, updatedExternalRun);
                 this.taskStore.cancelTask(taskId, 'Kaggle execution cancelled remotely');
@@ -237,6 +237,25 @@ class KaggleBackend {
         }
         this.taskStore.completeTask(taskId, resultSummary);
         this.taskStore.appendLogs(taskId, [`Kaggle kernel run finalized successfully. Ingested ${resultSummary.outputFiles.length} artifacts.`]);
+    }
+    /**
+     * Reconciles all non-terminal tasks associated with an external Kaggle run on system hydration/startup.
+     */
+    async reconcileDanglingTasks() {
+        let count = 0;
+        const nonTerminalTasks = this.taskStore.listTasks().filter(t => ['queued', 'claimed', 'acknowledged', 'running'].includes(t.status) &&
+            t.externalRun &&
+            t.externalRun.provider === 'kaggle');
+        for (const task of nonTerminalTasks) {
+            try {
+                await this.reconcileTask(task.taskId, true);
+                count++;
+            }
+            catch (err) {
+                console.warn(`[KaggleBackend] Failed to reconcile dangling task ${task.taskId}:`, err.message);
+            }
+        }
+        return { reconciledCount: count };
     }
 }
 exports.KaggleBackend = KaggleBackend;

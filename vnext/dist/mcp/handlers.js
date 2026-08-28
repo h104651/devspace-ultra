@@ -470,17 +470,39 @@ class McpHandlers {
         const current = await client.pullProject(owner, slug);
         const currentRawSource = current.source || '';
         const currentSourceSha256 = crypto.createHash('sha256').update(currentRawSource).digest('hex');
-        // P0-4: Privacy fail-closed guard
-        if (current.metadata.isPrivate === undefined || current.metadata.isPrivate === null) {
-            throw new Error('KAGGLE_PRIVACY_STATE_UNKNOWN: Current project privacy setting cannot be authoritatively determined. Cannot safely mutate existing project.');
+        // P0-4: Settings fail-closed guard (kernelType, language, isPrivate, enableGpu, enableInternet)
+        const settings = args.settings || {};
+        const currentKernelType = settings.kernelType || args.kernelType || current.metadata.kernelType;
+        const currentLanguage = settings.language || args.language || current.metadata.language;
+        const currentIsPrivate = settings.isPrivate !== undefined ? settings.isPrivate : (args.isPrivate !== undefined ? args.isPrivate : current.metadata.isPrivate);
+        const currentEnableGpu = settings.enableGpu !== undefined ? settings.enableGpu : (args.enableGpu !== undefined ? args.enableGpu : current.metadata.enableGpu);
+        const currentEnableInternet = settings.enableInternet !== undefined ? settings.enableInternet : (args.enableInternet !== undefined ? args.enableInternet : current.metadata.enableInternet);
+        const unknownSettings = [];
+        if (currentKernelType === undefined)
+            unknownSettings.push('kernelType');
+        if (currentLanguage === undefined)
+            unknownSettings.push('language');
+        if (currentIsPrivate === undefined || currentIsPrivate === null)
+            unknownSettings.push('isPrivate');
+        if (typeof currentEnableGpu !== 'boolean')
+            unknownSettings.push('enableGpu');
+        if (typeof currentEnableInternet !== 'boolean')
+            unknownSettings.push('enableInternet');
+        if (unknownSettings.length > 0) {
+            throw new Error(JSON.stringify({
+                error: 'KAGGLE_PROJECT_SETTINGS_UNKNOWN',
+                message: `Authoritative settings for existing project are missing and cannot be guessed without explicit caller specification. Missing settings: ${unknownSettings.join(', ')}`,
+                kernelRef: ref,
+                unknownSettings
+            }));
         }
         const currentFingerprint = (0, project_manager_1.computeProjectFingerprint)({
             sourceSha256: currentSourceSha256,
-            kernelType: current.metadata.kernelType,
-            language: current.metadata.language,
-            isPrivate: current.metadata.isPrivate,
-            enableGpu: current.metadata.enableGpu,
-            enableInternet: current.metadata.enableInternet,
+            kernelType: currentKernelType,
+            language: currentLanguage,
+            isPrivate: currentIsPrivate,
+            enableGpu: currentEnableGpu,
+            enableInternet: currentEnableInternet,
             machineShape: current.metadata.machineShape,
             datasetSources: current.metadata.datasetDataSources,
             competitionSources: current.metadata.competitionDataSources,
@@ -498,8 +520,7 @@ class McpHandlers {
         }
         // Fail-Safe Suspicious State Guard: reject if state is inconsistent or corrupted
         const mutation = args.mutation || {};
-        const currentKernelType = current.metadata.kernelType || 'notebook';
-        // Prepare and validate mutated source (P0-1)
+        // Prepare and validate mutated source (P0-1 & P0-5)
         let newSource = '';
         if (currentKernelType === 'notebook') {
             if (mutation.type === 'append_notebook_cells') {
@@ -516,21 +537,9 @@ class McpHandlers {
             }
             else if (mutation.type === 'replace_source') {
                 newSource = mutation.source || mutation.code || '';
-                if (!newSource || newSource.trim().length === 0) {
-                    throw new Error('INVALID_MUTATION: source is required for replace_source');
-                }
-                // Strict notebook validation for replace_source
-                try {
-                    const parsedJson = JSON.parse(newSource);
-                    if (!parsedJson || typeof parsedJson !== 'object' || Array.isArray(parsedJson) || !Array.isArray(parsedJson.cells)) {
-                        throw new Error('Root must be an object with cells array');
-                    }
-                    const check = (0, project_manager_1.parseNotebookCells)(newSource, { includeCells: false });
-                    if (!check)
-                        throw new Error('Notebook structure invalid');
-                }
-                catch (err) {
-                    throw new Error(`KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID: Replacement source for notebook project is not a valid Jupyter Notebook structure: ${err.message}`);
+                const nbCheck = (0, project_manager_1.validateNotebookDocument)(newSource);
+                if (!nbCheck.valid) {
+                    throw new Error(`KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID: Replacement source for notebook project is not a valid Jupyter Notebook structure: ${nbCheck.error}`);
                 }
             }
             else if (mutation.type === 'append_script') {
@@ -563,24 +572,27 @@ class McpHandlers {
         if (newSourceBytes > 1000000) {
             throw new Error(`KAGGLE_KERNEL_SOURCE_TOO_LARGE: Kernel source size (${newSourceBytes} bytes) exceeds the Kaggle 1 MiB limit. Please use USE_KAGGLE_WORKSPACE_MODE (kaggle_workspace_get, kaggle_workspace_file, kaggle_workspace_continue) for large persistent projects.`);
         }
-        // Submit task reusing existing durable pipeline
+        // Submit task reusing existing durable pipeline - preserve exact known settings
         const payload = {
             kernelSlug: ref,
-            title: current.metadata.title || slug,
+            title: settings.title || current.metadata.title || slug,
             code: newSource,
-            language: current.metadata.language || 'python',
+            language: currentLanguage,
             kernelType: currentKernelType,
-            isPrivate: current.metadata.isPrivate,
-            enableGpu: !!current.metadata.enableGpu,
-            enableInternet: current.metadata.enableInternet !== false,
-            datasetDataSources: current.metadata.datasetDataSources,
-            competitionDataSources: current.metadata.competitionDataSources,
-            kernelDataSources: current.metadata.kernelDataSources
+            isPrivate: currentIsPrivate,
+            enableGpu: currentEnableGpu,
+            enableInternet: currentEnableInternet
         };
-        if (current.metadata.machineShape)
-            payload.machineShape = current.metadata.machineShape;
-        if (current.metadata.modelDataSources && current.metadata.modelDataSources.length > 0)
+        if (current.metadata.datasetDataSources !== undefined)
+            payload.datasetDataSources = current.metadata.datasetDataSources;
+        if (current.metadata.competitionDataSources !== undefined)
+            payload.competitionDataSources = current.metadata.competitionDataSources;
+        if (current.metadata.kernelDataSources !== undefined)
+            payload.kernelDataSources = current.metadata.kernelDataSources;
+        if (current.metadata.modelDataSources !== undefined)
             payload.modelDataSources = current.metadata.modelDataSources;
+        if (current.metadata.machineShape !== undefined)
+            payload.machineShape = current.metadata.machineShape;
         // 1. Save Pre-Write Snapshot
         const preWriteSnapshotId = await this.saveProjectSnapshot(ref, 'pre-write-snapshot', currentRawSource, current.metadata, undefined, args.clientRequestId);
         const result = await this.gateway.taskRouter.routeTaskSubmit({
@@ -642,33 +654,46 @@ class McpHandlers {
         const current = await client.pullProject(owner, slug);
         const currentRawSource = current.source || '';
         const currentSourceSha256 = crypto.createHash('sha256').update(currentRawSource).digest('hex');
-        // P0-4: Privacy fail-closed guard
-        if (current.metadata.isPrivate === undefined || current.metadata.isPrivate === null) {
-            throw new Error('KAGGLE_PRIVACY_STATE_UNKNOWN: Current project privacy setting cannot be authoritatively determined. Cannot safely restore project.');
-        }
         // P0-2: Default target kernel type to current remote kernel type
-        const targetKernelType = args.kernelType || current.metadata.kernelType || 'script';
+        const targetKernelType = args.kernelType || current.metadata.kernelType;
         // P0-2: Explicit kernel type change guard
         if (args.kernelType && current.metadata.kernelType && args.kernelType !== current.metadata.kernelType) {
             if (!args.allowKernelTypeChange || typeof args.kernelTypeChangeReason !== 'string' || args.kernelTypeChangeReason.trim().length === 0) {
                 throw new Error(`KAGGLE_KERNEL_TYPE_CHANGE_FORBIDDEN: Changing kernelType from '${current.metadata.kernelType}' to '${args.kernelType}' requires allowKernelTypeChange: true and non-empty kernelTypeChangeReason.`);
             }
         }
-        // Validate incoming source against TARGET kernel type
+        // Validate incoming source against TARGET kernel type using shared validator
         if (targetKernelType === 'notebook') {
-            try {
-                const parsedJson = JSON.parse(args.source);
-                if (!parsedJson || typeof parsedJson !== 'object' || Array.isArray(parsedJson) || !Array.isArray(parsedJson.cells)) {
-                    throw new Error('Root must be an object with cells array');
-                }
-                const parsed = (0, project_manager_1.parseNotebookCells)(args.source, { includeCells: false });
-                if (!parsed || parsed.totalCells === 0) {
-                    throw new Error('0 cells found in notebook');
-                }
+            const nbCheck = (0, project_manager_1.validateNotebookDocument)(args.source);
+            if (!nbCheck.valid) {
+                throw new Error(`INVALID_RESTORE_SOURCE: Provided source is not a valid Jupyter Notebook structure: ${nbCheck.error}`);
             }
-            catch (err) {
-                throw new Error(`INVALID_RESTORE_SOURCE: Provided source is not a valid Jupyter Notebook structure: ${err.message}`);
-            }
+        }
+        // P0-4: Settings fail-closed guard for restore
+        const settings = args.settings || {};
+        const title = settings.title || current.metadata.title || slug;
+        const isPrivate = settings.isPrivate !== undefined ? settings.isPrivate : current.metadata.isPrivate;
+        const enableGpu = settings.enableGpu !== undefined ? settings.enableGpu : (args.enableGpu !== undefined ? args.enableGpu : current.metadata.enableGpu);
+        const enableInternet = settings.enableInternet !== undefined ? settings.enableInternet : (args.enableInternet !== undefined ? args.enableInternet : current.metadata.enableInternet);
+        const language = settings.language || args.language || current.metadata.language;
+        const unknownSettings = [];
+        if (isPrivate === undefined || isPrivate === null)
+            unknownSettings.push('isPrivate');
+        if (typeof enableGpu !== 'boolean')
+            unknownSettings.push('enableGpu');
+        if (typeof enableInternet !== 'boolean')
+            unknownSettings.push('enableInternet');
+        if (!language)
+            unknownSettings.push('language');
+        if (!targetKernelType)
+            unknownSettings.push('kernelType');
+        if (unknownSettings.length > 0) {
+            throw new Error(JSON.stringify({
+                error: 'KAGGLE_PROJECT_SETTINGS_UNKNOWN',
+                message: `Authoritative settings for existing project restore are missing and cannot be guessed without explicit caller specification. Missing settings: ${unknownSettings.join(', ')}`,
+                kernelRef: ref,
+                unknownSettings
+            }));
         }
         const currentFingerprint = (0, project_manager_1.computeProjectFingerprint)({
             sourceSha256: currentSourceSha256,
@@ -705,8 +730,8 @@ class McpHandlers {
                 sourceFormat: targetKernelType === 'notebook' ? 'ipynb' : 'script',
                 sourceValidation: 'VALID',
                 privacyValidation: {
-                    isPrivate: current.metadata.isPrivate,
-                    privacyKnown: typeof current.metadata.isPrivate === 'boolean',
+                    isPrivate,
+                    privacyKnown: typeof isPrivate === 'boolean',
                     privacySource: 'kaggle_metadata'
                 },
                 kernelTypeChangeRequired: targetKernelType !== current.metadata.kernelType,
@@ -727,32 +752,30 @@ class McpHandlers {
         }
         // 1. Save Pre-Write Snapshot
         const preWriteSnapshotId = await this.saveProjectSnapshot(ref, 'pre-write-snapshot', currentRawSource, current.metadata, undefined, args.clientRequestId);
-        // Build payload for durable submission
-        const settings = args.settings || {};
-        const title = settings.title || current.metadata.title || slug;
-        const isPrivate = settings.isPrivate !== undefined ? settings.isPrivate : current.metadata.isPrivate;
-        const enableGpu = settings.enableGpu !== undefined ? settings.enableGpu : (args.enableGpu !== undefined ? args.enableGpu : (targetKernelType === 'notebook'));
-        const enableInternet = settings.enableInternet !== undefined ? settings.enableInternet : (args.enableInternet !== undefined ? args.enableInternet : true);
-        const machineShape = settings.machineShape || args.machineShape || current.metadata.machineShape;
-        const datasetDataSources = settings.datasetDataSources || args.datasetDataSources || current.metadata.datasetDataSources;
-        const competitionDataSources = settings.competitionDataSources || args.competitionDataSources || current.metadata.competitionDataSources;
-        const kernelDataSources = settings.kernelDataSources || args.kernelDataSources || current.metadata.kernelDataSources;
-        const modelDataSources = settings.modelDataSources || args.modelDataSources || current.metadata.modelDataSources;
         const payload = {
             kernelSlug: ref,
             title,
             code: args.source,
-            language: args.language || current.metadata.language || 'python',
+            language,
             kernelType: targetKernelType,
             isPrivate,
             enableGpu,
-            enableInternet,
-            datasetDataSources,
-            competitionDataSources,
-            kernelDataSources,
-            modelDataSources
+            enableInternet
         };
-        if (machineShape)
+        const datasetDataSources = settings.datasetDataSources !== undefined ? settings.datasetDataSources : (args.datasetDataSources !== undefined ? args.datasetDataSources : current.metadata.datasetDataSources);
+        const competitionDataSources = settings.competitionDataSources !== undefined ? settings.competitionDataSources : (args.competitionDataSources !== undefined ? args.competitionDataSources : current.metadata.competitionDataSources);
+        const kernelDataSources = settings.kernelDataSources !== undefined ? settings.kernelDataSources : (args.kernelDataSources !== undefined ? args.kernelDataSources : current.metadata.kernelDataSources);
+        const modelDataSources = settings.modelDataSources !== undefined ? settings.modelDataSources : (args.modelDataSources !== undefined ? args.modelDataSources : current.metadata.modelDataSources);
+        const machineShape = settings.machineShape || args.machineShape || current.metadata.machineShape;
+        if (datasetDataSources !== undefined)
+            payload.datasetDataSources = datasetDataSources;
+        if (competitionDataSources !== undefined)
+            payload.competitionDataSources = competitionDataSources;
+        if (kernelDataSources !== undefined)
+            payload.kernelDataSources = kernelDataSources;
+        if (modelDataSources !== undefined)
+            payload.modelDataSources = modelDataSources;
+        if (machineShape !== undefined)
             payload.machineShape = machineShape;
         // Route task submit
         const result = await this.gateway.taskRouter.routeTaskSubmit({
