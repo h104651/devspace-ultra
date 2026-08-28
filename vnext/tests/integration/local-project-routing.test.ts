@@ -146,6 +146,25 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       assert.strictEqual(fs.readFileSync(path.join(rootA, 'greeting.txt'), 'utf-8'), initialAContent);
     });
 
+    await test('TaskExecutor: patch_file fails closed when oldText occurrence count mismatches (ambiguous match => zero write)', async () => {
+      const logs: string[] = [];
+      const multiOccContent = 'AAA\nBBB\nAAA\n';
+      fs.writeFileSync(path.join(rootA, 'multi.txt'), multiOccContent, 'utf-8');
+      const currentSha = crypto.createHash('sha256').update(multiOccContent).digest('hex');
+
+      await assert.rejects(
+        async () => executor.executeTask(makeTask('local:patch_file', {
+          projectId: 'project-a',
+          relativePath: 'multi.txt',
+          expectedSha256: currentSha,
+          patches: [{ oldText: 'AAA', newText: 'REPLACED', expectedOccurrences: 1 }] // actual is 2
+        }), l => logs.push(l)),
+        /LOCAL_PATCH_FAILED/
+      );
+      // Verify zero write
+      assert.strictEqual(fs.readFileSync(path.join(rootA, 'multi.txt'), 'utf-8'), multiOccContent);
+    });
+
     await test('TaskExecutor: patch_file succeeds with exact patch and returns valid readback SHA', async () => {
       const logs: string[] = [];
       const currentSha = crypto.createHash('sha256').update(initialAContent).digest('hex');
