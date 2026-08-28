@@ -56,6 +56,9 @@ class LocalAgentClient {
         };
         this.executor = new task_executor_1.TaskExecutor({
             allowedWorkspaces: config.allowedWorkspaces,
+            projects: config.projects,
+            projectRegistry: config.projectRegistry,
+            projectsConfigFile: config.projectsConfigFile,
             allowRawShell: config.allowRawShell
         });
     }
@@ -217,6 +220,7 @@ class LocalAgentClient {
             });
         }
         catch (err) {
+            const errCode = err.code || (typeof err.message === 'string' && err.message.split(':')[0]) || 'LOCAL_TASK_EXECUTION_ERROR';
             this.send({
                 type: 'TASK_FAIL',
                 messageId: crypto.randomUUID(),
@@ -224,7 +228,7 @@ class LocalAgentClient {
                 taskId: task.taskId,
                 deviceId: this.config.deviceId,
                 error: {
-                    code: 'LOCAL_TASK_EXECUTION_ERROR',
+                    code: errCode,
                     message: err.message || 'Unknown execution error'
                 }
             });

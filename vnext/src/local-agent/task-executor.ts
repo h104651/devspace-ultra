@@ -2,35 +2,66 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { DurableTask } from '../types/task';
+import {
+  ProjectRegistry,
+  ProjectPathSecurity,
+  LocalProjectDefinition
+} from './project-registry';
 
 export interface TaskExecutorConfig {
-  allowedWorkspaces: string[];
+  allowedWorkspaces?: string[];
+  projects?: (LocalProjectDefinition | string)[];
+  projectRegistry?: ProjectRegistry;
+  projectsConfigFile?: string;
   allowRawShell?: boolean;
 }
 
 export class TaskExecutor {
-  private config: TaskExecutorConfig;
+  private projectRegistry: ProjectRegistry;
+  private allowRawShell: boolean;
 
   constructor(config: TaskExecutorConfig) {
-    this.config = {
-      allowedWorkspaces: config.allowedWorkspaces.map(w => path.resolve(w)),
-      allowRawShell: !!config.allowRawShell
-    };
+    this.allowRawShell = !!config.allowRawShell;
+    if (config.projectRegistry) {
+      this.projectRegistry = config.projectRegistry;
+    } else {
+      this.projectRegistry = new ProjectRegistry({
+        configFilePath: config.projectsConfigFile,
+        initialProjects: config.projects || config.allowedWorkspaces
+      });
+    }
   }
 
-  private validateWorkspace(targetPath: string): string {
-    const resolved = path.resolve(targetPath);
-    const resolvedNorm = resolved.toLowerCase();
+  public getRegistry(): ProjectRegistry {
+    return this.projectRegistry;
+  }
 
-    const isAllowed = this.config.allowedWorkspaces.some(w => {
-      const wNorm = w.toLowerCase();
-      return resolvedNorm === wNorm || resolvedNorm.startsWith(wNorm + path.sep) || resolvedNorm.startsWith(wNorm + '/');
-    });
-
-    if (!isAllowed) {
-      throw new Error(`WORKSPACE_ACCESS_DENIED: Path '${targetPath}' is outside authorized workspaces`);
+  private resolveProjectForTask(payload: any): {
+    project: ReturnType<ProjectRegistry['getProject']>;
+    relativePath?: string;
+    isLegacy: boolean;
+  } {
+    if (payload.projectId) {
+      const project = this.projectRegistry.getProject(payload.projectId);
+      return { project, relativePath: payload.relativePath, isLegacy: false };
     }
-    return resolved;
+
+    // Deprecated legacy compatibility fallback: resolve absolute workspace or filePath
+    const legacyPath = payload.workspace || payload.filePath;
+    if (!legacyPath) {
+      const err: any = new Error('MISSING_PROJECT_ID: Target projectId is required for local task routing');
+      err.code = 'MISSING_PROJECT_ID';
+      throw err;
+    }
+
+    const match = this.projectRegistry.resolveLegacyPath(legacyPath);
+    if (!match) {
+      const err: any = new Error(`WORKSPACE_ACCESS_DENIED: Path '${legacyPath}' is outside authorized registered project workspaces`);
+      err.code = 'WORKSPACE_ACCESS_DENIED';
+      throw err;
+    }
+
+    return { project: match.project, relativePath: match.relativePath, isLegacy: true };
   }
 
   public async executeTask(
@@ -40,19 +71,68 @@ export class TaskExecutor {
     onLog(`[EXECUTOR] Starting capability: ${task.capability}`);
 
     switch (task.capability) {
+      case 'local:list_projects': {
+        const projects = this.projectRegistry.listProjects();
+        return {
+          count: projects.length,
+          projects
+        };
+      }
+
+      case 'local:project_status': {
+        const { project } = this.resolveProjectForTask(task.payload);
+        const gitDetected = fs.existsSync(path.join(project.canonicalRoot, '.git'));
+        let gitInfo: any;
+        if (gitDetected && project.permissions.read) {
+          try {
+            gitInfo = await this.runGitStatus(project.canonicalRoot);
+          } catch (e: any) {
+            onLog(`[EXECUTOR] Git status warning: ${e.message}`);
+          }
+        }
+
+        return {
+          projectId: project.projectId,
+          displayName: project.displayName,
+          exists: fs.existsSync(project.canonicalRoot),
+          gitDetected,
+          branch: gitInfo?.branch,
+          headCommit: gitInfo?.headCommit,
+          isClean: gitInfo?.isClean,
+          permissions: { ...project.permissions }
+        };
+      }
+
       case 'local:git_status': {
-        const repoPath = this.validateWorkspace(task.payload.workspace || process.cwd());
-        return this.runGitStatus(repoPath);
+        const { project } = this.resolveProjectForTask(task.payload);
+        if (!project.permissions.read) {
+          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Read permission is forbidden on project '${project.projectId}'`);
+          err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+          throw err;
+        }
+
+        const gitResult = await this.runGitStatus(project.canonicalRoot);
+        return {
+          projectId: project.projectId,
+          ...gitResult
+        };
       }
 
       case 'local:read_file': {
-        const filePath = this.validateWorkspace(task.payload.filePath);
-        if (!fs.existsSync(filePath)) {
-          throw new Error(`FILE_NOT_FOUND: ${filePath}`);
+        const { project, relativePath, isLegacy } = this.resolveProjectForTask(task.payload);
+        if (!project.permissions.read) {
+          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Read permission is forbidden on project '${project.projectId}'`);
+          err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+          throw err;
         }
-        const content = fs.readFileSync(filePath, 'utf-8');
+
+        const effectiveRelPath = relativePath || (isLegacy ? '' : task.payload.relativePath);
+        const targetPath = ProjectPathSecurity.resolveReadPath(project.canonicalRoot, effectiveRelPath);
+        const content = fs.readFileSync(targetPath, 'utf-8');
+
         return {
-          filePath,
+          projectId: project.projectId,
+          relativePath: effectiveRelPath,
           sizeBytes: Buffer.byteLength(content),
           content: task.payload.limit ? content.substring(0, task.payload.limit) : content
         };
@@ -60,18 +140,40 @@ export class TaskExecutor {
 
       case 'local:write_file':
       case 'local:patch_file': {
-        const filePath = this.validateWorkspace(task.payload.filePath);
-        const dir = path.dirname(filePath);
+        const { project, relativePath, isLegacy } = this.resolveProjectForTask(task.payload);
+        if (!project.permissions.write) {
+          const err: any = new Error(`LOCAL_PROJECT_WRITE_FORBIDDEN: Write permission is forbidden on read-only project '${project.projectId}'`);
+          err.code = 'LOCAL_PROJECT_WRITE_FORBIDDEN';
+          throw err;
+        }
+
+        const effectiveRelPath = relativePath || (isLegacy ? '' : task.payload.relativePath);
+        const targetPath = ProjectPathSecurity.resolveWritePath(project.canonicalRoot, effectiveRelPath);
+        const dir = path.dirname(targetPath);
         if (!fs.existsSync(dir)) {
           fs.mkdirSync(dir, { recursive: true });
         }
-        fs.writeFileSync(filePath, task.payload.content, 'utf-8');
-        onLog(`[EXECUTOR] Successfully wrote ${Buffer.byteLength(task.payload.content)} bytes to ${filePath}`);
-        return { filePath, status: 'written', sizeBytes: Buffer.byteLength(task.payload.content) };
+
+        const content = typeof task.payload.content === 'string' ? task.payload.content : '';
+        fs.writeFileSync(targetPath, content, 'utf-8');
+        onLog(`[EXECUTOR] Successfully wrote ${Buffer.byteLength(content)} bytes to ${effectiveRelPath}`);
+
+        return {
+          projectId: project.projectId,
+          relativePath: effectiveRelPath,
+          status: 'written',
+          sizeBytes: Buffer.byteLength(content)
+        };
       }
 
       case 'local:run_tests': {
-        const workspace = this.validateWorkspace(task.payload.workspace || process.cwd());
+        const { project } = this.resolveProjectForTask(task.payload);
+        if (!project.permissions.test) {
+          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Test execution is forbidden on project '${project.projectId}'`);
+          err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+          throw err;
+        }
+
         const runner = task.payload.runner || 'npm';
         let cmd = 'npm test';
         if (runner === 'pytest') cmd = 'pytest';
@@ -80,28 +182,38 @@ export class TaskExecutor {
           cmd = task.payload.customCommand;
         }
 
-        onLog(`[EXECUTOR] Running tests via command: ${cmd}`);
-        return this.runCommandAsync(cmd, workspace, onLog);
+        onLog(`[EXECUTOR] Running tests in project '${project.projectId}' via command: ${cmd}`);
+        return this.runCommandAsync(cmd, project.canonicalRoot, onLog);
       }
 
       case 'local:build_project': {
-        const workspace = this.validateWorkspace(task.payload.workspace || process.cwd());
+        const { project } = this.resolveProjectForTask(task.payload);
+        if (!project.permissions.build) {
+          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Build execution is forbidden on project '${project.projectId}'`);
+          err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+          throw err;
+        }
+
         const cmd = task.payload.command || 'npm run build';
-        onLog(`[EXECUTOR] Building project via: ${cmd}`);
-        return this.runCommandAsync(cmd, workspace, onLog);
+        onLog(`[EXECUTOR] Building project '${project.projectId}' via: ${cmd}`);
+        return this.runCommandAsync(cmd, project.canonicalRoot, onLog);
       }
 
       case 'local:raw_shell': {
-        if (!this.config.allowRawShell) {
-          throw new Error('RAW_SHELL_DENIED: Raw shell execution is disabled on this agent');
+        if (!this.allowRawShell) {
+          const err: any = new Error('RAW_SHELL_DENIED: Raw shell execution is disabled on this agent');
+          err.code = 'RAW_SHELL_DENIED';
+          throw err;
         }
-        const workspace = this.validateWorkspace(task.payload.workspace || process.cwd());
+        const { project } = this.resolveProjectForTask(task.payload);
         const cmd = task.payload.command;
         if (!cmd) {
-          throw new Error('MISSING_COMMAND: No command provided for raw shell');
+          const err: any = new Error('MISSING_COMMAND: No command provided for raw shell');
+          err.code = 'MISSING_COMMAND';
+          throw err;
         }
-        onLog(`[AUDIT_SHELL] Executing raw command: ${cmd}`);
-        return this.runCommandAsync(cmd, workspace, onLog);
+        onLog(`[AUDIT_SHELL] Executing raw command in '${project.projectId}': ${cmd}`);
+        return this.runCommandAsync(cmd, project.canonicalRoot, onLog);
       }
 
       default:
