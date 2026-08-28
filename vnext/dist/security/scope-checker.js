@@ -54,11 +54,11 @@ class ScopeChecker {
         if (capability.startsWith('local:')) {
             if (capability === 'local:raw_shell')
                 return 'raw_shell:run';
+            if (capability.includes('test') || capability.includes('build'))
+                return 'local:exec';
             if (capability.includes('write') || capability.includes('patch') || capability.includes('create') || capability.includes('delete')) {
                 return 'local:write';
             }
-            if (capability.includes('test') || capability.includes('build'))
-                return 'local:test';
             return 'local:read';
         }
         if (capability.startsWith('browser:'))

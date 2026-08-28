@@ -363,6 +363,132 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         );
       });
 
+      // ----------------------------------------------------------------------
+      // TaskRouter & Generic remote_task_submit Local Authorization Tests (1-10)
+      // ----------------------------------------------------------------------
+
+      // 1. tasks:submit WITHOUT local:read -> generic remote_task_submit local:read_file => DENY
+      await test('Security 1: remote_task_submit local:read_file with tasks:submit only is DENIED (missing local:read)', async () => {
+        const callerOnlySubmit: McpCallerContext = { scopes: ['tasks:submit'], subjectId: 'user-submit-only' };
+        await assert.rejects(
+          async () => mcpHandlers.handleRemoteTaskSubmit({
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { projectId: 'project-a', relativePath: 'greeting.txt' }
+          }, callerOnlySubmit),
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:read'/
+        );
+      });
+
+      // 2. tasks:submit + local:read -> local:read_file => PASS
+      await test('Security 2: remote_task_submit and first-class local:read_file with tasks:submit + local:read PASS', async () => {
+        const callerRead: McpCallerContext = { scopes: ['tasks:submit', 'local:read'], subjectId: 'user-read' };
+        const res = await mcpHandlers.handleRemoteTaskSubmit({
+          backend: 'local',
+          capability: 'local:read_file',
+          payload: { projectId: 'project-a', relativePath: 'greeting.txt' }
+        }, callerRead);
+        assert.strictEqual(res.status, 'queued');
+      });
+
+      // 3. tasks:submit + local:test WITHOUT local:exec -> generic remote_task_submit local:run_tests => DENY
+      await test('Security 3: remote_task_submit local:run_tests with tasks:submit + local:test (no local:exec) is DENIED', async () => {
+        const callerTestNoExec: McpCallerContext = { scopes: ['tasks:submit', 'local:test'], subjectId: 'user-test-no-exec' };
+        await assert.rejects(
+          async () => mcpHandlers.handleRemoteTaskSubmit({
+            backend: 'local',
+            capability: 'local:run_tests',
+            payload: { projectId: 'project-a' }
+          }, callerTestNoExec),
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:exec'/
+        );
+      });
+
+      // 4. tasks:submit + local:exec (project test=true, hostExecution=true) -> local:run_tests => PASS
+      await test('Security 4: remote_task_submit local:run_tests with tasks:submit + local:exec PASS', async () => {
+        const callerExec: McpCallerContext = { scopes: ['tasks:submit', 'local:exec'], subjectId: 'user-exec' };
+        const res = await mcpHandlers.handleRemoteTaskSubmit({
+          backend: 'local',
+          capability: 'local:run_tests',
+          payload: { projectId: 'project-a' }
+        }, callerExec);
+        assert.strictEqual(res.status, 'queued');
+      });
+
+      // 5. local:exec WITHOUT tasks:submit -> DENY
+      await test('Security 5: remote_task_submit local:run_tests with local:exec only (no tasks:submit) is DENIED', async () => {
+        const callerExecOnly: McpCallerContext = { scopes: ['local:exec'], subjectId: 'user-exec-only' };
+        await assert.rejects(
+          async () => mcpHandlers.handleRemoteTaskSubmit({
+            backend: 'local',
+            capability: 'local:run_tests',
+            payload: { projectId: 'project-a' }
+          }, callerExecOnly),
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:exec'/
+        );
+      });
+
+      // 6. tasks:submit WITHOUT local:write -> generic remote_task_submit local:write_file => DENY
+      await test('Security 6: remote_task_submit local:write_file with tasks:submit only is DENIED (missing local:write)', async () => {
+        const callerOnlySubmit: McpCallerContext = { scopes: ['tasks:submit'], subjectId: 'user-submit-only' };
+        await assert.rejects(
+          async () => mcpHandlers.handleRemoteTaskSubmit({
+            backend: 'local',
+            capability: 'local:write_file',
+            payload: { projectId: 'project-a', relativePath: 'test.txt', content: 'hello' }
+          }, callerOnlySubmit),
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:write'/
+        );
+      });
+
+      // 7. tasks:submit + local:write -> local:write_file on writable project => PASS
+      await test('Security 7: remote_task_submit local:write_file with tasks:submit + local:write PASS', async () => {
+        const callerWrite: McpCallerContext = { scopes: ['tasks:submit', 'local:write'], subjectId: 'user-write' };
+        const res = await mcpHandlers.handleRemoteTaskSubmit({
+          backend: 'local',
+          capability: 'local:write_file',
+          payload: { projectId: 'project-a', relativePath: 'auth-write-test.txt', content: 'auth ok' }
+        }, callerWrite);
+        assert.strictEqual(res.status, 'queued');
+      });
+
+      // 8. tasks:submit WITHOUT raw_shell:run -> generic remote_task_submit local:raw_shell => DENY
+      await test('Security 8: remote_task_submit local:raw_shell with tasks:submit only is DENIED (missing raw_shell:run)', async () => {
+        const callerOnlySubmit: McpCallerContext = { scopes: ['tasks:submit'], subjectId: 'user-submit-only' };
+        await assert.rejects(
+          async () => mcpHandlers.handleRemoteTaskSubmit({
+            backend: 'local',
+            capability: 'local:raw_shell',
+            payload: { projectId: 'project-a', command: 'echo test' }
+          }, callerOnlySubmit),
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'raw_shell:run'/
+        );
+      });
+
+      // 9. tasks:submit + raw_shell:run on agent with allowRawShell=false -> DENIED at agent
+      await test('Security 9: tasks:submit + raw_shell:run on agent with allowRawShell=false is DENIED at agent', async () => {
+        const noShellExecutor = new TaskExecutor({ projectRegistry: registry, allowRawShell: false });
+        await assert.rejects(
+          async () => noShellExecutor.executeTask(makeTask('local:raw_shell', { projectId: 'project-a', command: 'echo hello' }), () => {}),
+          /RAW_SHELL_DENIED/
+        );
+      });
+
+      // 10. tasks:submit + raw_shell:run on agent with allowRawShell=true -> PASS
+      await test('Security 10: tasks:submit + raw_shell:run on agent with allowRawShell=true PASS', async () => {
+        const callerRaw: McpCallerContext = { scopes: ['tasks:submit', 'raw_shell:run'], subjectId: 'user-raw' };
+        const res = await mcpHandlers.handleRemoteTaskSubmit({
+          backend: 'local',
+          capability: 'local:raw_shell',
+          payload: { projectId: 'project-a', command: 'echo auth-pass' }
+        }, callerRaw);
+        assert.strictEqual(res.status, 'queued');
+
+        const shellExecutor = new TaskExecutor({ projectRegistry: registry, allowRawShell: true });
+        const execRes = await shellExecutor.executeTask(makeTask('local:raw_shell', { projectId: 'project-a', command: 'echo auth-pass' }), () => {});
+        assert.strictEqual(execRes.exitCode, 0);
+      });
+
       await test('MCP Gateway E2E: local_project_list discovers registered projects and metadata', async () => {
         const submitRes = await mcpHandlers.handleLocalProjectList({}, fullCaller);
         let task = server.taskStore.getTask(submitRes.taskId);

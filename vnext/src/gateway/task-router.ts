@@ -52,9 +52,46 @@ export class TaskRouter {
     const requiredScope = options.requiredScope || ScopeChecker.getRequiredScopeForCapability(options.capability);
     const hasCapabilityScope = ScopeChecker.hasScope(callerScopes, requiredScope);
     const hasGenericSubmitScope = ScopeChecker.hasScope(callerScopes, 'tasks:submit');
-    if (!hasCapabilityScope && !hasGenericSubmitScope) {
-      this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { requiredScope, callerScopes, capability: options.capability } });
-      throw new Error(`AUTH_FORBIDDEN: Required scope '${requiredScope}' or 'tasks:submit' not granted`);
+
+    if (options.backend === 'local') {
+      const missingGenericSubmit = !hasGenericSubmitScope;
+      const missingCapabilityScope = !hasCapabilityScope;
+
+      if (missingGenericSubmit || missingCapabilityScope) {
+        this.auditLogger.log({
+          actor: actorId,
+          actorType: 'client',
+          action: 'TASK_SUBMIT_DENIED',
+          result: 'DENY',
+          details: {
+            backend: 'local',
+            capability: options.capability,
+            requiredCapabilityScope: requiredScope,
+            missingGenericSubmit,
+            missingCapabilityScope
+          }
+        });
+        const missingList: string[] = [];
+        if (missingGenericSubmit) missingList.push("'tasks:submit'");
+        if (missingCapabilityScope) missingList.push(`'${requiredScope}'`);
+        throw new Error(`AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and '${requiredScope}'. Missing: ${missingList.join(', ')}`);
+      }
+    } else {
+      if (!hasCapabilityScope && !hasGenericSubmitScope) {
+        this.auditLogger.log({
+          actor: actorId,
+          actorType: 'client',
+          action: 'TASK_SUBMIT_DENIED',
+          result: 'DENY',
+          details: {
+            backend: options.backend,
+            requiredScope,
+            callerScopes,
+            capability: options.capability
+          }
+        });
+        throw new Error(`AUTH_FORBIDDEN: Required scope '${requiredScope}' or 'tasks:submit' not granted`);
+      }
     }
 
     const task = this.taskStore.createTask(options);
