@@ -193,22 +193,6 @@ export class TaskExecutor {
             targetDir = project.canonicalRoot;
             effectiveRepoRel = '.';
           } else {
-            let rootGitSucceeded = false;
-            let rootGitResult: any;
-            try {
-              rootGitResult = await this.runGitStatus(project.canonicalRoot);
-              rootGitSucceeded = true;
-            } catch {}
-
-            if (rootGitSucceeded && rootGitResult) {
-              return {
-                projectId: project.projectId,
-                repoRelativePath: '.',
-                gitDetected: true,
-                ...rootGitResult
-              };
-            }
-
             const discovered = await this.discoverRepositories(project.canonicalRoot, '.', 6);
             if (discovered.length === 0) {
               return {
@@ -1178,16 +1162,33 @@ export class TaskExecutor {
       } catch {}
 
       for (const d of dirents) {
-        if (!d.isDirectory()) continue;
         if (d.name === '.git' || d.name === 'node_modules' || d.name === '.dart_tool' || d.name === 'build' || d.name === 'dist') {
           continue;
         }
 
+        let isDir = d.isDirectory();
         const subDir = path.join(dir, d.name);
+
+        if (d.isSymbolicLink()) {
+          try {
+            const real = fs.realpathSync(subDir);
+            if (!ProjectPathSecurity.isPathInsideRoot(real, canonicalRoot)) continue;
+            const stat = fs.statSync(real);
+            isDir = stat.isDirectory();
+          } catch {
+            continue;
+          }
+        }
+
+        if (!isDir) continue;
+
         try {
           const realSub = fs.realpathSync(subDir);
           if (ProjectPathSecurity.isPathInsideRoot(realSub, canonicalRoot)) {
-            queue.push({ dir: subDir, depth: depth + 1 });
+            const subNorm = process.platform === 'win32' ? realSub.toLowerCase() : realSub;
+            if (!visitedRealPaths.has(subNorm)) {
+              queue.push({ dir: subDir, depth: depth + 1 });
+            }
           }
         } catch {}
       }

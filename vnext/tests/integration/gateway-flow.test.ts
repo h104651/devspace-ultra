@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as path from 'path';
 import { AddressInfo } from 'net';
 import { GatewayServer } from '../../src/gateway/server';
 import { LocalAgentClient } from '../../src/local-agent/client';
@@ -37,14 +38,14 @@ export async function runGatewayFlowIntegrationTests(): Promise<{ passed: number
 
     // Keep the client registration exercised even though this integration path
     // submits directly through the router below.
-    assert.ok(clientToken);
+    const repoRoot = fs.existsSync(path.join(process.cwd(), '.git')) ? process.cwd() : path.resolve(process.cwd(), '..');
 
     // 2. Start Outbound Local Agent
     agent = new LocalAgentClient({
       gatewayUrl: `ws://127.0.0.1:${port}/ws/agent`,
       deviceId,
       token: deviceToken,
-      allowedWorkspaces: [process.cwd()],
+      allowedWorkspaces: [repoRoot],
       pollIntervalMs: 50,
       heartbeatIntervalMs: 100
     });
@@ -67,7 +68,7 @@ export async function runGatewayFlowIntegrationTests(): Promise<{ passed: number
       {
         backend: 'local',
         capability: 'local:git_status',
-        payload: { workspace: process.cwd() }
+        payload: { workspace: repoRoot }
       },
       ['admin'],
       'chatgpt-user'

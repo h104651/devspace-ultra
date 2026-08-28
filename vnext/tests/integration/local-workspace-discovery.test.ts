@@ -25,7 +25,7 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
   const tmpBase = path.join(os.tmpdir(), `devspace-discovery-e2e-${Date.now()}`);
   fs.mkdirSync(tmpBase, { recursive: true });
 
-  // Create mock workspace hierarchy:
+  // 1. Create mock workspace hierarchy:
   // workspace-root (no .git at root)
   // ├── docs/
   // │   ├── PRD.md
@@ -100,18 +100,38 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
   fs.mkdirSync(outsideDir, { recursive: true });
   fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'TOP SECRET DATA OUTSIDE WORKSPACE', 'utf-8');
 
-  // Create symlinks/junctions for cycle defense and out-of-root testing
+  // Outside git repo
+  const outsideRepoDir = path.join(outsideDir, 'outside-repo');
+  fs.mkdirSync(path.join(outsideRepoDir, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(outsideRepoDir, '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf-8');
+  fs.writeFileSync(path.join(outsideRepoDir, 'package.json'), JSON.stringify({ name: 'outside-secret' }), 'utf-8');
+
+  // Symlinks/junctions for cycle defense and out-of-root testing
   let symlinksSupported = false;
   try {
     const linkType = process.platform === 'win32' ? 'junction' : 'dir';
     fs.symlinkSync(docsDir, path.join(workspaceRoot, 'docs-link'), linkType);
     fs.symlinkSync(workspaceRoot, path.join(workspaceRoot, 'cycle-link'), linkType);
     fs.symlinkSync(outsideDir, path.join(workspaceRoot, 'outside-link'), linkType);
+    fs.symlinkSync(outsideRepoDir, path.join(workspaceRoot, 'outside-repo-link'), linkType);
     symlinksSupported = true;
   } catch (err) {
-    // Some Windows environments without admin or Developer Mode might restrict symlinks
     symlinksSupported = false;
   }
+
+  // 2. Setup Parent Git boundary directory to test parent repo exclusion:
+  // parent-boundary/
+  // ├── .git/ (initialized Git repo at parent level)
+  // └── isolated-sub/ (registered workspace root with NO .git)
+  //     └── file.txt
+  const parentBoundaryDir = path.join(tmpBase, 'parent-boundary');
+  fs.mkdirSync(parentBoundaryDir, { recursive: true });
+  try {
+    cp.execSync('git init', { cwd: parentBoundaryDir, stdio: 'pipe' });
+  } catch {}
+  const isolatedSubDir = path.join(parentBoundaryDir, 'isolated-sub');
+  fs.mkdirSync(isolatedSubDir, { recursive: true });
+  fs.writeFileSync(path.join(isolatedSubDir, 'file.txt'), 'isolated file content', 'utf-8');
 
   try {
     const registry = new ProjectRegistry();
@@ -128,6 +148,13 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
           npm: { executable: process.execPath, args: ['-e', 'console.log("npm build passed in " + process.cwd())'] }
         }
       }
+    });
+
+    registry.registerProject({
+      projectId: 'isolated-sub-project',
+      displayName: 'Isolated Sub Project Inside Parent Git',
+      root: isolatedSubDir,
+      permissions: { read: true, write: true, test: true, build: true, hostExecution: true }
     });
 
     const executor = new TaskExecutor({ projectRegistry: registry });
@@ -149,9 +176,9 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 2: Nested Git Repository Discovery
+    // TEST 2: Nested Git Repository Discovery & Symlink / Junction defense
     // ----------------------------------------------------
-    await test('2. local:find_repositories discovers all nested git repositories and project types', async () => {
+    await test('2. local:find_repositories discovers nested repos and rejects outside-root links', async () => {
       const res = await executor.executeTask({
         id: 't-repos-1',
         capability: 'local:find_repositories',
@@ -165,6 +192,10 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       assert.ok(paths.includes('mobile'));
       assert.ok(paths.includes('ai/experiments'));
 
+      // Outside repo link must NOT be returned
+      assert.ok(!paths.includes('outside-repo-link'));
+      assert.ok(!paths.includes('outside-link/outside-repo'));
+
       const mobileRepo = res.repositories.find((r: any) => r.repoRelativePath === 'mobile');
       assert.ok(mobileRepo.projectIndicators.includes('pubspec.yaml'));
       assert.ok(mobileRepo.projectTypes.includes('flutter'));
@@ -176,9 +207,24 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 3: Git cleanliness semantics (clean vs dirty vs unknown)
+    // TEST 3: Parent Git Discovery Denial
     // ----------------------------------------------------
-    await test('3a. local:git_status on clean repo returns isClean=true and valid branch', async () => {
+    await test('3. local:git_status MUST NEVER detect parent directory repository outside registered root', async () => {
+      const res = await executor.executeTask({
+        id: 't-parent-git-boundary',
+        capability: 'local:git_status',
+        payload: { projectId: 'isolated-sub-project' }
+      } as any, () => {});
+
+      assert.strictEqual(res.projectId, 'isolated-sub-project');
+      assert.strictEqual(res.gitDetected, false, 'gitDetected must be false when workspace has no .git');
+      assert.strictEqual(res.message, 'No Git repository detected in workspace');
+    });
+
+    // ----------------------------------------------------
+    // TEST 4: Git cleanliness semantics (clean vs dirty vs unknown)
+    // ----------------------------------------------------
+    await test('4a. local:git_status on clean repo returns isClean=true and valid branch', async () => {
       const res = await executor.executeTask({
         id: 't-git-clean',
         capability: 'local:git_status',
@@ -192,7 +238,7 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       assert.strictEqual(res.gitStatusAvailable, true);
     });
 
-    await test('3b. local:git_status on dirty repo returns isClean=false with modified changes', async () => {
+    await test('4b. local:git_status on dirty repo returns isClean=false with modified changes', async () => {
       fs.writeFileSync(path.join(mobileDir, 'dirty.txt'), 'dirty file content', 'utf-8');
       try {
         const res = await executor.executeTask({
@@ -209,7 +255,7 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       }
     });
 
-    await test('3c. local:git_status on mock HEAD repo returns fallback branch with isClean=null and gitStatusAvailable=false', async () => {
+    await test('4c. local:git_status on mock HEAD repo returns fallback branch with isClean=null and gitStatusAvailable=false', async () => {
       const res = await executor.executeTask({
         id: 't-git-mock',
         capability: 'local:git_status',
@@ -219,15 +265,14 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       assert.strictEqual(res.projectId, 'astor-workspace');
       assert.strictEqual(res.repoRelativePath, 'ai/experiments');
       assert.strictEqual(res.branch, 'main');
-      // Cleanliness must NEVER be fabricated as true on git status failure
       assert.strictEqual(res.isClean, null);
       assert.strictEqual(res.gitStatusAvailable, false);
     });
 
     // ----------------------------------------------------
-    // TEST 4: local:git_status without repoRelativePath on multi-repo workspace reports candidates
+    // TEST 5: local:git_status without repoRelativePath on multi-repo workspace reports candidates
     // ----------------------------------------------------
-    await test('4. local:git_status without repoRelativePath reports ambiguity when multiple repos exist', async () => {
+    await test('5. local:git_status without repoRelativePath reports ambiguity when multiple repos exist', async () => {
       const res = await executor.executeTask({
         id: 't-git-2',
         capability: 'local:git_status',
@@ -242,9 +287,9 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 5: local:list_directory and out-of-root symlink metadata protection
+    // TEST 6: local:list_directory and out-of-root symlink metadata protection
     // ----------------------------------------------------
-    await test('5. local:list_directory lists root entries and avoids following out-of-root symlinks for metadata', async () => {
+    await test('6. local:list_directory lists root entries and avoids following out-of-root symlinks for metadata', async () => {
       const rootRes = await executor.executeTask({
         id: 't-list-1',
         capability: 'local:list_directory',
@@ -262,16 +307,15 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
         const outLink = rootRes.entries.find((e: any) => e.name === 'outside-link');
         assert.ok(outLink, 'outside-link entry should be present');
         assert.strictEqual(outLink.type, 'symlink');
-        // Must NOT follow external target to collect sizeBytes or modifiedTime
         assert.strictEqual(outLink.sizeBytes, undefined);
         assert.strictEqual(outLink.modifiedTime, undefined);
       }
     });
 
     // ----------------------------------------------------
-    // TEST 6: local:find_files with recursion and pattern matching
+    // TEST 7: local:find_files with recursion and pattern matching
     // ----------------------------------------------------
-    await test('6. local:find_files discovers files matching pattern recursively and ignores out-of-root targets', async () => {
+    await test('7. local:find_files discovers files matching pattern recursively and ignores out-of-root targets', async () => {
       const dartRes = await executor.executeTask({
         id: 't-find-1',
         capability: 'local:find_files',
@@ -292,9 +336,9 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 7: local:search_text with cycle defense, visited realpath, and maxDepth
+    // TEST 8: local:search_text with cycle defense, visited realpath, and maxDepth
     // ----------------------------------------------------
-    await test('7a. local:search_text handles self-cycle links gracefully without looping or stack overflow', async () => {
+    await test('8a. local:search_text handles self-cycle links gracefully without looping or stack overflow', async () => {
       const searchRes = await executor.executeTask({
         id: 't-search-cycle',
         capability: 'local:search_text',
@@ -307,7 +351,6 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       assert.ok(matchedFiles.includes('mobile/lib/main.dart'));
       assert.ok(!matchedFiles.includes('data/binary.png'));
 
-      // Outside secret file must never be read or matched
       const outsideSearch = await executor.executeTask({
         id: 't-search-out',
         capability: 'local:search_text',
@@ -317,8 +360,7 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       assert.strictEqual(outsideSearch.count, 0, 'Out-of-root contents must not be matched');
     });
 
-    await test('7b. local:search_text honors maxDepth parameter', async () => {
-      // depth 0: only files at root (which has none matching 'Training')
+    await test('8b. local:search_text honors maxDepth parameter', async () => {
       const depth0Res = await executor.executeTask({
         id: 't-search-d0',
         capability: 'local:search_text',
@@ -326,7 +368,6 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       } as any, () => {});
       assert.strictEqual(depth0Res.count, 0);
 
-      // depth 2: reaches ai/experiments/train.py
       const depth2Res = await executor.executeTask({
         id: 't-search-d2',
         capability: 'local:search_text',
@@ -337,9 +378,9 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 8: local:create_directory & nested file operations
+    // TEST 9: local:create_directory & nested file operations
     // ----------------------------------------------------
-    await test('8. local:create_directory creates nested directories and local:write_file creates nested files', async () => {
+    await test('9. local:create_directory creates nested directories and local:write_file creates nested files', async () => {
       const createRes = await executor.executeTask({
         id: 't-mkdir-1',
         capability: 'local:create_directory',
@@ -364,9 +405,9 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 9: Subproject Test & Build with workingRelativePath
+    // TEST 10: Subproject Test & Build with workingRelativePath
     // ----------------------------------------------------
-    await test('9. local:run_tests and local:build_project execute in subproject directory using workingRelativePath', async () => {
+    await test('10. local:run_tests and local:build_project execute in subproject directory using workingRelativePath', async () => {
       let testLogs: string[] = [];
       const testRes = await executor.executeTask({
         id: 't-run-1',
@@ -389,9 +430,9 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 10: Security Boundary & Path Confinement
+    // TEST 11: Security Boundary & Path Confinement
     // ----------------------------------------------------
-    await test('10. Path traversal and escape attempts are strictly rejected on all discovery tools', async () => {
+    await test('11. Path traversal and escape attempts are strictly rejected on all discovery tools', async () => {
       await assert.rejects(async () => {
         await executor.executeTask({
           id: 't-sec-1',
@@ -434,9 +475,9 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
     });
 
     // ----------------------------------------------------
-    // TEST 11: End-to-End MCP Handlers Integration
+    // TEST 12: End-to-End MCP Handlers Integration
     // ----------------------------------------------------
-    await test('11. MCP Handlers correctly expose all new workspace discovery tools and validate scopes', async () => {
+    await test('12. MCP Handlers correctly expose all new workspace discovery tools and validate scopes', async () => {
       const testStorageDir = path.join(tmpBase, '.devspace-storage-discovery');
       const gateway = new GatewayServer({
         port: 0,
