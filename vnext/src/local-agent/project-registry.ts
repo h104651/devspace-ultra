@@ -69,21 +69,41 @@ export class ProjectPathSecurity {
       throw err;
     }
 
+    // Check for backslashes or slashes mixed traversal
+    const slashUnified = relativePath.replace(/\\/g, '/');
+
     // Reject absolute paths, drive letters (e.g. C:, D:), UNC (\\ or //), or leading slash
     if (
       path.isAbsolute(relativePath) ||
       /^[a-zA-Z]:/.test(relativePath) ||
       /^(\\|\/){2}/.test(relativePath) ||
       relativePath.startsWith('/') ||
-      relativePath.startsWith('\\')
+      relativePath.startsWith('\\') ||
+      slashUnified.startsWith('/')
     ) {
       const err: any = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Absolute, drive-qualified, or UNC path is forbidden: '${relativePath}'`);
       err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
       throw err;
     }
 
-    // Normalize path separators
-    const normalized = path.normalize(relativePath);
+    // Reject traversal segments in unified slashes
+    const segments = slashUnified.split('/');
+    let depth = 0;
+    for (const seg of segments) {
+      if (seg === '..') {
+        depth--;
+        if (depth < 0) {
+          const err: any = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Path traversal escaping project root is forbidden: '${relativePath}'`);
+          err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
+          throw err;
+        }
+      } else if (seg !== '' && seg !== '.') {
+        depth++;
+      }
+    }
+
+    // Normalize path separators for local platform
+    const normalized = path.normalize(process.platform === 'win32' ? relativePath : slashUnified);
 
     // Reject traversal escaping root
     if (
