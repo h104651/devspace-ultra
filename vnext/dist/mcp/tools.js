@@ -458,6 +458,7 @@ exports.LOCAL_SEARCH_TEXT_SCHEMA = {
         pattern: { type: 'string', description: 'Optional filename filter pattern (e.g. *.dart, *.ts)' },
         caseSensitive: { type: 'boolean', description: 'Case sensitive matching', default: false },
         recursive: { type: 'boolean', description: 'Whether to search recursively', default: true },
+        maxDepth: { type: 'number', description: 'Optional maximum subdirectory search depth (default 15)', default: 15 },
         maxResults: { type: 'number', description: 'Maximum matching lines to return (default 100, max 500)', default: 100 },
         clientRequestId: { type: 'string' }
     },

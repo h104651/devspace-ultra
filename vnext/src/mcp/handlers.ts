@@ -1791,6 +1791,7 @@ export class McpHandlers {
           pattern: args.pattern,
           caseSensitive: args.caseSensitive,
           recursive: args.recursive !== false,
+          maxDepth: args.maxDepth,
           maxResults: args.maxResults
         },
         clientRequestId: args?.clientRequestId

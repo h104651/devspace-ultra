@@ -445,11 +445,22 @@ export class TaskExecutor {
           let sizeBytes: number | undefined;
           let modifiedTime: string | undefined;
 
-          try {
-            const stat = fs.statSync(entryPath);
-            sizeBytes = stat.size;
-            modifiedTime = stat.mtime.toISOString();
-          } catch {}
+          if (dirent.isSymbolicLink()) {
+            try {
+              const real = fs.realpathSync(entryPath);
+              if (ProjectPathSecurity.isPathInsideRoot(real, project.canonicalRoot)) {
+                const stat = fs.statSync(real);
+                sizeBytes = stat.size;
+                modifiedTime = stat.mtime.toISOString();
+              }
+            } catch {}
+          } else {
+            try {
+              const stat = fs.statSync(entryPath);
+              sizeBytes = stat.size;
+              modifiedTime = stat.mtime.toISOString();
+            } catch {}
+          }
 
           entries.push({
             name: dirent.name,
@@ -505,7 +516,8 @@ export class TaskExecutor {
           modifiedTime?: string;
         }> = [];
 
-        await this.collectFiles(project.canonicalRoot, startDir, 0, maxDepth, pattern, recursive, typeFilter, maxResults, results);
+        const visitedRealPaths = new Set<string>();
+        await this.collectFiles(project.canonicalRoot, startDir, 0, maxDepth, pattern, recursive, typeFilter, maxResults, visitedRealPaths, results);
 
         return {
           projectId: project.projectId,
@@ -536,6 +548,7 @@ export class TaskExecutor {
         const effectiveRel = path.relative(project.canonicalRoot, startDir).replace(/\\/g, '/') || '.';
 
         const maxResults = Math.min(Math.max(1, task.payload.maxResults || 100), 500);
+        const maxDepth = task.payload.maxDepth !== undefined ? Math.max(0, task.payload.maxDepth) : 15;
         const pattern = task.payload.pattern;
         const caseSensitive = !!task.payload.caseSensitive;
         const recursive = task.payload.recursive !== false;
@@ -546,7 +559,8 @@ export class TaskExecutor {
           lineContent: string;
         }> = [];
 
-        await this.collectTextMatches(project.canonicalRoot, startDir, query, pattern, caseSensitive, recursive, maxResults, matches);
+        const visitedRealPaths = new Set<string>();
+        await this.collectTextMatches(project.canonicalRoot, startDir, 0, maxDepth, query, pattern, caseSensitive, recursive, maxResults, visitedRealPaths, matches);
 
         return {
           projectId: project.projectId,
@@ -866,94 +880,113 @@ export class TaskExecutor {
     });
   }
 
-  private runGitStatus(repoPath: string): Promise<any> {
+  private runGitStatus(repoPath: string): Promise<{
+    branch: string | null;
+    headCommit: string | null;
+    isClean: boolean | null;
+    changes: string[];
+    gitStatusAvailable: boolean;
+  }> {
     return new Promise((resolve, reject) => {
       const isWindows = process.platform === 'win32';
       const gitExe = isWindows ? 'git.exe' : 'git';
       const headPath = path.join(repoPath, '.git', 'HEAD');
 
-      const child = spawn(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
+      let fallbackBranch: string | null = null;
+      if (fs.existsSync(headPath)) {
+        try {
+          const headContent = fs.readFileSync(headPath, 'utf-8').trim();
+          if (headContent.startsWith('ref: refs/heads/')) {
+            fallbackBranch = headContent.replace('ref: refs/heads/', '');
+          } else if (headContent) {
+            fallbackBranch = headContent;
+          }
+        } catch {}
+      }
+
+      let child: any;
+      try {
+        child = spawn(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
+      } catch (err: any) {
+        if (fallbackBranch) {
+          return resolve({
+            branch: fallbackBranch,
+            headCommit: null,
+            isClean: null,
+            changes: [],
+            gitStatusAvailable: false
+          });
+        }
+        return reject(new Error(`Failed to execute git: ${err.message}`));
+      }
+
       let statusOut = '';
-      child.stdout?.on('data', d => { statusOut += d.toString(); });
-      child.on('close', code => {
+      child.stdout?.on('data', (d: any) => { statusOut += d.toString(); });
+      child.on('close', (code: number) => {
         if (code !== 0) {
-          if (fs.existsSync(headPath)) {
-            try {
-              const headContent = fs.readFileSync(headPath, 'utf-8').trim();
-              const branch = headContent.startsWith('ref: refs/heads/')
-                ? headContent.replace('ref: refs/heads/', '')
-                : (headContent || 'main');
-              return resolve({
-                branch,
-                headCommit: '',
-                isClean: true,
-                changes: []
-              });
-            } catch {}
+          if (fallbackBranch) {
+            return resolve({
+              branch: fallbackBranch,
+              headCommit: null,
+              isClean: null,
+              changes: [],
+              gitStatusAvailable: false
+            });
           }
           return reject(new Error(`git status failed with exit code ${code}`));
         }
 
+        const isClean = statusOut.trim().length === 0;
+
         const branchChild = spawn(gitExe, ['branch', '--show-current'], { cwd: repoPath, shell: false });
         let branchOut = '';
-        branchChild.stdout?.on('data', d => { branchOut += d.toString(); });
+        branchChild.stdout?.on('data', (d: any) => { branchOut += d.toString(); });
         branchChild.on('close', () => {
-          let branch = (branchOut || '').trim();
-          if (!branch && fs.existsSync(headPath)) {
-            try {
-              const headContent = fs.readFileSync(headPath, 'utf-8').trim();
-              if (headContent.startsWith('ref: refs/heads/')) {
-                branch = headContent.replace('ref: refs/heads/', '');
-              }
-            } catch {}
-          }
+          let branch = (branchOut || '').trim() || fallbackBranch || null;
 
           const commitChild = spawn(gitExe, ['rev-parse', 'HEAD'], { cwd: repoPath, shell: false });
           let commitOut = '';
-          commitChild.stdout?.on('data', d => { commitOut += d.toString(); });
-          commitChild.on('close', () => {
-            const headCommit = (commitOut || '').trim();
-            const isClean = statusOut.trim().length === 0;
+          commitChild.stdout?.on('data', (d: any) => { commitOut += d.toString(); });
+          commitChild.on('close', (commitCode: number) => {
+            const headCommit = commitCode === 0 ? (commitOut || '').trim() || null : null;
 
             resolve({
-              branch: branch || 'main',
+              branch,
               headCommit,
               isClean,
-              changes: statusOut.trim().split('\n').filter(Boolean)
+              changes: statusOut.trim().split('\n').filter(Boolean),
+              gitStatusAvailable: true
             });
           });
           commitChild.on('error', () => {
             resolve({
-              branch: branch || 'main',
-              headCommit: '',
-              isClean: true,
-              changes: statusOut.trim().split('\n').filter(Boolean)
+              branch,
+              headCommit: null,
+              isClean,
+              changes: statusOut.trim().split('\n').filter(Boolean),
+              gitStatusAvailable: true
             });
           });
         });
         branchChild.on('error', () => {
           resolve({
-            branch: 'main',
-            headCommit: '',
-            isClean: true,
-            changes: statusOut.trim().split('\n').filter(Boolean)
+            branch: fallbackBranch,
+            headCommit: null,
+            isClean,
+            changes: statusOut.trim().split('\n').filter(Boolean),
+            gitStatusAvailable: true
           });
         });
       });
       child.on('error', () => {
-        if (fs.existsSync(headPath)) {
-          try {
-            const headContent = fs.readFileSync(headPath, 'utf-8').trim();
-            const branch = headContent.startsWith('ref: refs/heads/')
-              ? headContent.replace('ref: refs/heads/', '')
-              : (headContent || 'main');
-            return resolve({
-              branch,
-              headCommit: '',
-              isClean: true,
-              changes: []
-            });
-          } catch {}
+        if (fallbackBranch) {
+          return resolve({
+            branch: fallbackBranch,
+            headCommit: null,
+            isClean: null,
+            changes: [],
+            gitStatusAvailable: false
+          });
         }
         reject(new Error('git execution failed'));
       });
@@ -986,57 +1019,58 @@ export class TaskExecutor {
       try {
         const branchChild = spawn(gitExe, ['branch', '--show-current'], { cwd: repoPath, shell: false });
         let branchOut = '';
-        branchChild.stdout?.on('data', d => { branchOut += d.toString(); });
+        branchChild.stdout?.on('data', (d: any) => { branchOut += d.toString(); });
         branchChild.on('close', () => {
           const commitChild = spawn(gitExe, ['rev-parse', 'HEAD'], { cwd: repoPath, shell: false });
           let commitOut = '';
-          commitChild.stdout?.on('data', d => { commitOut += d.toString(); });
-          commitChild.on('close', () => {
+          commitChild.stdout?.on('data', (d: any) => { commitOut += d.toString(); });
+          commitChild.on('close', (commitCode: number) => {
             const remoteChild = spawn(gitExe, ['config', '--get', 'remote.origin.url'], { cwd: repoPath, shell: false });
             let remoteOut = '';
-            remoteChild.stdout?.on('data', d => { remoteOut += d.toString(); });
-            remoteChild.on('close', () => {
+            remoteChild.stdout?.on('data', (d: any) => { remoteOut += d.toString(); });
+            remoteChild.on('close', (remoteCode: number) => {
               const statusChild = spawn(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
               let statusOut = '';
-              statusChild.stdout?.on('data', d => { statusOut += d.toString(); });
-              statusChild.on('close', (statusCode) => {
-                const branch = (branchOut || '').trim() || fallbackBranch || 'main';
+              statusChild.stdout?.on('data', (d: any) => { statusOut += d.toString(); });
+              statusChild.on('close', (statusCode: number) => {
+                const branch = (branchOut || '').trim() || fallbackBranch || null;
+                const isClean = statusCode === 0 ? (statusOut.trim().length === 0) : null;
                 resolve({
                   branch,
-                  headCommit: (commitOut || '').trim() || null,
-                  remoteUrl: (remoteOut || '').trim() || null,
-                  isClean: statusCode === 0 ? statusOut.trim().length === 0 : true
+                  headCommit: commitCode === 0 ? (commitOut || '').trim() || null : null,
+                  remoteUrl: remoteCode === 0 ? (remoteOut || '').trim() || null : null,
+                  isClean
                 });
               });
               statusChild.on('error', () => resolve({
-                branch: (branchOut || '').trim() || fallbackBranch || 'main',
-                headCommit: (commitOut || '').trim() || null,
-                remoteUrl: (remoteOut || '').trim() || null,
-                isClean: true
+                branch: (branchOut || '').trim() || fallbackBranch || null,
+                headCommit: commitCode === 0 ? (commitOut || '').trim() || null : null,
+                remoteUrl: remoteCode === 0 ? (remoteOut || '').trim() || null : null,
+                isClean: null
               }));
             });
             remoteChild.on('error', () => resolve({
-              branch: (branchOut || '').trim() || fallbackBranch || 'main',
-              headCommit: (commitOut || '').trim() || null,
+              branch: (branchOut || '').trim() || fallbackBranch || null,
+              headCommit: commitCode === 0 ? (commitOut || '').trim() || null : null,
               remoteUrl: null,
-              isClean: true
+              isClean: null
             }));
           });
           commitChild.on('error', () => resolve({
-            branch: (branchOut || '').trim() || fallbackBranch || 'main',
+            branch: (branchOut || '').trim() || fallbackBranch || null,
             headCommit: null,
             remoteUrl: null,
-            isClean: true
+            isClean: null
           }));
         });
         branchChild.on('error', () => resolve({
-          branch: fallbackBranch || 'main',
+          branch: fallbackBranch,
           headCommit: null,
           remoteUrl: null,
-          isClean: true
+          isClean: null
         }));
       } catch {
-        resolve({ branch: fallbackBranch || 'main', headCommit: null, remoteUrl: null, isClean: true });
+        resolve({ branch: fallbackBranch, headCommit: null, remoteUrl: null, isClean: null });
       }
     });
   }
@@ -1065,18 +1099,24 @@ export class TaskExecutor {
       projectTypes: string[];
     }> = [];
 
+    const visitedRealPaths = new Set<string>();
     const queue: Array<{ dir: string; depth: number }> = [{ dir: startDir, depth: 0 }];
 
     while (queue.length > 0) {
       const { dir, depth } = queue.shift()!;
       if (depth > maxDepth) continue;
 
+      let realDir: string;
       try {
-        const real = fs.realpathSync(dir);
-        if (!ProjectPathSecurity.isPathInsideRoot(real, canonicalRoot)) continue;
+        realDir = fs.realpathSync(dir);
+        if (!ProjectPathSecurity.isPathInsideRoot(realDir, canonicalRoot)) continue;
       } catch {
         continue;
       }
+
+      const normKey = process.platform === 'win32' ? realDir.toLowerCase() : realDir;
+      if (visitedRealPaths.has(normKey)) continue;
+      visitedRealPaths.add(normKey);
 
       const hasGit = fs.existsSync(path.join(dir, '.git'));
       if (hasGit) {
@@ -1165,6 +1205,7 @@ export class TaskExecutor {
     recursive: boolean,
     typeFilter: string,
     maxResults: number,
+    visitedRealPaths: Set<string>,
     results: Array<{
       relativePath: string;
       name: string;
@@ -1175,6 +1216,23 @@ export class TaskExecutor {
   ): Promise<void> {
     if (results.length >= maxResults) return;
     if (currentDepth > maxDepth) return;
+
+    let realCurrentDir: string;
+    try {
+      realCurrentDir = fs.realpathSync(currentDir);
+    } catch {
+      return;
+    }
+
+    if (!ProjectPathSecurity.isPathInsideRoot(realCurrentDir, canonicalRoot)) {
+      return;
+    }
+
+    const normKey = process.platform === 'win32' ? realCurrentDir.toLowerCase() : realCurrentDir;
+    if (visitedRealPaths.has(normKey)) {
+      return;
+    }
+    visitedRealPaths.add(normKey);
 
     let dirents: fs.Dirent[];
     try {
@@ -1239,6 +1297,7 @@ export class TaskExecutor {
           recursive,
           typeFilter,
           maxResults,
+          visitedRealPaths,
           results
         );
       }
@@ -1248,11 +1307,14 @@ export class TaskExecutor {
   private async collectTextMatches(
     canonicalRoot: string,
     currentDir: string,
+    currentDepth: number,
+    maxDepth: number,
     query: string,
     pattern: string | undefined,
     caseSensitive: boolean,
     recursive: boolean,
     maxResults: number,
+    visitedRealPaths: Set<string>,
     matches: Array<{
       relativePath: string;
       lineNumber: number;
@@ -1260,6 +1322,24 @@ export class TaskExecutor {
     }>
   ): Promise<void> {
     if (matches.length >= maxResults) return;
+    if (currentDepth > maxDepth) return;
+
+    let realCurrentDir: string;
+    try {
+      realCurrentDir = fs.realpathSync(currentDir);
+    } catch {
+      return;
+    }
+
+    if (!ProjectPathSecurity.isPathInsideRoot(realCurrentDir, canonicalRoot)) {
+      return;
+    }
+
+    const normKey = process.platform === 'win32' ? realCurrentDir.toLowerCase() : realCurrentDir;
+    if (visitedRealPaths.has(normKey)) {
+      return;
+    }
+    visitedRealPaths.add(normKey);
 
     let dirents: fs.Dirent[];
     try {
@@ -1307,10 +1387,10 @@ export class TaskExecutor {
 
         try {
           const stat = fs.statSync(fullPath);
-          if (stat.size > 5 * 1024 * 1024) continue; // Skip files > 5MB
+          if (stat.size > 5 * 1024 * 1024) continue;
 
           const content = fs.readFileSync(fullPath, 'utf-8');
-          if (content.includes('\0')) continue; // Skip binary files
+          if (content.includes('\0')) continue;
 
           const lines = content.split('\n');
           for (let i = 0; i < lines.length; i++) {
@@ -1329,15 +1409,18 @@ export class TaskExecutor {
             }
           }
         } catch {}
-      } else if (isDirectory && recursive) {
+      } else if (isDirectory && recursive && currentDepth < maxDepth) {
         await this.collectTextMatches(
           canonicalRoot,
           fullPath,
+          currentDepth + 1,
+          maxDepth,
           query,
           pattern,
           caseSensitive,
           recursive,
           maxResults,
+          visitedRealPaths,
           matches
         );
       }

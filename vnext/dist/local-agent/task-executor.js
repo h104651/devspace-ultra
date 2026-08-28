@@ -405,12 +405,25 @@ class TaskExecutor {
                         type = 'symlink';
                     let sizeBytes;
                     let modifiedTime;
-                    try {
-                        const stat = fs.statSync(entryPath);
-                        sizeBytes = stat.size;
-                        modifiedTime = stat.mtime.toISOString();
+                    if (dirent.isSymbolicLink()) {
+                        try {
+                            const real = fs.realpathSync(entryPath);
+                            if (project_registry_1.ProjectPathSecurity.isPathInsideRoot(real, project.canonicalRoot)) {
+                                const stat = fs.statSync(real);
+                                sizeBytes = stat.size;
+                                modifiedTime = stat.mtime.toISOString();
+                            }
+                        }
+                        catch { }
                     }
-                    catch { }
+                    else {
+                        try {
+                            const stat = fs.statSync(entryPath);
+                            sizeBytes = stat.size;
+                            modifiedTime = stat.mtime.toISOString();
+                        }
+                        catch { }
+                    }
                     entries.push({
                         name: dirent.name,
                         type,
@@ -453,7 +466,8 @@ class TaskExecutor {
                 const recursive = task.payload.recursive !== false;
                 const typeFilter = task.payload.type || 'all';
                 const results = [];
-                await this.collectFiles(project.canonicalRoot, startDir, 0, maxDepth, pattern, recursive, typeFilter, maxResults, results);
+                const visitedRealPaths = new Set();
+                await this.collectFiles(project.canonicalRoot, startDir, 0, maxDepth, pattern, recursive, typeFilter, maxResults, visitedRealPaths, results);
                 return {
                     projectId: project.projectId,
                     baseRelativePath: effectiveRel,
@@ -479,11 +493,13 @@ class TaskExecutor {
                 const startDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requestedRel);
                 const effectiveRel = path.relative(project.canonicalRoot, startDir).replace(/\\/g, '/') || '.';
                 const maxResults = Math.min(Math.max(1, task.payload.maxResults || 100), 500);
+                const maxDepth = task.payload.maxDepth !== undefined ? Math.max(0, task.payload.maxDepth) : 15;
                 const pattern = task.payload.pattern;
                 const caseSensitive = !!task.payload.caseSensitive;
                 const recursive = task.payload.recursive !== false;
                 const matches = [];
-                await this.collectTextMatches(project.canonicalRoot, startDir, query, pattern, caseSensitive, recursive, maxResults, matches);
+                const visitedRealPaths = new Set();
+                await this.collectTextMatches(project.canonicalRoot, startDir, 0, maxDepth, query, pattern, caseSensitive, recursive, maxResults, visitedRealPaths, matches);
                 return {
                     projectId: project.projectId,
                     baseRelativePath: effectiveRel,
@@ -757,88 +773,98 @@ class TaskExecutor {
             const isWindows = process.platform === 'win32';
             const gitExe = isWindows ? 'git.exe' : 'git';
             const headPath = path.join(repoPath, '.git', 'HEAD');
-            const child = (0, child_process_1.spawn)(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
+            let fallbackBranch = null;
+            if (fs.existsSync(headPath)) {
+                try {
+                    const headContent = fs.readFileSync(headPath, 'utf-8').trim();
+                    if (headContent.startsWith('ref: refs/heads/')) {
+                        fallbackBranch = headContent.replace('ref: refs/heads/', '');
+                    }
+                    else if (headContent) {
+                        fallbackBranch = headContent;
+                    }
+                }
+                catch { }
+            }
+            let child;
+            try {
+                child = (0, child_process_1.spawn)(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
+            }
+            catch (err) {
+                if (fallbackBranch) {
+                    return resolve({
+                        branch: fallbackBranch,
+                        headCommit: null,
+                        isClean: null,
+                        changes: [],
+                        gitStatusAvailable: false
+                    });
+                }
+                return reject(new Error(`Failed to execute git: ${err.message}`));
+            }
             let statusOut = '';
-            child.stdout?.on('data', d => { statusOut += d.toString(); });
-            child.on('close', code => {
+            child.stdout?.on('data', (d) => { statusOut += d.toString(); });
+            child.on('close', (code) => {
                 if (code !== 0) {
-                    if (fs.existsSync(headPath)) {
-                        try {
-                            const headContent = fs.readFileSync(headPath, 'utf-8').trim();
-                            const branch = headContent.startsWith('ref: refs/heads/')
-                                ? headContent.replace('ref: refs/heads/', '')
-                                : (headContent || 'main');
-                            return resolve({
-                                branch,
-                                headCommit: '',
-                                isClean: true,
-                                changes: []
-                            });
-                        }
-                        catch { }
+                    if (fallbackBranch) {
+                        return resolve({
+                            branch: fallbackBranch,
+                            headCommit: null,
+                            isClean: null,
+                            changes: [],
+                            gitStatusAvailable: false
+                        });
                     }
                     return reject(new Error(`git status failed with exit code ${code}`));
                 }
+                const isClean = statusOut.trim().length === 0;
                 const branchChild = (0, child_process_1.spawn)(gitExe, ['branch', '--show-current'], { cwd: repoPath, shell: false });
                 let branchOut = '';
-                branchChild.stdout?.on('data', d => { branchOut += d.toString(); });
+                branchChild.stdout?.on('data', (d) => { branchOut += d.toString(); });
                 branchChild.on('close', () => {
-                    let branch = (branchOut || '').trim();
-                    if (!branch && fs.existsSync(headPath)) {
-                        try {
-                            const headContent = fs.readFileSync(headPath, 'utf-8').trim();
-                            if (headContent.startsWith('ref: refs/heads/')) {
-                                branch = headContent.replace('ref: refs/heads/', '');
-                            }
-                        }
-                        catch { }
-                    }
+                    let branch = (branchOut || '').trim() || fallbackBranch || null;
                     const commitChild = (0, child_process_1.spawn)(gitExe, ['rev-parse', 'HEAD'], { cwd: repoPath, shell: false });
                     let commitOut = '';
-                    commitChild.stdout?.on('data', d => { commitOut += d.toString(); });
-                    commitChild.on('close', () => {
-                        const headCommit = (commitOut || '').trim();
-                        const isClean = statusOut.trim().length === 0;
+                    commitChild.stdout?.on('data', (d) => { commitOut += d.toString(); });
+                    commitChild.on('close', (commitCode) => {
+                        const headCommit = commitCode === 0 ? (commitOut || '').trim() || null : null;
                         resolve({
-                            branch: branch || 'main',
+                            branch,
                             headCommit,
                             isClean,
-                            changes: statusOut.trim().split('\n').filter(Boolean)
+                            changes: statusOut.trim().split('\n').filter(Boolean),
+                            gitStatusAvailable: true
                         });
                     });
                     commitChild.on('error', () => {
                         resolve({
-                            branch: branch || 'main',
-                            headCommit: '',
-                            isClean: true,
-                            changes: statusOut.trim().split('\n').filter(Boolean)
+                            branch,
+                            headCommit: null,
+                            isClean,
+                            changes: statusOut.trim().split('\n').filter(Boolean),
+                            gitStatusAvailable: true
                         });
                     });
                 });
                 branchChild.on('error', () => {
                     resolve({
-                        branch: 'main',
-                        headCommit: '',
-                        isClean: true,
-                        changes: statusOut.trim().split('\n').filter(Boolean)
+                        branch: fallbackBranch,
+                        headCommit: null,
+                        isClean,
+                        changes: statusOut.trim().split('\n').filter(Boolean),
+                        gitStatusAvailable: true
                     });
                 });
             });
             child.on('error', () => {
-                if (fs.existsSync(headPath)) {
-                    try {
-                        const headContent = fs.readFileSync(headPath, 'utf-8').trim();
-                        const branch = headContent.startsWith('ref: refs/heads/')
-                            ? headContent.replace('ref: refs/heads/', '')
-                            : (headContent || 'main');
-                        return resolve({
-                            branch,
-                            headCommit: '',
-                            isClean: true,
-                            changes: []
-                        });
-                    }
-                    catch { }
+                if (fallbackBranch) {
+                    return resolve({
+                        branch: fallbackBranch,
+                        headCommit: null,
+                        isClean: null,
+                        changes: [],
+                        gitStatusAvailable: false
+                    });
                 }
                 reject(new Error('git execution failed'));
             });
@@ -865,77 +891,84 @@ class TaskExecutor {
             try {
                 const branchChild = (0, child_process_1.spawn)(gitExe, ['branch', '--show-current'], { cwd: repoPath, shell: false });
                 let branchOut = '';
-                branchChild.stdout?.on('data', d => { branchOut += d.toString(); });
+                branchChild.stdout?.on('data', (d) => { branchOut += d.toString(); });
                 branchChild.on('close', () => {
                     const commitChild = (0, child_process_1.spawn)(gitExe, ['rev-parse', 'HEAD'], { cwd: repoPath, shell: false });
                     let commitOut = '';
-                    commitChild.stdout?.on('data', d => { commitOut += d.toString(); });
-                    commitChild.on('close', () => {
+                    commitChild.stdout?.on('data', (d) => { commitOut += d.toString(); });
+                    commitChild.on('close', (commitCode) => {
                         const remoteChild = (0, child_process_1.spawn)(gitExe, ['config', '--get', 'remote.origin.url'], { cwd: repoPath, shell: false });
                         let remoteOut = '';
-                        remoteChild.stdout?.on('data', d => { remoteOut += d.toString(); });
-                        remoteChild.on('close', () => {
+                        remoteChild.stdout?.on('data', (d) => { remoteOut += d.toString(); });
+                        remoteChild.on('close', (remoteCode) => {
                             const statusChild = (0, child_process_1.spawn)(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
                             let statusOut = '';
-                            statusChild.stdout?.on('data', d => { statusOut += d.toString(); });
+                            statusChild.stdout?.on('data', (d) => { statusOut += d.toString(); });
                             statusChild.on('close', (statusCode) => {
-                                const branch = (branchOut || '').trim() || fallbackBranch || 'main';
+                                const branch = (branchOut || '').trim() || fallbackBranch || null;
+                                const isClean = statusCode === 0 ? (statusOut.trim().length === 0) : null;
                                 resolve({
                                     branch,
-                                    headCommit: (commitOut || '').trim() || null,
-                                    remoteUrl: (remoteOut || '').trim() || null,
-                                    isClean: statusCode === 0 ? statusOut.trim().length === 0 : true
+                                    headCommit: commitCode === 0 ? (commitOut || '').trim() || null : null,
+                                    remoteUrl: remoteCode === 0 ? (remoteOut || '').trim() || null : null,
+                                    isClean
                                 });
                             });
                             statusChild.on('error', () => resolve({
-                                branch: (branchOut || '').trim() || fallbackBranch || 'main',
-                                headCommit: (commitOut || '').trim() || null,
-                                remoteUrl: (remoteOut || '').trim() || null,
-                                isClean: true
+                                branch: (branchOut || '').trim() || fallbackBranch || null,
+                                headCommit: commitCode === 0 ? (commitOut || '').trim() || null : null,
+                                remoteUrl: remoteCode === 0 ? (remoteOut || '').trim() || null : null,
+                                isClean: null
                             }));
                         });
                         remoteChild.on('error', () => resolve({
-                            branch: (branchOut || '').trim() || fallbackBranch || 'main',
-                            headCommit: (commitOut || '').trim() || null,
+                            branch: (branchOut || '').trim() || fallbackBranch || null,
+                            headCommit: commitCode === 0 ? (commitOut || '').trim() || null : null,
                             remoteUrl: null,
-                            isClean: true
+                            isClean: null
                         }));
                     });
                     commitChild.on('error', () => resolve({
-                        branch: (branchOut || '').trim() || fallbackBranch || 'main',
+                        branch: (branchOut || '').trim() || fallbackBranch || null,
                         headCommit: null,
                         remoteUrl: null,
-                        isClean: true
+                        isClean: null
                     }));
                 });
                 branchChild.on('error', () => resolve({
-                    branch: fallbackBranch || 'main',
+                    branch: fallbackBranch,
                     headCommit: null,
                     remoteUrl: null,
-                    isClean: true
+                    isClean: null
                 }));
             }
             catch {
-                resolve({ branch: fallbackBranch || 'main', headCommit: null, remoteUrl: null, isClean: true });
+                resolve({ branch: fallbackBranch, headCommit: null, remoteUrl: null, isClean: null });
             }
         });
     }
     async discoverRepositories(canonicalRoot, subRelPath = '.', maxDepth = 10) {
         const startDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(canonicalRoot, subRelPath);
         const discovered = [];
+        const visitedRealPaths = new Set();
         const queue = [{ dir: startDir, depth: 0 }];
         while (queue.length > 0) {
             const { dir, depth } = queue.shift();
             if (depth > maxDepth)
                 continue;
+            let realDir;
             try {
-                const real = fs.realpathSync(dir);
-                if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(real, canonicalRoot))
+                realDir = fs.realpathSync(dir);
+                if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(realDir, canonicalRoot))
                     continue;
             }
             catch {
                 continue;
             }
+            const normKey = process.platform === 'win32' ? realDir.toLowerCase() : realDir;
+            if (visitedRealPaths.has(normKey))
+                continue;
+            visitedRealPaths.add(normKey);
             const hasGit = fs.existsSync(path.join(dir, '.git'));
             if (hasGit) {
                 const repoRel = path.relative(canonicalRoot, dir).replace(/\\/g, '/') || '.';
@@ -1015,11 +1048,26 @@ class TaskExecutor {
         }
         return discovered;
     }
-    async collectFiles(canonicalRoot, currentDir, currentDepth, maxDepth, pattern, recursive, typeFilter, maxResults, results) {
+    async collectFiles(canonicalRoot, currentDir, currentDepth, maxDepth, pattern, recursive, typeFilter, maxResults, visitedRealPaths, results) {
         if (results.length >= maxResults)
             return;
         if (currentDepth > maxDepth)
             return;
+        let realCurrentDir;
+        try {
+            realCurrentDir = fs.realpathSync(currentDir);
+        }
+        catch {
+            return;
+        }
+        if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(realCurrentDir, canonicalRoot)) {
+            return;
+        }
+        const normKey = process.platform === 'win32' ? realCurrentDir.toLowerCase() : realCurrentDir;
+        if (visitedRealPaths.has(normKey)) {
+            return;
+        }
+        visitedRealPaths.add(normKey);
         let dirents;
         try {
             dirents = fs.readdirSync(currentDir, { withFileTypes: true });
@@ -1071,13 +1119,30 @@ class TaskExecutor {
                 });
             }
             if (isDirectory && recursive && currentDepth < maxDepth) {
-                await this.collectFiles(canonicalRoot, fullPath, currentDepth + 1, maxDepth, pattern, recursive, typeFilter, maxResults, results);
+                await this.collectFiles(canonicalRoot, fullPath, currentDepth + 1, maxDepth, pattern, recursive, typeFilter, maxResults, visitedRealPaths, results);
             }
         }
     }
-    async collectTextMatches(canonicalRoot, currentDir, query, pattern, caseSensitive, recursive, maxResults, matches) {
+    async collectTextMatches(canonicalRoot, currentDir, currentDepth, maxDepth, query, pattern, caseSensitive, recursive, maxResults, visitedRealPaths, matches) {
         if (matches.length >= maxResults)
             return;
+        if (currentDepth > maxDepth)
+            return;
+        let realCurrentDir;
+        try {
+            realCurrentDir = fs.realpathSync(currentDir);
+        }
+        catch {
+            return;
+        }
+        if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(realCurrentDir, canonicalRoot)) {
+            return;
+        }
+        const normKey = process.platform === 'win32' ? realCurrentDir.toLowerCase() : realCurrentDir;
+        if (visitedRealPaths.has(normKey)) {
+            return;
+        }
+        visitedRealPaths.add(normKey);
         let dirents;
         try {
             dirents = fs.readdirSync(currentDir, { withFileTypes: true });
@@ -1123,10 +1188,10 @@ class TaskExecutor {
                 try {
                     const stat = fs.statSync(fullPath);
                     if (stat.size > 5 * 1024 * 1024)
-                        continue; // Skip files > 5MB
+                        continue;
                     const content = fs.readFileSync(fullPath, 'utf-8');
                     if (content.includes('\0'))
-                        continue; // Skip binary files
+                        continue;
                     const lines = content.split('\n');
                     for (let i = 0; i < lines.length; i++) {
                         if (matches.length >= maxResults)
@@ -1146,8 +1211,8 @@ class TaskExecutor {
                 }
                 catch { }
             }
-            else if (isDirectory && recursive) {
-                await this.collectTextMatches(canonicalRoot, fullPath, query, pattern, caseSensitive, recursive, maxResults, matches);
+            else if (isDirectory && recursive && currentDepth < maxDepth) {
+                await this.collectTextMatches(canonicalRoot, fullPath, currentDepth + 1, maxDepth, query, pattern, caseSensitive, recursive, maxResults, visitedRealPaths, matches);
             }
         }
     }
