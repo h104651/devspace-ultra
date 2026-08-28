@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as path from 'path';
 import { GatewayServer } from '../../src/gateway/server';
 import { LocalAgentClient } from '../../src/local-agent/client';
 
@@ -27,12 +28,14 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
 
     const { deviceId, token: deviceToken } = server.authManager.registerDevice('Durable Worker 1', 'windows', ['local:read', 'local:write', 'local:git_status']);
 
+    const repoRoot = fs.existsSync(path.join(process.cwd(), '.git')) ? process.cwd() : path.resolve(process.cwd(), '..');
+
     // 1. Start Outbound Agent
     agent = new LocalAgentClient({
       gatewayUrl: `ws://127.0.0.1:${port}/ws/agent`,
       deviceId,
       token: deviceToken,
-      allowedWorkspaces: [process.cwd()],
+      allowedWorkspaces: [repoRoot],
       pollIntervalMs: 50,
       heartbeatIntervalMs: 100
     });
@@ -50,7 +53,7 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
       {
         backend: 'local',
         capability: 'local:git_status',
-        payload: { workspace: process.cwd() }
+        payload: { workspace: repoRoot }
       },
       ['admin'],
       'test-client'
@@ -75,7 +78,7 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
       gatewayUrl: `ws://127.0.0.1:${port}/ws/agent`,
       deviceId,
       token: deviceToken,
-      allowedWorkspaces: [process.cwd()],
+      allowedWorkspaces: [repoRoot],
       pollIntervalMs: 50,
       heartbeatIntervalMs: 100
     });
