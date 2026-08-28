@@ -1262,6 +1262,11 @@ export class GatewayDurableObject {
             case 'local_read_file': result = await this.mcpHandlers.handleLocalReadFile(args, caller); break;
             case 'local_write_file': result = await this.mcpHandlers.handleLocalWriteFile(args, caller); break;
             case 'local_patch_file': result = await this.mcpHandlers.handleLocalPatchFile(args, caller); break;
+            case 'local_list_directory': result = await this.mcpHandlers.handleLocalListDirectory(args, caller); break;
+            case 'local_find_files': result = await this.mcpHandlers.handleLocalFindFiles(args, caller); break;
+            case 'local_search_text': result = await this.mcpHandlers.handleLocalSearchText(args, caller); break;
+            case 'local_find_repositories': result = await this.mcpHandlers.handleLocalFindRepositories(args, caller); break;
+            case 'local_create_directory': result = await this.mcpHandlers.handleLocalCreateDirectory(args, caller); break;
             case 'local_git_status': result = await this.mcpHandlers.handleLocalGitStatus(args, caller); break;
             case 'local_run_tests': result = await this.mcpHandlers.handleLocalRunTests(args, caller); break;
             case 'local_build_project': result = await this.mcpHandlers.handleLocalBuildProject(args, caller); break;

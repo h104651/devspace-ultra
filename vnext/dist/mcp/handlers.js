@@ -1479,6 +1479,99 @@ class McpHandlers {
             clientRequestId: args.clientRequestId
         }, auth.scopes, auth.subjectId);
     }
+    async handleLocalListDirectory(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:read', 'tasks:submit');
+        if (!args?.projectId) {
+            throw new Error('INVALID_ARGUMENT: projectId is required for local_list_directory');
+        }
+        return this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local',
+            capability: 'local:list_directory',
+            payload: {
+                projectId: args.projectId,
+                relativePath: args.relativePath || '.',
+                maxEntries: args.maxEntries
+            },
+            clientRequestId: args?.clientRequestId
+        }, auth.scopes, auth.subjectId);
+    }
+    async handleLocalFindFiles(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:read', 'tasks:submit');
+        if (!args?.projectId) {
+            throw new Error('INVALID_ARGUMENT: projectId is required for local_find_files');
+        }
+        return this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local',
+            capability: 'local:find_files',
+            payload: {
+                projectId: args.projectId,
+                relativePath: args.relativePath || '.',
+                pattern: args.pattern,
+                name: args.name,
+                recursive: args.recursive !== false,
+                maxDepth: args.maxDepth,
+                maxResults: args.maxResults,
+                type: args.type || 'all'
+            },
+            clientRequestId: args?.clientRequestId
+        }, auth.scopes, auth.subjectId);
+    }
+    async handleLocalSearchText(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:read', 'tasks:submit');
+        if (!args?.projectId || !args?.query) {
+            throw new Error('INVALID_ARGUMENT: projectId and query are required for local_search_text');
+        }
+        return this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local',
+            capability: 'local:search_text',
+            payload: {
+                projectId: args.projectId,
+                query: args.query,
+                relativePath: args.relativePath || '.',
+                pattern: args.pattern,
+                caseSensitive: args.caseSensitive,
+                recursive: args.recursive !== false,
+                maxResults: args.maxResults
+            },
+            clientRequestId: args?.clientRequestId
+        }, auth.scopes, auth.subjectId);
+    }
+    async handleLocalFindRepositories(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:read', 'tasks:submit');
+        if (!args?.projectId) {
+            throw new Error('INVALID_ARGUMENT: projectId is required for local_find_repositories');
+        }
+        return this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local',
+            capability: 'local:find_repositories',
+            payload: {
+                projectId: args.projectId,
+                relativePath: args.relativePath || '.',
+                maxDepth: args.maxDepth
+            },
+            clientRequestId: args?.clientRequestId
+        }, auth.scopes, auth.subjectId);
+    }
+    async handleLocalCreateDirectory(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:write', 'tasks:submit');
+        if (!args?.projectId || !args?.relativePath) {
+            throw new Error('INVALID_ARGUMENT: projectId and relativePath are required for local_create_directory');
+        }
+        return this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local',
+            capability: 'local:create_directory',
+            payload: {
+                projectId: args.projectId,
+                relativePath: args.relativePath
+            },
+            clientRequestId: args?.clientRequestId
+        }, auth.scopes, auth.subjectId);
+    }
     async handleLocalGitStatus(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'local:read', 'tasks:submit');
@@ -1489,7 +1582,8 @@ class McpHandlers {
             backend: 'local',
             capability: 'local:git_status',
             payload: {
-                projectId: args.projectId
+                projectId: args.projectId,
+                repoRelativePath: args?.repoRelativePath
             },
             clientRequestId: args?.clientRequestId
         }, auth.scopes, auth.subjectId);
@@ -1506,7 +1600,8 @@ class McpHandlers {
             capability: 'local:run_tests',
             payload: {
                 projectId: args.projectId,
-                runnerId: args?.runnerId || 'npm'
+                runnerId: args?.runnerId || 'npm',
+                workingRelativePath: args?.workingRelativePath || '.'
             },
             clientRequestId: args?.clientRequestId
         }, auth.scopes, auth.subjectId);
@@ -1523,7 +1618,8 @@ class McpHandlers {
             capability: 'local:build_project',
             payload: {
                 projectId: args.projectId,
-                commandId: args?.commandId || 'npm'
+                commandId: args?.commandId || 'npm',
+                workingRelativePath: args?.workingRelativePath || '.'
             },
             clientRequestId: args?.clientRequestId
         }, auth.scopes, auth.subjectId);

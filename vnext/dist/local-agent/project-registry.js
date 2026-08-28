@@ -217,6 +217,44 @@ class ProjectPathSecurity {
         }
         return resolved;
     }
+    /**
+     * Safely resolves a relative path within a project root for directory access, checking realpath/symlinks/junctions.
+     */
+    static resolveDirectoryPath(canonicalRoot, relativePath) {
+        const safeRel = this.validateRelativePath(relativePath || '.');
+        const resolved = path.resolve(canonicalRoot, safeRel);
+        if (!this.isPathInsideRoot(resolved, canonicalRoot)) {
+            const err = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Path '${relativePath || '.'}' escapes project root`);
+            err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
+            throw err;
+        }
+        if (!fs.existsSync(resolved)) {
+            const err = new Error(`LOCAL_DIRECTORY_NOT_FOUND: Directory '${relativePath || '.'}' does not exist in project`);
+            err.code = 'LOCAL_DIRECTORY_NOT_FOUND';
+            throw err;
+        }
+        let realTarget;
+        try {
+            realTarget = fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved);
+        }
+        catch (e) {
+            const err = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Failed to resolve realpath for '${relativePath || '.'}': ${e.message}`);
+            err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
+            throw err;
+        }
+        if (!this.isPathInsideRoot(realTarget, canonicalRoot)) {
+            const err = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Target directory '${relativePath || '.'}' resolves via symlink/junction outside project root to '${realTarget}'`);
+            err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
+            throw err;
+        }
+        const stat = fs.statSync(realTarget);
+        if (!stat.isDirectory()) {
+            const err = new Error(`LOCAL_NOT_A_DIRECTORY: Path '${relativePath || '.'}' is not a directory`);
+            err.code = 'LOCAL_NOT_A_DIRECTORY';
+            throw err;
+        }
+        return realTarget;
+    }
 }
 exports.ProjectPathSecurity = ProjectPathSecurity;
 class ProjectRegistry {

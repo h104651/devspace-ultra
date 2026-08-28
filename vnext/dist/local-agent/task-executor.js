@@ -110,14 +110,37 @@ class TaskExecutor {
             }
             case 'local:project_status': {
                 const { project } = this.resolveProjectForTask(task.payload);
-                const gitDetected = fs.existsSync(path.join(project.canonicalRoot, '.git'));
+                const rootHasGit = fs.existsSync(path.join(project.canonicalRoot, '.git'));
+                let gitDetected = rootHasGit;
                 let gitInfo;
-                if (gitDetected && project.permissions.read) {
-                    try {
-                        gitInfo = await this.runGitStatus(project.canonicalRoot);
+                let discoveredRepositoriesCount = 0;
+                if (project.permissions.read && fs.existsSync(project.canonicalRoot)) {
+                    if (rootHasGit) {
+                        try {
+                            gitInfo = await this.runGitStatus(project.canonicalRoot);
+                        }
+                        catch (e) {
+                            onLog(`[EXECUTOR] Git status warning: ${e.message}`);
+                        }
                     }
-                    catch (e) {
-                        onLog(`[EXECUTOR] Git status warning: ${e.message}`);
+                    else {
+                        try {
+                            const discovered = await this.discoverRepositories(project.canonicalRoot, '.', 4);
+                            discoveredRepositoriesCount = discovered.length;
+                            if (discovered.length > 0) {
+                                gitDetected = true;
+                                if (discovered.length === 1) {
+                                    gitInfo = {
+                                        branch: discovered[0].branch,
+                                        headCommit: discovered[0].headCommit,
+                                        isClean: discovered[0].isClean
+                                    };
+                                }
+                            }
+                        }
+                        catch (e) {
+                            onLog(`[EXECUTOR] Repository discovery warning: ${e.message}`);
+                        }
                     }
                 }
                 return {
@@ -128,6 +151,7 @@ class TaskExecutor {
                     branch: gitInfo?.branch,
                     headCommit: gitInfo?.headCommit,
                     isClean: gitInfo?.isClean,
+                    discoveredRepositoriesCount: discoveredRepositoriesCount > 0 ? discoveredRepositoriesCount : undefined,
                     permissions: { ...project.permissions },
                     hostExecutionEnabled: project.permissions.hostExecution,
                     securityModel: {
@@ -145,9 +169,71 @@ class TaskExecutor {
                     err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
                     throw err;
                 }
-                const gitResult = await this.runGitStatus(project.canonicalRoot);
+                const requestedRepoRel = task.payload.repoRelativePath;
+                let targetDir;
+                let effectiveRepoRel;
+                if (requestedRepoRel && requestedRepoRel !== '.') {
+                    targetDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requestedRepoRel);
+                    effectiveRepoRel = path.relative(project.canonicalRoot, targetDir).replace(/\\/g, '/') || '.';
+                    if (!fs.existsSync(path.join(targetDir, '.git'))) {
+                        return {
+                            projectId: project.projectId,
+                            repoRelativePath: effectiveRepoRel,
+                            gitDetected: false,
+                            message: `Directory '${effectiveRepoRel}' is not a Git repository`
+                        };
+                    }
+                }
+                else {
+                    if (fs.existsSync(path.join(project.canonicalRoot, '.git'))) {
+                        targetDir = project.canonicalRoot;
+                        effectiveRepoRel = '.';
+                    }
+                    else {
+                        let rootGitSucceeded = false;
+                        let rootGitResult;
+                        try {
+                            rootGitResult = await this.runGitStatus(project.canonicalRoot);
+                            rootGitSucceeded = true;
+                        }
+                        catch { }
+                        if (rootGitSucceeded && rootGitResult) {
+                            return {
+                                projectId: project.projectId,
+                                repoRelativePath: '.',
+                                gitDetected: true,
+                                ...rootGitResult
+                            };
+                        }
+                        const discovered = await this.discoverRepositories(project.canonicalRoot, '.', 6);
+                        if (discovered.length === 0) {
+                            return {
+                                projectId: project.projectId,
+                                gitDetected: false,
+                                message: 'No Git repository detected in workspace'
+                            };
+                        }
+                        if (discovered.length === 1) {
+                            effectiveRepoRel = discovered[0].repoRelativePath;
+                            targetDir = path.resolve(project.canonicalRoot, effectiveRepoRel);
+                        }
+                        else {
+                            return {
+                                projectId: project.projectId,
+                                gitDetected: true,
+                                ambiguous: true,
+                                message: `Multiple Git repositories found in workspace '${project.projectId}'. Specify 'repoRelativePath' to choose one.`,
+                                candidateRepositories: discovered.map(r => r.repoRelativePath),
+                                repositories: discovered
+                            };
+                        }
+                    }
+                }
+                const gitResult = await this.runGitStatus(targetDir);
                 return {
                     projectId: project.projectId,
+                    repoRelativePath: effectiveRepoRel,
+                    gitDetected: true,
                     ...gitResult
                 };
             }
@@ -294,6 +380,183 @@ class TaskExecutor {
                     unlock();
                 }
             }
+            case 'local:list_directory': {
+                const { project } = this.resolveProjectForTask(task.payload);
+                if (!project.permissions.read) {
+                    const err = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Read permission is forbidden on project '${project.projectId}'`);
+                    err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+                    throw err;
+                }
+                const requestedRel = task.payload.relativePath || '.';
+                const targetDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requestedRel);
+                const effectiveRel = path.relative(project.canonicalRoot, targetDir).replace(/\\/g, '/') || '.';
+                const maxEntries = Math.min(Math.max(1, task.payload.maxEntries || 100), 1000);
+                const rawEntries = fs.readdirSync(targetDir, { withFileTypes: true });
+                const entries = [];
+                for (const dirent of rawEntries) {
+                    const entryPath = path.join(targetDir, dirent.name);
+                    const entryRel = path.relative(project.canonicalRoot, entryPath).replace(/\\/g, '/');
+                    let type = 'other';
+                    if (dirent.isFile())
+                        type = 'file';
+                    else if (dirent.isDirectory())
+                        type = 'directory';
+                    else if (dirent.isSymbolicLink())
+                        type = 'symlink';
+                    let sizeBytes;
+                    let modifiedTime;
+                    try {
+                        const stat = fs.statSync(entryPath);
+                        sizeBytes = stat.size;
+                        modifiedTime = stat.mtime.toISOString();
+                    }
+                    catch { }
+                    entries.push({
+                        name: dirent.name,
+                        type,
+                        relativePath: entryRel,
+                        sizeBytes,
+                        modifiedTime
+                    });
+                }
+                entries.sort((a, b) => {
+                    if (a.type === 'directory' && b.type !== 'directory')
+                        return -1;
+                    if (a.type !== 'directory' && b.type === 'directory')
+                        return 1;
+                    return a.name.localeCompare(b.name);
+                });
+                const totalEntries = entries.length;
+                const page = entries.slice(0, maxEntries);
+                return {
+                    projectId: project.projectId,
+                    relativePath: effectiveRel,
+                    totalEntries,
+                    returnedEntries: page.length,
+                    hasMore: totalEntries > maxEntries,
+                    entries: page
+                };
+            }
+            case 'local:find_files': {
+                const { project } = this.resolveProjectForTask(task.payload);
+                if (!project.permissions.read) {
+                    const err = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Read permission is forbidden on project '${project.projectId}'`);
+                    err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+                    throw err;
+                }
+                const requestedRel = task.payload.relativePath || '.';
+                const startDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requestedRel);
+                const effectiveRel = path.relative(project.canonicalRoot, startDir).replace(/\\/g, '/') || '.';
+                const maxResults = Math.min(Math.max(1, task.payload.maxResults || 100), 500);
+                const maxDepth = task.payload.maxDepth !== undefined ? Math.max(0, task.payload.maxDepth) : 15;
+                const pattern = task.payload.pattern || task.payload.name;
+                const recursive = task.payload.recursive !== false;
+                const typeFilter = task.payload.type || 'all';
+                const results = [];
+                await this.collectFiles(project.canonicalRoot, startDir, 0, maxDepth, pattern, recursive, typeFilter, maxResults, results);
+                return {
+                    projectId: project.projectId,
+                    baseRelativePath: effectiveRel,
+                    count: results.length,
+                    truncated: results.length >= maxResults,
+                    files: results
+                };
+            }
+            case 'local:search_text': {
+                const { project } = this.resolveProjectForTask(task.payload);
+                if (!project.permissions.read) {
+                    const err = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Read permission is forbidden on project '${project.projectId}'`);
+                    err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+                    throw err;
+                }
+                const query = task.payload.query;
+                if (!query || typeof query !== 'string') {
+                    const err = new Error('INVALID_ARGUMENT: query string is required for local:search_text');
+                    err.code = 'INVALID_ARGUMENT';
+                    throw err;
+                }
+                const requestedRel = task.payload.relativePath || '.';
+                const startDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requestedRel);
+                const effectiveRel = path.relative(project.canonicalRoot, startDir).replace(/\\/g, '/') || '.';
+                const maxResults = Math.min(Math.max(1, task.payload.maxResults || 100), 500);
+                const pattern = task.payload.pattern;
+                const caseSensitive = !!task.payload.caseSensitive;
+                const recursive = task.payload.recursive !== false;
+                const matches = [];
+                await this.collectTextMatches(project.canonicalRoot, startDir, query, pattern, caseSensitive, recursive, maxResults, matches);
+                return {
+                    projectId: project.projectId,
+                    baseRelativePath: effectiveRel,
+                    query,
+                    count: matches.length,
+                    truncated: matches.length >= maxResults,
+                    matches
+                };
+            }
+            case 'local:find_repositories': {
+                const { project } = this.resolveProjectForTask(task.payload);
+                if (!project.permissions.read) {
+                    const err = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Read permission is forbidden on project '${project.projectId}'`);
+                    err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
+                    throw err;
+                }
+                const requestedRel = task.payload.relativePath || '.';
+                const startDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requestedRel);
+                const effectiveRel = path.relative(project.canonicalRoot, startDir).replace(/\\/g, '/') || '.';
+                const maxDepth = task.payload.maxDepth !== undefined ? Math.max(0, task.payload.maxDepth) : 10;
+                const repositories = await this.discoverRepositories(project.canonicalRoot, requestedRel, maxDepth);
+                return {
+                    projectId: project.projectId,
+                    baseRelativePath: effectiveRel,
+                    count: repositories.length,
+                    repositories
+                };
+            }
+            case 'local:create_directory': {
+                const { project } = this.resolveProjectForTask(task.payload);
+                if (!project.permissions.write) {
+                    const err = new Error(`LOCAL_PROJECT_WRITE_FORBIDDEN: Write permission is forbidden on read-only project '${project.projectId}'`);
+                    err.code = 'LOCAL_PROJECT_WRITE_FORBIDDEN';
+                    throw err;
+                }
+                const rawRel = task.payload.relativePath;
+                if (!rawRel || typeof rawRel !== 'string') {
+                    const err = new Error('INVALID_ARGUMENT: relativePath is required for local:create_directory');
+                    err.code = 'INVALID_ARGUMENT';
+                    throw err;
+                }
+                const safeRel = project_registry_1.ProjectPathSecurity.validateRelativePath(rawRel);
+                const targetPath = path.resolve(project.canonicalRoot, safeRel);
+                if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(targetPath, project.canonicalRoot)) {
+                    const err = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Path '${rawRel}' escapes project root`);
+                    err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
+                    throw err;
+                }
+                let parent = path.dirname(targetPath);
+                while (!fs.existsSync(parent) && parent !== path.dirname(parent)) {
+                    parent = path.dirname(parent);
+                }
+                if (fs.existsSync(parent)) {
+                    const realParent = fs.realpathSync(parent);
+                    if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(realParent, project.canonicalRoot)) {
+                        const err = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Parent directory resolves outside project root`);
+                        err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
+                        throw err;
+                    }
+                }
+                fs.mkdirSync(targetPath, { recursive: true });
+                const realTarget = fs.realpathSync(targetPath);
+                if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(realTarget, project.canonicalRoot)) {
+                    const err = new Error(`LOCAL_PROJECT_PATH_ESCAPE: Created directory resolves via symlink outside project root`);
+                    err.code = 'LOCAL_PROJECT_PATH_ESCAPE';
+                    throw err;
+                }
+                return {
+                    projectId: project.projectId,
+                    relativePath: safeRel,
+                    status: 'created'
+                };
+            }
             case 'local:run_tests': {
                 const { project } = this.resolveProjectForTask(task.payload);
                 if (!project.permissions.test || !project.permissions.hostExecution) {
@@ -307,10 +570,14 @@ class TaskExecutor {
                     err.code = 'LOCAL_PROJECT_ARBITRARY_COMMAND_FORBIDDEN';
                     throw err;
                 }
+                const workingRel = task.payload.workingRelativePath;
+                const targetCwd = (workingRel && workingRel !== '.')
+                    ? project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, workingRel)
+                    : project.canonicalRoot;
                 const runnerId = task.payload.runnerId || task.payload.runner || 'npm';
                 const cmdConfig = this.resolveTestCommand(project, runnerId);
-                onLog(`[EXECUTOR] Running tests in project '${project.projectId}' via runner '${runnerId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
-                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, project.canonicalRoot, cmdConfig.env, onLog);
+                onLog(`[EXECUTOR] Running tests in project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via runner '${runnerId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
+                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog);
             }
             case 'local:build_project': {
                 const { project } = this.resolveProjectForTask(task.payload);
@@ -325,10 +592,14 @@ class TaskExecutor {
                     err.code = 'LOCAL_PROJECT_ARBITRARY_COMMAND_FORBIDDEN';
                     throw err;
                 }
+                const workingRel = task.payload.workingRelativePath;
+                const targetCwd = (workingRel && workingRel !== '.')
+                    ? project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, workingRel)
+                    : project.canonicalRoot;
                 const commandId = task.payload.commandId || 'npm';
                 const cmdConfig = this.resolveBuildCommand(project, commandId);
-                onLog(`[EXECUTOR] Building project '${project.projectId}' via command '${commandId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
-                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, project.canonicalRoot, cmdConfig.env, onLog);
+                onLog(`[EXECUTOR] Building project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via command '${commandId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
+                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog);
             }
             case 'local:raw_shell': {
                 if (!this.allowRawShell) {
@@ -485,17 +756,43 @@ class TaskExecutor {
         return new Promise((resolve, reject) => {
             const isWindows = process.platform === 'win32';
             const gitExe = isWindows ? 'git.exe' : 'git';
+            const headPath = path.join(repoPath, '.git', 'HEAD');
             const child = (0, child_process_1.spawn)(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
             let statusOut = '';
             child.stdout?.on('data', d => { statusOut += d.toString(); });
             child.on('close', code => {
-                if (code !== 0)
+                if (code !== 0) {
+                    if (fs.existsSync(headPath)) {
+                        try {
+                            const headContent = fs.readFileSync(headPath, 'utf-8').trim();
+                            const branch = headContent.startsWith('ref: refs/heads/')
+                                ? headContent.replace('ref: refs/heads/', '')
+                                : (headContent || 'main');
+                            return resolve({
+                                branch,
+                                headCommit: '',
+                                isClean: true,
+                                changes: []
+                            });
+                        }
+                        catch { }
+                    }
                     return reject(new Error(`git status failed with exit code ${code}`));
+                }
                 const branchChild = (0, child_process_1.spawn)(gitExe, ['branch', '--show-current'], { cwd: repoPath, shell: false });
                 let branchOut = '';
                 branchChild.stdout?.on('data', d => { branchOut += d.toString(); });
                 branchChild.on('close', () => {
-                    const branch = (branchOut || 'HEAD').trim();
+                    let branch = (branchOut || '').trim();
+                    if (!branch && fs.existsSync(headPath)) {
+                        try {
+                            const headContent = fs.readFileSync(headPath, 'utf-8').trim();
+                            if (headContent.startsWith('ref: refs/heads/')) {
+                                branch = headContent.replace('ref: refs/heads/', '');
+                            }
+                        }
+                        catch { }
+                    }
                     const commitChild = (0, child_process_1.spawn)(gitExe, ['rev-parse', 'HEAD'], { cwd: repoPath, shell: false });
                     let commitOut = '';
                     commitChild.stdout?.on('data', d => { commitOut += d.toString(); });
@@ -509,10 +806,359 @@ class TaskExecutor {
                             changes: statusOut.trim().split('\n').filter(Boolean)
                         });
                     });
+                    commitChild.on('error', () => {
+                        resolve({
+                            branch: branch || 'main',
+                            headCommit: '',
+                            isClean: true,
+                            changes: statusOut.trim().split('\n').filter(Boolean)
+                        });
+                    });
+                });
+                branchChild.on('error', () => {
+                    resolve({
+                        branch: 'main',
+                        headCommit: '',
+                        isClean: true,
+                        changes: statusOut.trim().split('\n').filter(Boolean)
+                    });
                 });
             });
-            child.on('error', err => reject(err));
+            child.on('error', () => {
+                if (fs.existsSync(headPath)) {
+                    try {
+                        const headContent = fs.readFileSync(headPath, 'utf-8').trim();
+                        const branch = headContent.startsWith('ref: refs/heads/')
+                            ? headContent.replace('ref: refs/heads/', '')
+                            : (headContent || 'main');
+                        return resolve({
+                            branch,
+                            headCommit: '',
+                            isClean: true,
+                            changes: []
+                        });
+                    }
+                    catch { }
+                }
+                reject(new Error('git execution failed'));
+            });
         });
+    }
+    runGitInfo(repoPath) {
+        return new Promise((resolve) => {
+            const isWindows = process.platform === 'win32';
+            const gitExe = isWindows ? 'git.exe' : 'git';
+            const headPath = path.join(repoPath, '.git', 'HEAD');
+            let fallbackBranch = null;
+            if (fs.existsSync(headPath)) {
+                try {
+                    const headContent = fs.readFileSync(headPath, 'utf-8').trim();
+                    if (headContent.startsWith('ref: refs/heads/')) {
+                        fallbackBranch = headContent.replace('ref: refs/heads/', '');
+                    }
+                    else if (headContent) {
+                        fallbackBranch = headContent;
+                    }
+                }
+                catch { }
+            }
+            try {
+                const branchChild = (0, child_process_1.spawn)(gitExe, ['branch', '--show-current'], { cwd: repoPath, shell: false });
+                let branchOut = '';
+                branchChild.stdout?.on('data', d => { branchOut += d.toString(); });
+                branchChild.on('close', () => {
+                    const commitChild = (0, child_process_1.spawn)(gitExe, ['rev-parse', 'HEAD'], { cwd: repoPath, shell: false });
+                    let commitOut = '';
+                    commitChild.stdout?.on('data', d => { commitOut += d.toString(); });
+                    commitChild.on('close', () => {
+                        const remoteChild = (0, child_process_1.spawn)(gitExe, ['config', '--get', 'remote.origin.url'], { cwd: repoPath, shell: false });
+                        let remoteOut = '';
+                        remoteChild.stdout?.on('data', d => { remoteOut += d.toString(); });
+                        remoteChild.on('close', () => {
+                            const statusChild = (0, child_process_1.spawn)(gitExe, ['status', '--porcelain'], { cwd: repoPath, shell: false });
+                            let statusOut = '';
+                            statusChild.stdout?.on('data', d => { statusOut += d.toString(); });
+                            statusChild.on('close', (statusCode) => {
+                                const branch = (branchOut || '').trim() || fallbackBranch || 'main';
+                                resolve({
+                                    branch,
+                                    headCommit: (commitOut || '').trim() || null,
+                                    remoteUrl: (remoteOut || '').trim() || null,
+                                    isClean: statusCode === 0 ? statusOut.trim().length === 0 : true
+                                });
+                            });
+                            statusChild.on('error', () => resolve({
+                                branch: (branchOut || '').trim() || fallbackBranch || 'main',
+                                headCommit: (commitOut || '').trim() || null,
+                                remoteUrl: (remoteOut || '').trim() || null,
+                                isClean: true
+                            }));
+                        });
+                        remoteChild.on('error', () => resolve({
+                            branch: (branchOut || '').trim() || fallbackBranch || 'main',
+                            headCommit: (commitOut || '').trim() || null,
+                            remoteUrl: null,
+                            isClean: true
+                        }));
+                    });
+                    commitChild.on('error', () => resolve({
+                        branch: (branchOut || '').trim() || fallbackBranch || 'main',
+                        headCommit: null,
+                        remoteUrl: null,
+                        isClean: true
+                    }));
+                });
+                branchChild.on('error', () => resolve({
+                    branch: fallbackBranch || 'main',
+                    headCommit: null,
+                    remoteUrl: null,
+                    isClean: true
+                }));
+            }
+            catch {
+                resolve({ branch: fallbackBranch || 'main', headCommit: null, remoteUrl: null, isClean: true });
+            }
+        });
+    }
+    async discoverRepositories(canonicalRoot, subRelPath = '.', maxDepth = 10) {
+        const startDir = project_registry_1.ProjectPathSecurity.resolveDirectoryPath(canonicalRoot, subRelPath);
+        const discovered = [];
+        const queue = [{ dir: startDir, depth: 0 }];
+        while (queue.length > 0) {
+            const { dir, depth } = queue.shift();
+            if (depth > maxDepth)
+                continue;
+            try {
+                const real = fs.realpathSync(dir);
+                if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(real, canonicalRoot))
+                    continue;
+            }
+            catch {
+                continue;
+            }
+            const hasGit = fs.existsSync(path.join(dir, '.git'));
+            if (hasGit) {
+                const repoRel = path.relative(canonicalRoot, dir).replace(/\\/g, '/') || '.';
+                const gitInfo = await this.runGitInfo(dir);
+                const indicators = [];
+                const types = [];
+                if (fs.existsSync(path.join(dir, 'pubspec.yaml'))) {
+                    indicators.push('pubspec.yaml');
+                    types.push('flutter', 'dart');
+                }
+                if (fs.existsSync(path.join(dir, 'package.json'))) {
+                    indicators.push('package.json');
+                    types.push('node', 'javascript/typescript');
+                }
+                if (fs.existsSync(path.join(dir, 'pyproject.toml'))) {
+                    indicators.push('pyproject.toml');
+                    if (!types.includes('python'))
+                        types.push('python');
+                }
+                if (fs.existsSync(path.join(dir, 'requirements.txt'))) {
+                    indicators.push('requirements.txt');
+                    if (!types.includes('python'))
+                        types.push('python');
+                }
+                if (fs.existsSync(path.join(dir, 'setup.py'))) {
+                    indicators.push('setup.py');
+                    if (!types.includes('python'))
+                        types.push('python');
+                }
+                if (fs.existsSync(path.join(dir, 'Cargo.toml'))) {
+                    indicators.push('Cargo.toml');
+                    types.push('rust');
+                }
+                if (fs.existsSync(path.join(dir, 'go.mod'))) {
+                    indicators.push('go.mod');
+                    types.push('go');
+                }
+                if (fs.existsSync(path.join(dir, 'pom.xml')) || fs.existsSync(path.join(dir, 'build.gradle')) || fs.existsSync(path.join(dir, 'build.gradle.kts'))) {
+                    if (fs.existsSync(path.join(dir, 'pom.xml')))
+                        indicators.push('pom.xml');
+                    if (fs.existsSync(path.join(dir, 'build.gradle')))
+                        indicators.push('build.gradle');
+                    if (fs.existsSync(path.join(dir, 'build.gradle.kts')))
+                        indicators.push('build.gradle.kts');
+                    types.push('jvm');
+                }
+                discovered.push({
+                    repoRelativePath: repoRel,
+                    branch: gitInfo.branch,
+                    headCommit: gitInfo.headCommit,
+                    remoteUrl: gitInfo.remoteUrl,
+                    isClean: gitInfo.isClean,
+                    projectIndicators: indicators,
+                    projectTypes: Array.from(new Set(types))
+                });
+            }
+            let dirents = [];
+            try {
+                dirents = fs.readdirSync(dir, { withFileTypes: true });
+            }
+            catch { }
+            for (const d of dirents) {
+                if (!d.isDirectory())
+                    continue;
+                if (d.name === '.git' || d.name === 'node_modules' || d.name === '.dart_tool' || d.name === 'build' || d.name === 'dist') {
+                    continue;
+                }
+                const subDir = path.join(dir, d.name);
+                try {
+                    const realSub = fs.realpathSync(subDir);
+                    if (project_registry_1.ProjectPathSecurity.isPathInsideRoot(realSub, canonicalRoot)) {
+                        queue.push({ dir: subDir, depth: depth + 1 });
+                    }
+                }
+                catch { }
+            }
+        }
+        return discovered;
+    }
+    async collectFiles(canonicalRoot, currentDir, currentDepth, maxDepth, pattern, recursive, typeFilter, maxResults, results) {
+        if (results.length >= maxResults)
+            return;
+        if (currentDepth > maxDepth)
+            return;
+        let dirents;
+        try {
+            dirents = fs.readdirSync(currentDir, { withFileTypes: true });
+        }
+        catch {
+            return;
+        }
+        for (const dirent of dirents) {
+            if (results.length >= maxResults)
+                break;
+            if (dirent.name === '.git' && dirent.isDirectory())
+                continue;
+            const fullPath = path.join(currentDir, dirent.name);
+            let isDirectory = dirent.isDirectory();
+            let isFile = dirent.isFile();
+            if (dirent.isSymbolicLink()) {
+                try {
+                    const real = fs.realpathSync(fullPath);
+                    if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(real, canonicalRoot))
+                        continue;
+                    const stat = fs.statSync(real);
+                    isDirectory = stat.isDirectory();
+                    isFile = stat.isFile();
+                }
+                catch {
+                    continue;
+                }
+            }
+            const relPath = path.relative(canonicalRoot, fullPath).replace(/\\/g, '/');
+            const matchesPattern = matchPattern(dirent.name, pattern) || (pattern && pattern.includes('/') ? matchPattern(relPath, pattern) : false);
+            const matchesType = typeFilter === 'all' ||
+                (typeFilter === 'file' && isFile) ||
+                (typeFilter === 'directory' && isDirectory);
+            if (matchesPattern && matchesType) {
+                let sizeBytes;
+                let modifiedTime;
+                try {
+                    const stat = fs.statSync(fullPath);
+                    sizeBytes = stat.size;
+                    modifiedTime = stat.mtime.toISOString();
+                }
+                catch { }
+                results.push({
+                    relativePath: relPath,
+                    name: dirent.name,
+                    isDirectory,
+                    sizeBytes: isFile ? sizeBytes : undefined,
+                    modifiedTime
+                });
+            }
+            if (isDirectory && recursive && currentDepth < maxDepth) {
+                await this.collectFiles(canonicalRoot, fullPath, currentDepth + 1, maxDepth, pattern, recursive, typeFilter, maxResults, results);
+            }
+        }
+    }
+    async collectTextMatches(canonicalRoot, currentDir, query, pattern, caseSensitive, recursive, maxResults, matches) {
+        if (matches.length >= maxResults)
+            return;
+        let dirents;
+        try {
+            dirents = fs.readdirSync(currentDir, { withFileTypes: true });
+        }
+        catch {
+            return;
+        }
+        const BINARY_EXTS = new Set([
+            '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.db', '.sqlite',
+            '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp', '.pdf', '.zip',
+            '.tar', '.gz', '.7z', '.rar', '.mp3', '.mp4', '.wav', '.mov',
+            '.pyc', '.pyo', '.class', '.o', '.a', '.obj', '.apk', '.aab', '.ipa'
+        ]);
+        for (const dirent of dirents) {
+            if (matches.length >= maxResults)
+                break;
+            if (dirent.name === '.git' && dirent.isDirectory())
+                continue;
+            const fullPath = path.join(currentDir, dirent.name);
+            let isDirectory = dirent.isDirectory();
+            let isFile = dirent.isFile();
+            if (dirent.isSymbolicLink()) {
+                try {
+                    const real = fs.realpathSync(fullPath);
+                    if (!project_registry_1.ProjectPathSecurity.isPathInsideRoot(real, canonicalRoot))
+                        continue;
+                    const stat = fs.statSync(real);
+                    isDirectory = stat.isDirectory();
+                    isFile = stat.isFile();
+                }
+                catch {
+                    continue;
+                }
+            }
+            const relPath = path.relative(canonicalRoot, fullPath).replace(/\\/g, '/');
+            if (isFile) {
+                const ext = path.extname(dirent.name).toLowerCase();
+                if (BINARY_EXTS.has(ext))
+                    continue;
+                if (pattern && !matchPattern(dirent.name, pattern) && !matchPattern(relPath, pattern)) {
+                    continue;
+                }
+                try {
+                    const stat = fs.statSync(fullPath);
+                    if (stat.size > 5 * 1024 * 1024)
+                        continue; // Skip files > 5MB
+                    const content = fs.readFileSync(fullPath, 'utf-8');
+                    if (content.includes('\0'))
+                        continue; // Skip binary files
+                    const lines = content.split('\n');
+                    for (let i = 0; i < lines.length; i++) {
+                        if (matches.length >= maxResults)
+                            break;
+                        const line = lines[i];
+                        const lineMatches = caseSensitive
+                            ? line.includes(query)
+                            : line.toLowerCase().includes(query.toLowerCase());
+                        if (lineMatches) {
+                            matches.push({
+                                relativePath: relPath,
+                                lineNumber: i + 1,
+                                lineContent: line.trim()
+                            });
+                        }
+                    }
+                }
+                catch { }
+            }
+            else if (isDirectory && recursive) {
+                await this.collectTextMatches(canonicalRoot, fullPath, query, pattern, caseSensitive, recursive, maxResults, matches);
+            }
+        }
     }
 }
 exports.TaskExecutor = TaskExecutor;
+function matchPattern(name, pattern) {
+    if (!pattern || pattern === '*' || pattern === '')
+        return true;
+    if (pattern.includes('*') || pattern.includes('?')) {
+        const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+        return new RegExp(`^${escaped}$`, 'i').test(name);
+    }
+    return name.toLowerCase().includes(pattern.toLowerCase());
+}

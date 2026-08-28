@@ -13,6 +13,7 @@ import { runIdempotencyIntegrationTests } from './integration/idempotency.test';
 import { runRemoteMcpHttpTests } from './integration/remote-mcp-http.test';
 import { runAgentLifecycleDurabilityTests } from './integration/agent-lifecycle-durability.test';
 import { runLocalProjectRoutingIntegrationTests } from './integration/local-project-routing.test';
+import { runLocalWorkspaceDiscoveryIntegrationTests } from './integration/local-workspace-discovery.test';
 import { runSecurityTests } from './security/security.test';
 import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-security.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
@@ -43,6 +44,7 @@ async function main() {
     { name: 'Integration: Remote MCP Transport (HTTP POST /mcp)', runner: runRemoteMcpHttpTests },
     { name: 'Integration: Agent Lifecycle & Durability', runner: runAgentLifecycleDurabilityTests },
     { name: 'Integration: Local Multi-Project Named Routing', runner: runLocalProjectRoutingIntegrationTests },
+    { name: 'Integration: Local Workspace Discovery & Nested Operations', runner: runLocalWorkspaceDiscoveryIntegrationTests },
     { name: 'Integration: Kaggle Mock Backend', runner: runKaggleIntegrationTests },
     { name: 'Integration: Kaggle Persistent Project Control v1', runner: runKaggleProjectTests },
     { name: 'Integration: Kaggle Large Project Workspace Mode', runner: runKaggleWorkspaceTests },
