@@ -229,32 +229,52 @@ class ProjectRegistry {
         }
         if (options?.initialProjects) {
             for (const item of options.initialProjects) {
-                if (typeof item === 'string') {
-                    const normRoot = path.resolve(item);
-                    const baseName = path.basename(normRoot) || 'default-project';
-                    this.registerProject({
-                        projectId: baseName,
-                        displayName: baseName,
-                        root: normRoot,
-                        enabled: true,
-                        permissions: { read: true, write: true, test: true, build: true }
-                    });
+                this.registerProject(item);
+            }
+        }
+        if (options?.initialLegacyWorkspaces) {
+            for (const rawWorkspace of options.initialLegacyWorkspaces) {
+                const normRoot = path.resolve(rawWorkspace);
+                const baseName = ProjectPathSecurity.normalizeProjectId(path.basename(normRoot) || 'default-workspace');
+                // Detect collision on same basename from different roots
+                if (this.projects.has(baseName)) {
+                    const existing = this.projects.get(baseName);
+                    const canonical = ProjectPathSecurity.getCanonicalRoot(normRoot);
+                    if (!ProjectPathSecurity.isPathInsideRoot(canonical, existing.canonicalRoot) || !ProjectPathSecurity.isPathInsideRoot(existing.canonicalRoot, canonical)) {
+                        const err = new Error(`LOCAL_PROJECT_ID_CONFLICT: Multiple legacy workspace roots share the same basename '${baseName}'. Use explicit named project configuration with unique projectIds.`);
+                        err.code = 'LOCAL_PROJECT_ID_CONFLICT';
+                        throw err;
+                    }
                 }
                 else {
-                    this.registerProject(item);
+                    // Legacy migration path grants full permissions for backwards compatibility
+                    this.registerLegacyWorkspace(baseName, normRoot);
                 }
             }
         }
     }
+    /**
+     * Registers a named project definition with fail-safe defaults (least privilege).
+     * Omitted sensitive permissions (write, test, build) default to false.
+     */
     registerProject(def) {
         const normalizedId = ProjectPathSecurity.normalizeProjectId(def.projectId);
         const resolvedRoot = path.resolve(def.root);
         const canonicalRoot = ProjectPathSecurity.getCanonicalRoot(resolvedRoot);
+        if (this.projects.has(normalizedId)) {
+            const existing = this.projects.get(normalizedId);
+            if (existing.canonicalRoot !== canonicalRoot) {
+                const err = new Error(`LOCAL_PROJECT_ID_CONFLICT: Project ID '${normalizedId}' is already registered with a different root`);
+                err.code = 'LOCAL_PROJECT_ID_CONFLICT';
+                throw err;
+            }
+        }
+        // Fail-safe defaults: read defaults to true; write, test, build default to false
         const permissions = {
             read: def.permissions?.read !== false,
-            write: def.permissions?.write !== false,
-            test: def.permissions?.test !== false,
-            build: def.permissions?.build !== false
+            write: def.permissions?.write === true,
+            test: def.permissions?.test === true,
+            build: def.permissions?.build === true
         };
         this.projects.set(normalizedId, {
             projectId: normalizedId,
@@ -262,7 +282,24 @@ class ProjectRegistry {
             root: resolvedRoot,
             canonicalRoot,
             enabled: def.enabled !== false,
-            permissions
+            permissions,
+            commands: def.commands
+        });
+    }
+    /**
+     * Explicit legacy workspace registration (preserves historical full permissions for legacy strings).
+     */
+    registerLegacyWorkspace(projectId, root) {
+        const normalizedId = ProjectPathSecurity.normalizeProjectId(projectId);
+        const resolvedRoot = path.resolve(root);
+        const canonicalRoot = ProjectPathSecurity.getCanonicalRoot(resolvedRoot);
+        this.projects.set(normalizedId, {
+            projectId: normalizedId,
+            displayName: projectId,
+            root: resolvedRoot,
+            canonicalRoot,
+            enabled: true,
+            permissions: { read: true, write: true, test: true, build: true }
         });
     }
     unregisterProject(projectId) {
@@ -313,13 +350,15 @@ class ProjectRegistry {
                 enabled: p.enabled,
                 permissions: { ...p.permissions },
                 gitDetected,
-                availableCapabilities
+                availableCapabilities,
+                configuredTestRunners: p.commands?.test ? Object.keys(p.commands.test) : undefined,
+                configuredBuildCommands: p.commands?.build ? Object.keys(p.commands.build) : undefined
             });
         }
         return list;
     }
     /**
-     * Legacy resolution helper: matches an absolute path against registered project roots.
+     * Deprecated legacy resolution helper: matches an absolute path against registered project roots.
      */
     resolveLegacyPath(targetPath) {
         const resolved = path.resolve(targetPath);
@@ -356,7 +395,8 @@ class ProjectRegistry {
             displayName: p.displayName,
             root: p.root,
             enabled: p.enabled,
-            permissions: p.permissions
+            permissions: p.permissions,
+            commands: p.commands
         }));
         fs.writeFileSync(this.configFilePath, JSON.stringify({ projects: items }, null, 2), 'utf-8');
     }

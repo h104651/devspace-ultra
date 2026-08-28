@@ -381,9 +381,9 @@ exports.LOCAL_READ_FILE_SCHEMA = {
         projectId: { type: 'string', description: 'Target registered project identifier' },
         relativePath: { type: 'string', description: 'Relative path within the target project' },
         limit: { type: 'number', description: 'Maximum character limit to read' },
-        filePath: { type: 'string', description: 'Deprecated: absolute file path (legacy fallback)' },
         clientRequestId: { type: 'string' }
     },
+    required: ['projectId', 'relativePath'],
     additionalProperties: false
 };
 exports.LOCAL_WRITE_FILE_SCHEMA = {
@@ -392,41 +392,64 @@ exports.LOCAL_WRITE_FILE_SCHEMA = {
         projectId: { type: 'string', description: 'Target registered project identifier' },
         relativePath: { type: 'string', description: 'Relative path within the target project' },
         content: { type: 'string', description: 'Content to write to the file' },
-        filePath: { type: 'string', description: 'Deprecated: absolute file path (legacy fallback)' },
         clientRequestId: { type: 'string' }
     },
-    required: ['content'],
+    required: ['projectId', 'relativePath', 'content'],
     additionalProperties: false
 };
-exports.LOCAL_PATCH_FILE_SCHEMA = exports.LOCAL_WRITE_FILE_SCHEMA;
+exports.LOCAL_PATCH_FILE_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier' },
+        relativePath: { type: 'string', description: 'Relative path within the target project' },
+        expectedSha256: { type: 'string', description: 'Expected current file SHA256 hex digest for optimistic concurrency control' },
+        patches: {
+            type: 'array',
+            minItems: 1,
+            items: {
+                type: 'object',
+                properties: {
+                    oldText: { type: 'string', description: 'Exact text chunk to match and replace' },
+                    newText: { type: 'string', description: 'New text chunk to substitute' },
+                    expectedOccurrences: { type: 'number', default: 1, description: 'Expected occurrence count (default: 1)' }
+                },
+                required: ['oldText', 'newText'],
+                additionalProperties: false
+            },
+            description: 'Ordered list of deterministic text replacement operations'
+        },
+        clientRequestId: { type: 'string' }
+    },
+    required: ['projectId', 'relativePath', 'expectedSha256', 'patches'],
+    additionalProperties: false
+};
 exports.LOCAL_GIT_STATUS_SCHEMA = {
     type: 'object',
     properties: {
         projectId: { type: 'string', description: 'Target registered project identifier' },
-        workspace: { type: 'string', description: 'Deprecated: absolute workspace path (legacy fallback)' },
         clientRequestId: { type: 'string' }
     },
+    required: ['projectId'],
     additionalProperties: false
 };
 exports.LOCAL_RUN_TESTS_SCHEMA = {
     type: 'object',
     properties: {
         projectId: { type: 'string', description: 'Target registered project identifier' },
-        runner: { type: 'string', enum: ['npm', 'pytest', 'flutter'], default: 'npm', description: 'Test runner' },
-        customCommand: { type: 'string', description: 'Custom test command to execute' },
-        workspace: { type: 'string', description: 'Deprecated: absolute workspace path (legacy fallback)' },
+        runnerId: { type: 'string', description: 'Configured test runner ID or standard runner (npm, pytest, flutter)', default: 'npm' },
         clientRequestId: { type: 'string' }
     },
+    required: ['projectId'],
     additionalProperties: false
 };
 exports.LOCAL_BUILD_PROJECT_SCHEMA = {
     type: 'object',
     properties: {
         projectId: { type: 'string', description: 'Target registered project identifier' },
-        command: { type: 'string', description: 'Build command to execute' },
-        workspace: { type: 'string', description: 'Deprecated: absolute workspace path (legacy fallback)' },
+        commandId: { type: 'string', description: 'Configured build command ID or standard command (npm, flutter)', default: 'npm' },
         clientRequestId: { type: 'string' }
     },
+    required: ['projectId'],
     additionalProperties: false
 };
 function getCanonicalToolsList() {

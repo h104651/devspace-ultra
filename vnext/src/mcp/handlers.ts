@@ -1551,15 +1551,17 @@ export class McpHandlers {
   public async handleLocalReadFile(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:read', 'tasks:submit');
+    if (!args?.projectId || !args?.relativePath) {
+      throw new Error('INVALID_ARGUMENT: projectId and relativePath are required for local_read_file');
+    }
     return this.gateway.taskRouter.routeTaskSubmit(
       {
         backend: 'local',
         capability: 'local:read_file',
         payload: {
-          projectId: args?.projectId,
-          relativePath: args?.relativePath,
-          filePath: args?.filePath,
-          limit: args?.limit
+          projectId: args.projectId,
+          relativePath: args.relativePath,
+          limit: args.limit
         },
         clientRequestId: args?.clientRequestId
       },
@@ -1571,6 +1573,9 @@ export class McpHandlers {
   public async handleLocalWriteFile(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:write', 'tasks:submit');
+    if (!args?.projectId || !args?.relativePath) {
+      throw new Error('INVALID_ARGUMENT: projectId and relativePath are required for local_write_file');
+    }
     if (args?.content === undefined || args?.content === null) {
       throw new Error('INVALID_ARGUMENT: content is required for local_write_file');
     }
@@ -1581,8 +1586,7 @@ export class McpHandlers {
         payload: {
           projectId: args.projectId,
           relativePath: args.relativePath,
-          content: args.content,
-          filePath: args.filePath
+          content: args.content
         },
         clientRequestId: args.clientRequestId
       },
@@ -1594,8 +1598,14 @@ export class McpHandlers {
   public async handleLocalPatchFile(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:write', 'tasks:submit');
-    if (args?.content === undefined || args?.content === null) {
-      throw new Error('INVALID_ARGUMENT: content is required for local_patch_file');
+    if (!args?.projectId || !args?.relativePath) {
+      throw new Error('INVALID_ARGUMENT: projectId and relativePath are required for local_patch_file');
+    }
+    if (!args?.expectedSha256 || typeof args.expectedSha256 !== 'string') {
+      throw new Error('INVALID_ARGUMENT: expectedSha256 is required for local_patch_file');
+    }
+    if (!Array.isArray(args?.patches) || args.patches.length === 0) {
+      throw new Error('INVALID_ARGUMENT: patches array is required and must contain at least one patch object');
     }
     return this.gateway.taskRouter.routeTaskSubmit(
       {
@@ -1604,8 +1614,8 @@ export class McpHandlers {
         payload: {
           projectId: args.projectId,
           relativePath: args.relativePath,
-          content: args.content,
-          filePath: args.filePath
+          expectedSha256: args.expectedSha256,
+          patches: args.patches
         },
         clientRequestId: args.clientRequestId
       },
@@ -1617,13 +1627,15 @@ export class McpHandlers {
   public async handleLocalGitStatus(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:read', 'tasks:submit');
+    if (!args?.projectId) {
+      throw new Error('INVALID_ARGUMENT: projectId is required for local_git_status');
+    }
     return this.gateway.taskRouter.routeTaskSubmit(
       {
         backend: 'local',
         capability: 'local:git_status',
         payload: {
-          projectId: args?.projectId,
-          workspace: args?.workspace
+          projectId: args.projectId
         },
         clientRequestId: args?.clientRequestId
       },
@@ -1635,15 +1647,16 @@ export class McpHandlers {
   public async handleLocalRunTests(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:test', 'tasks:submit');
+    if (!args?.projectId) {
+      throw new Error('INVALID_ARGUMENT: projectId is required for local_run_tests');
+    }
     return this.gateway.taskRouter.routeTaskSubmit(
       {
         backend: 'local',
         capability: 'local:run_tests',
         payload: {
-          projectId: args?.projectId,
-          runner: args?.runner,
-          customCommand: args?.customCommand,
-          workspace: args?.workspace
+          projectId: args.projectId,
+          runnerId: args?.runnerId || 'npm'
         },
         clientRequestId: args?.clientRequestId
       },
@@ -1655,14 +1668,16 @@ export class McpHandlers {
   public async handleLocalBuildProject(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:test', 'tasks:submit');
+    if (!args?.projectId) {
+      throw new Error('INVALID_ARGUMENT: projectId is required for local_build_project');
+    }
     return this.gateway.taskRouter.routeTaskSubmit(
       {
         backend: 'local',
         capability: 'local:build_project',
         payload: {
-          projectId: args?.projectId,
-          command: args?.command,
-          workspace: args?.workspace
+          projectId: args.projectId,
+          commandId: args?.commandId || 'npm'
         },
         clientRequestId: args?.clientRequestId
       },

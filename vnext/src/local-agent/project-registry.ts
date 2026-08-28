@@ -8,12 +8,24 @@ export interface LocalProjectPermissions {
   build: boolean;
 }
 
+export interface ConfiguredCommand {
+  executable: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+export interface LocalProjectCommands {
+  test?: Record<string, ConfiguredCommand>;
+  build?: Record<string, ConfiguredCommand>;
+}
+
 export interface LocalProjectDefinition {
   projectId: string;
   displayName?: string;
   root: string;
   enabled?: boolean;
   permissions?: Partial<LocalProjectPermissions>;
+  commands?: LocalProjectCommands;
 }
 
 export interface LocalProjectMetadata {
@@ -23,6 +35,8 @@ export interface LocalProjectMetadata {
   permissions: LocalProjectPermissions;
   gitDetected: boolean;
   availableCapabilities: string[];
+  configuredTestRunners?: string[];
+  configuredBuildCommands?: string[];
 }
 
 export class ProjectPathSecurity {
@@ -235,44 +249,73 @@ export class ProjectRegistry {
     canonicalRoot: string;
     enabled: boolean;
     permissions: LocalProjectPermissions;
+    commands?: LocalProjectCommands;
   }> = new Map();
 
   private configFilePath?: string;
 
-  constructor(options?: { configFilePath?: string; initialProjects?: (LocalProjectDefinition | string)[] }) {
+  constructor(options?: {
+    configFilePath?: string;
+    initialProjects?: LocalProjectDefinition[];
+    initialLegacyWorkspaces?: string[];
+  }) {
     if (options?.configFilePath) {
       this.configFilePath = path.resolve(options.configFilePath);
       this.loadFromFile();
     }
+
     if (options?.initialProjects) {
       for (const item of options.initialProjects) {
-        if (typeof item === 'string') {
-          const normRoot = path.resolve(item);
-          const baseName = path.basename(normRoot) || 'default-project';
-          this.registerProject({
-            projectId: baseName,
-            displayName: baseName,
-            root: normRoot,
-            enabled: true,
-            permissions: { read: true, write: true, test: true, build: true }
-          });
+        this.registerProject(item);
+      }
+    }
+
+    if (options?.initialLegacyWorkspaces) {
+      for (const rawWorkspace of options.initialLegacyWorkspaces) {
+        const normRoot = path.resolve(rawWorkspace);
+        const baseName = ProjectPathSecurity.normalizeProjectId(path.basename(normRoot) || 'default-workspace');
+        
+        // Detect collision on same basename from different roots
+        if (this.projects.has(baseName)) {
+          const existing = this.projects.get(baseName)!;
+          const canonical = ProjectPathSecurity.getCanonicalRoot(normRoot);
+          if (!ProjectPathSecurity.isPathInsideRoot(canonical, existing.canonicalRoot) || !ProjectPathSecurity.isPathInsideRoot(existing.canonicalRoot, canonical)) {
+            const err: any = new Error(`LOCAL_PROJECT_ID_CONFLICT: Multiple legacy workspace roots share the same basename '${baseName}'. Use explicit named project configuration with unique projectIds.`);
+            err.code = 'LOCAL_PROJECT_ID_CONFLICT';
+            throw err;
+          }
         } else {
-          this.registerProject(item);
+          // Legacy migration path grants full permissions for backwards compatibility
+          this.registerLegacyWorkspace(baseName, normRoot);
         }
       }
     }
   }
 
+  /**
+   * Registers a named project definition with fail-safe defaults (least privilege).
+   * Omitted sensitive permissions (write, test, build) default to false.
+   */
   public registerProject(def: LocalProjectDefinition): void {
     const normalizedId = ProjectPathSecurity.normalizeProjectId(def.projectId);
     const resolvedRoot = path.resolve(def.root);
     const canonicalRoot = ProjectPathSecurity.getCanonicalRoot(resolvedRoot);
 
+    if (this.projects.has(normalizedId)) {
+      const existing = this.projects.get(normalizedId)!;
+      if (existing.canonicalRoot !== canonicalRoot) {
+        const err: any = new Error(`LOCAL_PROJECT_ID_CONFLICT: Project ID '${normalizedId}' is already registered with a different root`);
+        err.code = 'LOCAL_PROJECT_ID_CONFLICT';
+        throw err;
+      }
+    }
+
+    // Fail-safe defaults: read defaults to true; write, test, build default to false
     const permissions: LocalProjectPermissions = {
       read: def.permissions?.read !== false,
-      write: def.permissions?.write !== false,
-      test: def.permissions?.test !== false,
-      build: def.permissions?.build !== false
+      write: def.permissions?.write === true,
+      test: def.permissions?.test === true,
+      build: def.permissions?.build === true
     };
 
     this.projects.set(normalizedId, {
@@ -281,7 +324,26 @@ export class ProjectRegistry {
       root: resolvedRoot,
       canonicalRoot,
       enabled: def.enabled !== false,
-      permissions
+      permissions,
+      commands: def.commands
+    });
+  }
+
+  /**
+   * Explicit legacy workspace registration (preserves historical full permissions for legacy strings).
+   */
+  public registerLegacyWorkspace(projectId: string, root: string): void {
+    const normalizedId = ProjectPathSecurity.normalizeProjectId(projectId);
+    const resolvedRoot = path.resolve(root);
+    const canonicalRoot = ProjectPathSecurity.getCanonicalRoot(resolvedRoot);
+
+    this.projects.set(normalizedId, {
+      projectId: normalizedId,
+      displayName: projectId,
+      root: resolvedRoot,
+      canonicalRoot,
+      enabled: true,
+      permissions: { read: true, write: true, test: true, build: true }
     });
   }
 
@@ -297,6 +359,7 @@ export class ProjectRegistry {
     canonicalRoot: string;
     enabled: boolean;
     permissions: LocalProjectPermissions;
+    commands?: LocalProjectCommands;
   } {
     const normalizedId = ProjectPathSecurity.normalizeProjectId(projectId);
     const proj = this.projects.get(normalizedId);
@@ -336,20 +399,23 @@ export class ProjectRegistry {
       if (p.permissions.build) {
         availableCapabilities.push('local:build_project');
       }
+
       list.push({
         projectId: p.projectId,
         displayName: p.displayName,
         enabled: p.enabled,
         permissions: { ...p.permissions },
         gitDetected,
-        availableCapabilities
+        availableCapabilities,
+        configuredTestRunners: p.commands?.test ? Object.keys(p.commands.test) : undefined,
+        configuredBuildCommands: p.commands?.build ? Object.keys(p.commands.build) : undefined
       });
     }
     return list;
   }
 
   /**
-   * Legacy resolution helper: matches an absolute path against registered project roots.
+   * Deprecated legacy resolution helper: matches an absolute path against registered project roots.
    */
   public resolveLegacyPath(targetPath: string): { project: any; relativePath: string } | undefined {
     const resolved = path.resolve(targetPath);
@@ -384,7 +450,8 @@ export class ProjectRegistry {
       displayName: p.displayName,
       root: p.root,
       enabled: p.enabled,
-      permissions: p.permissions
+      permissions: p.permissions,
+      commands: p.commands
     }));
     fs.writeFileSync(this.configFilePath, JSON.stringify({ projects: items }, null, 2), 'utf-8');
   }

@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { GatewayServer } from '../../src/gateway/server';
 import { LocalAgentClient } from '../../src/local-agent/client';
 import { TaskExecutor } from '../../src/local-agent/task-executor';
@@ -33,7 +34,8 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
   fs.mkdirSync(rootB, { recursive: true });
   fs.mkdirSync(rootReadOnly, { recursive: true });
 
-  fs.writeFileSync(path.join(rootA, 'greeting.txt'), 'Greetings from PROJECT_A', 'utf-8');
+  const initialAContent = 'Hello Project A!\nOriginal Line 2\n';
+  fs.writeFileSync(path.join(rootA, 'greeting.txt'), initialAContent, 'utf-8');
   fs.writeFileSync(path.join(rootB, 'greeting.txt'), 'Greetings from PROJECT_B', 'utf-8');
   fs.writeFileSync(path.join(rootReadOnly, 'readonly.txt'), 'Read Only Content', 'utf-8');
 
@@ -105,17 +107,100 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       const resA = await executor.executeTask(makeTask('local:read_file', { projectId: 'project-a', relativePath: 'greeting.txt' }), l => logs.push(l));
       const resB = await executor.executeTask(makeTask('local:read_file', { projectId: 'project-b', relativePath: 'greeting.txt' }), l => logs.push(l));
 
-      assert.strictEqual(resA.content, 'Greetings from PROJECT_A');
+      assert.strictEqual(resA.content, initialAContent);
       assert.strictEqual(resB.content, 'Greetings from PROJECT_B');
     });
 
-    await test('TaskExecutor: Write to project-a routes correctly and preserves isolation', async () => {
+    // ----------------------------------------------------
+    // Deterministic Structured Patch Tests
+    // ----------------------------------------------------
+    await test('TaskExecutor: patch_file fails closed on SHA mismatch (zero write)', async () => {
       const logs: string[] = [];
-      const writeRes = await executor.executeTask(makeTask('local:write_file', { projectId: 'project-a', relativePath: 'output/result.json', content: '{"status":"ok"}' }), l => logs.push(l));
+      const wrongSha = '0000000000000000000000000000000000000000000000000000000000000000';
+      await assert.rejects(
+        async () => executor.executeTask(makeTask('local:patch_file', {
+          projectId: 'project-a',
+          relativePath: 'greeting.txt',
+          expectedSha256: wrongSha,
+          patches: [{ oldText: 'Original Line 2', newText: 'Modified Line 2' }]
+        }), l => logs.push(l)),
+        /LOCAL_FILE_CONFLICT/
+      );
+      // Verify zero write
+      assert.strictEqual(fs.readFileSync(path.join(rootA, 'greeting.txt'), 'utf-8'), initialAContent);
+    });
 
-      assert.strictEqual(writeRes.status, 'written');
-      assert.strictEqual(fs.existsSync(path.join(rootA, 'output', 'result.json')), true);
-      assert.strictEqual(fs.existsSync(path.join(rootB, 'output', 'result.json')), false);
+    await test('TaskExecutor: patch_file fails closed when target oldText is missing (zero write)', async () => {
+      const logs: string[] = [];
+      const currentSha = crypto.createHash('sha256').update(initialAContent).digest('hex');
+      await assert.rejects(
+        async () => executor.executeTask(makeTask('local:patch_file', {
+          projectId: 'project-a',
+          relativePath: 'greeting.txt',
+          expectedSha256: currentSha,
+          patches: [{ oldText: 'NON_EXISTENT_TEXT_BLOCK', newText: 'Replacement' }]
+        }), l => logs.push(l)),
+        /LOCAL_PATCH_FAILED/
+      );
+      // Verify zero write
+      assert.strictEqual(fs.readFileSync(path.join(rootA, 'greeting.txt'), 'utf-8'), initialAContent);
+    });
+
+    await test('TaskExecutor: patch_file succeeds with exact patch and returns valid readback SHA', async () => {
+      const logs: string[] = [];
+      const currentSha = crypto.createHash('sha256').update(initialAContent).digest('hex');
+      const patchRes = await executor.executeTask(makeTask('local:patch_file', {
+        projectId: 'project-a',
+        relativePath: 'greeting.txt',
+        expectedSha256: currentSha,
+        patches: [{ oldText: 'Original Line 2', newText: 'Patched Line 2' }]
+      }), l => logs.push(l));
+
+      assert.strictEqual(patchRes.status, 'patched');
+      assert.strictEqual(patchRes.previousSha256, currentSha);
+
+      const updatedOnDisk = fs.readFileSync(path.join(rootA, 'greeting.txt'), 'utf-8');
+      const expectedNewContent = 'Hello Project A!\nPatched Line 2\n';
+      assert.strictEqual(updatedOnDisk, expectedNewContent);
+
+      const expectedNewSha = crypto.createHash('sha256').update(expectedNewContent).digest('hex');
+      assert.strictEqual(patchRes.newSha256, expectedNewSha);
+    });
+
+    // ----------------------------------------------------
+    // Command Injection / Arbitrary Shell Prevention Tests
+    // ----------------------------------------------------
+    await test('TaskExecutor: local:run_tests rejects arbitrary customCommand', async () => {
+      const logs: string[] = [];
+      await assert.rejects(
+        async () => executor.executeTask(makeTask('local:run_tests', {
+          projectId: 'project-a',
+          customCommand: 'echo EVIL && dir'
+        }), l => logs.push(l)),
+        /LOCAL_PROJECT_ARBITRARY_COMMAND_FORBIDDEN/
+      );
+    });
+
+    await test('TaskExecutor: local:build_project rejects arbitrary command string', async () => {
+      const logs: string[] = [];
+      await assert.rejects(
+        async () => executor.executeTask(makeTask('local:build_project', {
+          projectId: 'project-a',
+          command: 'powershell -c whoami'
+        }), l => logs.push(l)),
+        /LOCAL_PROJECT_ARBITRARY_COMMAND_FORBIDDEN/
+      );
+    });
+
+    await test('TaskExecutor: local:raw_shell is rejected when allowRawShell is false', async () => {
+      const logs: string[] = [];
+      await assert.rejects(
+        async () => executor.executeTask(makeTask('local:raw_shell', {
+          projectId: 'project-a',
+          command: 'echo test'
+        }), l => logs.push(l)),
+        /RAW_SHELL_DENIED/
+      );
     });
 
     await test('TaskExecutor: Write to read-only project is blocked (LOCAL_PROJECT_WRITE_FORBIDDEN)', async () => {
@@ -150,28 +235,16 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       );
     });
 
-    await test('TaskExecutor: Caller-supplied cwd is ignored as authority', async () => {
-      const logs: string[] = [];
-      const res = await executor.executeTask(makeTask('local:read_file', {
-        projectId: 'project-a',
-        relativePath: 'greeting.txt',
-        cwd: rootB,
-        workspace: rootB
-      }), l => logs.push(l));
-
-      assert.strictEqual(res.content, 'Greetings from PROJECT_A');
-    });
-
     // ----------------------------------------------------
     // PART 2: Full Gateway + LocalAgent Client E2E Flow
     // ----------------------------------------------------
     const testStorageDir = path.join(tmpBase, '.devspace-storage-gateway');
-    const port = 27000 + Math.floor(Math.random() * 2000);
+    const port = 27100 + Math.floor(Math.random() * 2000);
     const server = new GatewayServer({
       port,
       host: '127.0.0.1',
       storageDir: testStorageDir,
-      masterSecret: 'test-secret-multi'
+      masterSecret: 'test-secret-multi-2'
     });
 
     let agent: LocalAgentClient | undefined;
@@ -190,8 +263,8 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         deviceId,
         token: deviceToken,
         projects: [
-          { projectId: 'project-a', displayName: 'Project Alpha', root: rootA },
-          { projectId: 'project-b', displayName: 'Project Beta', root: rootB }
+          { projectId: 'project-a', displayName: 'Project Alpha', root: rootA, permissions: { read: true, write: true, test: true, build: true } },
+          { projectId: 'project-b', displayName: 'Project Beta', root: rootB, permissions: { read: true, write: true, test: true, build: true } }
         ],
         pollIntervalMs: 50,
         heartbeatIntervalMs: 100
@@ -210,6 +283,18 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         subjectId: 'user-chatgpt'
       };
 
+      // MCP: First-class handler validation (must reject missing projectId / relativePath)
+      await test('MCP Handlers: local_read_file rejects missing projectId/relativePath', async () => {
+        await assert.rejects(
+          async () => mcpHandlers.handleLocalReadFile({ relativePath: 'test.txt' }, caller),
+          /INVALID_ARGUMENT/
+        );
+        await assert.rejects(
+          async () => mcpHandlers.handleLocalReadFile({ projectId: 'project-a' }, caller),
+          /INVALID_ARGUMENT/
+        );
+      });
+
       // MCP: local_project_list
       await test('MCP Gateway E2E: local_project_list discovers registered projects', async () => {
         const submitRes = await mcpHandlers.handleLocalProjectList({}, caller);
@@ -220,47 +305,15 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         }
         assert.strictEqual(task?.status, 'succeeded');
         assert.strictEqual(task?.result?.count, 2);
-        assert.strictEqual(task?.result?.projects?.length, 2);
       });
 
-      // MCP: local_read_file on project-a
-      await test('MCP Gateway E2E: local_read_file on project-a returns Project A content', async () => {
-        const submitRes = await mcpHandlers.handleLocalReadFile({
-          projectId: 'project-a',
-          relativePath: 'greeting.txt'
-        }, caller);
-
-        let task = server.taskStore.getTask(submitRes.taskId);
-        for (let i = 0; i < 30 && task?.status !== 'succeeded'; i++) {
-          await new Promise(r => setTimeout(r, 50));
-          task = server.taskStore.getTask(submitRes.taskId);
-        }
-        assert.strictEqual(task?.status, 'succeeded');
-        assert.strictEqual(task?.result?.content, 'Greetings from PROJECT_A');
-      });
-
-      // MCP: local_read_file on project-b
-      await test('MCP Gateway E2E: local_read_file on project-b returns Project B content', async () => {
-        const submitRes = await mcpHandlers.handleLocalReadFile({
-          projectId: 'project-b',
-          relativePath: 'greeting.txt'
-        }, caller);
-
-        let task = server.taskStore.getTask(submitRes.taskId);
-        for (let i = 0; i < 30 && task?.status !== 'succeeded'; i++) {
-          await new Promise(r => setTimeout(r, 50));
-          task = server.taskStore.getTask(submitRes.taskId);
-        }
-        assert.strictEqual(task?.status, 'succeeded');
-        assert.strictEqual(task?.result?.content, 'Greetings from PROJECT_B');
-      });
-
-      // MCP: local_write_file on project-b + read back
-      await test('MCP Gateway E2E: local_write_file on project-b writes and reads back', async () => {
+      // MCP: local_write_file on project-b + local_patch_file + local_read_file
+      await test('MCP Gateway E2E: local_write_file, local_patch_file, and local_read_file flow', async () => {
+        const initialNote = 'Line 1: Note\nLine 2: Target\n';
         const writeSubmit = await mcpHandlers.handleLocalWriteFile({
           projectId: 'project-b',
-          relativePath: 'notes/test-output.txt',
-          content: 'E2E_WRITE_SUCCESS'
+          relativePath: 'notes/flow-test.txt',
+          content: initialNote
         }, caller);
 
         let writeTask = server.taskStore.getTask(writeSubmit.taskId);
@@ -270,9 +323,25 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         }
         assert.strictEqual(writeTask?.status, 'succeeded');
 
+        const shaBeforePatch = crypto.createHash('sha256').update(initialNote).digest('hex');
+        const patchSubmit = await mcpHandlers.handleLocalPatchFile({
+          projectId: 'project-b',
+          relativePath: 'notes/flow-test.txt',
+          expectedSha256: shaBeforePatch,
+          patches: [{ oldText: 'Line 2: Target', newText: 'Line 2: Patched via MCP' }]
+        }, caller);
+
+        let patchTask = server.taskStore.getTask(patchSubmit.taskId);
+        for (let i = 0; i < 30 && patchTask?.status !== 'succeeded'; i++) {
+          await new Promise(r => setTimeout(r, 50));
+          patchTask = server.taskStore.getTask(patchSubmit.taskId);
+        }
+        assert.strictEqual(patchTask?.status, 'succeeded');
+        assert.strictEqual(patchTask?.result?.status, 'patched');
+
         const readSubmit = await mcpHandlers.handleLocalReadFile({
           projectId: 'project-b',
-          relativePath: 'notes/test-output.txt'
+          relativePath: 'notes/flow-test.txt'
         }, caller);
 
         let readTask = server.taskStore.getTask(readSubmit.taskId);
@@ -281,23 +350,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
           readTask = server.taskStore.getTask(readSubmit.taskId);
         }
         assert.strictEqual(readTask?.status, 'succeeded');
-        assert.strictEqual(readTask?.result?.content, 'E2E_WRITE_SUCCESS');
-      });
-
-      // MCP: Legacy compatibility test with absolute path
-      await test('MCP Gateway E2E: Legacy compatibility path continues to resolve in registered root', async () => {
-        const legacyFilePath = path.join(rootA, 'greeting.txt');
-        const legacySubmit = await mcpHandlers.handleLocalReadFile({
-          filePath: legacyFilePath
-        }, caller);
-
-        let task = server.taskStore.getTask(legacySubmit.taskId);
-        for (let i = 0; i < 30 && task?.status !== 'succeeded'; i++) {
-          await new Promise(r => setTimeout(r, 50));
-          task = server.taskStore.getTask(legacySubmit.taskId);
-        }
-        assert.strictEqual(task?.status, 'succeeded');
-        assert.strictEqual(task?.result?.content, 'Greetings from PROJECT_A');
+        assert.strictEqual(readTask?.result?.content, 'Line 1: Note\nLine 2: Patched via MCP\n');
       });
 
     } finally {

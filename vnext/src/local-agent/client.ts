@@ -12,7 +12,7 @@ export interface LocalAgentClientConfig {
   token: string;
   name?: string;
   allowedWorkspaces?: string[];
-  projects?: (LocalProjectDefinition | string)[];
+  projects?: LocalProjectDefinition[];
   projectRegistry?: ProjectRegistry;
   projectsConfigFile?: string;
   allowRawShell?: boolean;

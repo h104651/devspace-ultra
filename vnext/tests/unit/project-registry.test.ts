@@ -52,24 +52,61 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       assert.throws(() => ProjectPathSecurity.normalizeProjectId('proj*sub'), /INVALID_PROJECT_ID/);
     });
 
-    // 2. ProjectRegistry Registration & Lookup
-    await test('ProjectRegistry: register and get project', () => {
+    // 2. ProjectRegistry Least-Privilege Defaults
+    await test('ProjectRegistry: omitted write/test/build permissions default to FALSE for named project', () => {
       const registry = new ProjectRegistry();
       registry.registerProject({
-        projectId: 'Project-A',
-        displayName: 'Project Alpha',
-        root: rootA,
-        permissions: { read: true, write: true, test: true, build: true }
+        projectId: 'safe-project',
+        displayName: 'Safe Project',
+        root: rootA
+        // permissions omitted
       });
 
-      const p = registry.getProject('project-a');
-      assert.strictEqual(p.projectId, 'project-a');
-      assert.strictEqual(p.displayName, 'Project Alpha');
-      assert.strictEqual(p.enabled, true);
+      const p = registry.getProject('safe-project');
       assert.strictEqual(p.permissions.read, true);
-      assert.strictEqual(p.permissions.write, true);
+      assert.strictEqual(p.permissions.write, false);
+      assert.strictEqual(p.permissions.test, false);
+      assert.strictEqual(p.permissions.build, false);
     });
 
+    await test('ProjectRegistry: explicit permissions are preserved for named project', () => {
+      const registry = new ProjectRegistry();
+      registry.registerProject({
+        projectId: 'custom-perm',
+        root: rootA,
+        permissions: { read: true, write: true, test: false, build: true }
+      });
+
+      const p = registry.getProject('custom-perm');
+      assert.strictEqual(p.permissions.read, true);
+      assert.strictEqual(p.permissions.write, true);
+      assert.strictEqual(p.permissions.test, false);
+      assert.strictEqual(p.permissions.build, true);
+    });
+
+    // 3. Collision Protection
+    await test('ProjectRegistry: same-basename legacy roots throw LOCAL_PROJECT_ID_CONFLICT', () => {
+      const dir1 = path.join(tmpBase, 'dir1', 'common-name');
+      const dir2 = path.join(tmpBase, 'dir2', 'common-name');
+      fs.mkdirSync(dir1, { recursive: true });
+      fs.mkdirSync(dir2, { recursive: true });
+
+      assert.throws(
+        () => new ProjectRegistry({ initialLegacyWorkspaces: [dir1, dir2] }),
+        /LOCAL_PROJECT_ID_CONFLICT/
+      );
+    });
+
+    await test('ProjectRegistry: duplicate named projectId with different root throws LOCAL_PROJECT_ID_CONFLICT', () => {
+      const registry = new ProjectRegistry();
+      registry.registerProject({ projectId: 'my-proj', root: rootA });
+      assert.throws(
+        () => registry.registerProject({ projectId: 'my-proj', root: rootB }),
+        /LOCAL_PROJECT_ID_CONFLICT/
+      );
+    });
+
+    // 4. Lookup & List
     await test('ProjectRegistry: getProject throws LOCAL_PROJECT_NOT_FOUND for unregistered', () => {
       const registry = new ProjectRegistry();
       assert.throws(
@@ -96,7 +133,12 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       registry.registerProject({
         projectId: 'project-a',
         displayName: 'Project Alpha',
-        root: rootA
+        root: rootA,
+        commands: {
+          test: {
+            custom_test: { executable: 'npm', args: ['test'] }
+          }
+        }
       });
 
       const list = registry.listProjects();
@@ -106,9 +148,10 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       assert.strictEqual(list[0].enabled, true);
       assert.strictEqual((list[0] as any).root, undefined);
       assert.strictEqual((list[0] as any).canonicalRoot, undefined);
+      assert.deepStrictEqual(list[0].configuredTestRunners, ['custom_test']);
     });
 
-    // 3. validateRelativePath Security
+    // 5. validateRelativePath Cross-Platform Security
     await test('validateRelativePath: accepts valid relative paths', () => {
       assert.strictEqual(ProjectPathSecurity.validateRelativePath('src/index.ts'), path.normalize('src/index.ts'));
       assert.strictEqual(ProjectPathSecurity.validateRelativePath('docs/readme.md'), path.normalize('docs/readme.md'));
@@ -126,7 +169,7 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       assert.throws(() => ProjectPathSecurity.validateRelativePath('//server/share/file.txt'), /LOCAL_PROJECT_PATH_ESCAPE/);
     });
 
-    await test('validateRelativePath: rejects .. path traversal escaping root', () => {
+    await test('validateRelativePath: rejects .. path traversal escaping root across all slash formats', () => {
       assert.throws(() => ProjectPathSecurity.validateRelativePath('..'), /LOCAL_PROJECT_PATH_ESCAPE/);
       assert.throws(() => ProjectPathSecurity.validateRelativePath('../secret.txt'), /LOCAL_PROJECT_PATH_ESCAPE/);
       assert.throws(() => ProjectPathSecurity.validateRelativePath('..\\secret.txt'), /LOCAL_PROJECT_PATH_ESCAPE/);
@@ -134,7 +177,7 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       assert.throws(() => ProjectPathSecurity.validateRelativePath('foo\\..\\..\\secret.txt'), /LOCAL_PROJECT_PATH_ESCAPE/);
     });
 
-    // 4. resolveReadPath & resolveWritePath
+    // 6. resolveReadPath & resolveWritePath
     await test('resolveReadPath: resolves existing file within canonical root', () => {
       const canonicalRoot = ProjectPathSecurity.getCanonicalRoot(rootA);
       const target = ProjectPathSecurity.resolveReadPath(canonicalRoot, 'fileA.txt');
@@ -164,7 +207,6 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
         );
       } catch (symlinkErr: any) {
         if (symlinkErr.code === 'EPERM' && process.platform === 'win32') {
-          // Windows unprivileged symlink privilege limitation in some CI environments
           console.log('      (Skipping symlink creation test due to Windows unprivileged environment)');
         } else {
           throw symlinkErr;
@@ -188,7 +230,7 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       );
     });
 
-    // 5. Config persistence
+    // 7. Config persistence
     await test('ProjectRegistry: load and save to projects.json', () => {
       const configPath = path.join(tmpBase, 'projects.json');
       const reg1 = new ProjectRegistry({ configFilePath: configPath });
@@ -196,7 +238,7 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
         projectId: 'project-1',
         displayName: 'Proj 1',
         root: rootA,
-        permissions: { read: true, write: false, test: true, build: false }
+        permissions: { read: true, write: true, test: false, build: false }
       });
       reg1.saveToFile();
 
@@ -204,7 +246,7 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       const p = reg2.getProject('project-1');
       assert.strictEqual(p.projectId, 'project-1');
       assert.strictEqual(p.displayName, 'Proj 1');
-      assert.strictEqual(p.permissions.write, false);
+      assert.strictEqual(p.permissions.write, true);
       assert.strictEqual(p.permissions.read, true);
     });
 
