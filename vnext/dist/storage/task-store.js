@@ -247,13 +247,14 @@ class TaskStore {
         this.saveTask(task);
         return true;
     }
-    failTask(taskId, error) {
+    failTask(taskId, error, options) {
         const task = this.tasks.get(taskId);
         if (!task)
             return false;
         task.error = error;
         task.completedAt = Date.now();
-        if (task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
+        const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+        if (isRetryable) {
             task.retryPolicy.retryCount++;
             task.lease = undefined;
             // File-backed local runtimes can honor the requested backoff timer. Durable
@@ -281,6 +282,9 @@ class TaskStore {
         this.saveTask(task);
         return true;
     }
+    failTaskTerminal(taskId, error) {
+        return this.failTask(taskId, error, { retryable: false });
+    }
     cancelTask(taskId, reason = 'User requested cancellation') {
         const task = this.tasks.get(taskId);
         if (!task)
@@ -295,11 +299,31 @@ class TaskStore {
         this.saveTask(task);
         return true;
     }
+    setExternalRun(taskId, externalRun) {
+        const task = this.tasks.get(taskId);
+        if (!task)
+            return false;
+        task.externalRun = externalRun;
+        this.saveTask(task);
+        return true;
+    }
+    updateTask(taskId, updates) {
+        const task = this.tasks.get(taskId);
+        if (!task)
+            return false;
+        Object.assign(task, updates);
+        this.saveTask(task);
+        return true;
+    }
     recoverStaleTasks() {
         const now = Date.now();
         let recoveredCount = 0;
         let failedCount = 0;
         for (const task of this.tasks.values()) {
+            // External durable jobs (such as Kaggle runs) must not be blindly requeued on local worker lease timeout.
+            if (task.externalRun && task.externalRun.provider === 'kaggle') {
+                continue;
+            }
             if ((task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running') &&
                 task.lease &&
                 now > task.lease.leaseExpiresAt) {

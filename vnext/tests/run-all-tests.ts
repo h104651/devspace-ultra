@@ -78,6 +78,7 @@ async function main() {
   console.log('====================================================');
   if (totalFailed > 0) process.exit(1);
   console.log('\x1b[32mAll test suites passed successfully!\x1b[0m\n');
+  process.exit(0);
 }
 
 main().catch(err => { console.error('Fatal error during test run:', err); process.exit(1); });

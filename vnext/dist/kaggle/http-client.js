@@ -368,6 +368,19 @@ class CloudflareKaggleHttpClient {
             if (!res.ok) {
                 const errText = await res.text();
                 if (version !== undefined && version !== null) {
+                    if (res.status === 403 || res.status === 404) {
+                        const structured = JSON.stringify({
+                            error: 'KAGGLE_VERSION_ACCESS_DENIED_OR_NOT_FOUND',
+                            kernelRef: `${owner}/${slug}`,
+                            requestedVersion: version,
+                            currentProjectPullSucceeded: true,
+                            httpStatus: res.status,
+                            rawMessage: errText,
+                            authMode: 'kaggle_basic',
+                            message: `HTTP ${res.status}: Historical version ${version} for kernel ${owner}/${slug} access denied or not found.`
+                        });
+                        throw new Error(structured);
+                    }
                     throw new Error(`KAGGLE_VERSION_PULL_FAILED: HTTP ${res.status}: Failed to pull version ${version} for kernel ${owner}/${slug}: ${errText}`);
                 }
                 throw new Error(`KAGGLE_PULL_FAILED: HTTP ${res.status}: ${errText}`);

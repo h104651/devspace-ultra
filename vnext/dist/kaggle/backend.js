@@ -78,9 +78,32 @@ class KaggleBackend {
         const actualSlug = pushResult.kernelSlug || payload.kernelSlug;
         payload.kernelSlug = actualSlug;
         this.taskStore.startTask(task.taskId, 'kaggle-backend');
-        this.taskStore.appendLogs(task.taskId, [`Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`, 'Scheduling Kaggle status monitor.']);
+        // Attach ExternalRunInfo to durable task
+        const externalRun = {
+            provider: 'kaggle',
+            kernelRef: actualSlug,
+            versionNumber: pushResult.versionNumber || 'unknown',
+            submittedAt: Date.now(),
+            lastPolledAt: Date.now(),
+            lastRemoteStatus: 'queued',
+            reconciliationState: 'active'
+        };
+        this.taskStore.setExternalRun(task.taskId, externalRun);
+        this.taskStore.updateTask(task.taskId, {
+            metadata: {
+                ...task.metadata,
+                createsNewKaggleVersion: true,
+                createdVersionNumber: pushResult.versionNumber || 'unknown',
+                kernelRef: actualSlug
+            }
+        });
+        this.taskStore.appendLogs(task.taskId, [
+            `Kernel successfully submitted to Kaggle. URL: ${pushResult.kernelUrl}`,
+            `Version: ${pushResult.versionNumber || 'unknown'}`,
+            'Scheduling Kaggle status monitor.'
+        ]);
         await this.schedulePoll(task.taskId, actualSlug);
-        return { taskId: task.taskId, kernelSlug: actualSlug, status: 'running' };
+        return { taskId: task.taskId, kernelSlug: actualSlug, status: 'running', versionNumber: pushResult.versionNumber };
     }
     async schedulePoll(taskId, kernelSlug) {
         if (this.pollScheduler) {
@@ -96,29 +119,73 @@ class KaggleBackend {
         this.activePollers.set(taskId, timer);
     }
     async pollKaggleTask(taskId, kernelSlug, reschedule = false) {
+        return this.reconcileTask(taskId, reschedule);
+    }
+    /**
+     * Reconciles an externally-submitted Kaggle task against the authoritative remote provider.
+     * Never re-pushes or duplicates kernels on Kaggle.
+     */
+    async reconcileTask(taskId, reschedule = false) {
         const task = this.taskStore.getTask(taskId);
         if (!task || ['succeeded', 'failed', 'cancelled'].includes(task.status))
             return false;
+        const kernelSlug = task.externalRun?.kernelRef || task.payload?.kernelSlug;
+        if (!kernelSlug) {
+            this.taskStore.failTask(taskId, {
+                code: 'KAGGLE_RECONCILIATION_FAILED',
+                message: 'No kernel slug associated with task'
+            });
+            return false;
+        }
         try {
             const statusRes = await this.client.getKernelStatus(kernelSlug);
+            const now = Date.now();
+            const updatedExternalRun = {
+                ...(task.externalRun || { provider: 'kaggle', submittedAt: task.createdAt }),
+                kernelRef: kernelSlug,
+                lastPolledAt: now,
+                lastRemoteStatus: statusRes.status
+            };
             this.taskStore.appendLogs(taskId, [`Kaggle execution status: ${statusRes.status} (${statusRes.rawMessage || ''})`]);
             if (statusRes.status === 'complete') {
+                updatedExternalRun.reconciliationState = 'completed';
+                this.taskStore.setExternalRun(taskId, updatedExternalRun);
                 await this.finalizeKaggleRun(taskId, kernelSlug);
                 return false;
             }
             if (statusRes.status === 'error' || statusRes.status === 'quotaExceeded') {
+                updatedExternalRun.reconciliationState = 'failed';
+                this.taskStore.setExternalRun(taskId, updatedExternalRun);
                 this.taskStore.failTask(taskId, {
                     code: statusRes.status === 'quotaExceeded' ? 'RESOURCE_QUOTA_EXCEEDED' : 'KAGGLE_RUN_FAILED',
-                    message: statusRes.status === 'quotaExceeded' ? 'Kaggle GPU quota limit exceeded during execution' : `Kaggle execution resulted in error: ${statusRes.rawMessage}`
-                });
+                    message: statusRes.status === 'quotaExceeded'
+                        ? 'Kaggle GPU quota limit exceeded during execution'
+                        : `Kaggle execution resulted in error: ${statusRes.rawMessage}`
+                }, { retryable: false });
                 return false;
             }
+            if (statusRes.status === 'cancelled' || statusRes.status === 'cancelAcknowledged') {
+                updatedExternalRun.reconciliationState = 'failed';
+                this.taskStore.setExternalRun(taskId, updatedExternalRun);
+                this.taskStore.cancelTask(taskId, 'Kaggle execution cancelled remotely');
+                return false;
+            }
+            // If running or queued, preserve active state and reschedule poll
+            updatedExternalRun.reconciliationState = 'active';
+            this.taskStore.setExternalRun(taskId, updatedExternalRun);
             if (reschedule)
                 await this.schedulePoll(taskId, kernelSlug);
             return true;
         }
         catch (err) {
             this.taskStore.appendLogs(taskId, [`Kaggle status poll failed: ${err.message || String(err)}`]);
+            const updatedExternalRun = {
+                ...(task.externalRun || { provider: 'kaggle', submittedAt: task.createdAt }),
+                kernelRef: kernelSlug,
+                lastPolledAt: Date.now(),
+                reconciliationState: 'pending'
+            };
+            this.taskStore.setExternalRun(taskId, updatedExternalRun);
             if (reschedule)
                 await this.schedulePoll(taskId, kernelSlug);
             return true;
@@ -170,6 +237,25 @@ class KaggleBackend {
         }
         this.taskStore.completeTask(taskId, resultSummary);
         this.taskStore.appendLogs(taskId, [`Kaggle kernel run finalized successfully. Ingested ${resultSummary.outputFiles.length} artifacts.`]);
+    }
+    /**
+     * Reconciles all non-terminal tasks associated with an external Kaggle run on system hydration/startup.
+     */
+    async reconcileDanglingTasks() {
+        let count = 0;
+        const nonTerminalTasks = this.taskStore.listTasks().filter(t => ['queued', 'claimed', 'acknowledged', 'running'].includes(t.status) &&
+            t.externalRun &&
+            t.externalRun.provider === 'kaggle');
+        for (const task of nonTerminalTasks) {
+            try {
+                await this.reconcileTask(task.taskId, true);
+                count++;
+            }
+            catch (err) {
+                console.warn(`[KaggleBackend] Failed to reconcile dangling task ${task.taskId}:`, err.message);
+            }
+        }
+        return { reconciledCount: count };
     }
 }
 exports.KaggleBackend = KaggleBackend;

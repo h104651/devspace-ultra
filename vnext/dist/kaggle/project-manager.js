@@ -37,6 +37,7 @@ exports.computeProjectFingerprint = computeProjectFingerprint;
 exports.parseNotebookCells = parseNotebookCells;
 exports.appendCellsToNotebook = appendCellsToNotebook;
 exports.parseKernelRef = parseKernelRef;
+exports.validateNotebookDocument = validateNotebookDocument;
 const crypto = __importStar(require("crypto"));
 /**
  * Computes deterministic SHA-256 fingerprint over canonical source + metadata.
@@ -163,5 +164,50 @@ function parseKernelRef(kernelRef, defaultOwner) {
         owner: defaultOwner,
         slug: trimmed,
         ref: `${defaultOwner}/${trimmed}`
+    };
+}
+/**
+ * Validates that a string is a well-formed Jupyter Notebook document with valid integer nbformat >= 4 and a cells array.
+ */
+function validateNotebookDocument(source) {
+    if (!source || typeof source !== 'string' || source.trim().length === 0) {
+        return { valid: false, error: 'Notebook source is empty' };
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(source);
+    }
+    catch (err) {
+        return { valid: false, error: `Invalid JSON syntax: ${err.message}` };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { valid: false, error: 'Root document must be a JSON object' };
+    }
+    if (parsed.nbformat === undefined || parsed.nbformat === null) {
+        return { valid: false, error: 'Missing required field: nbformat' };
+    }
+    if (typeof parsed.nbformat !== 'number' || !Number.isInteger(parsed.nbformat)) {
+        return { valid: false, error: `nbformat must be an integer (received ${typeof parsed.nbformat}: ${parsed.nbformat})` };
+    }
+    if (parsed.nbformat < 4) {
+        return { valid: false, error: `Unsupported nbformat version ${parsed.nbformat} (minimum supported is 4)` };
+    }
+    if (!Array.isArray(parsed.cells)) {
+        return { valid: false, error: 'Missing or invalid cells array' };
+    }
+    for (let i = 0; i < parsed.cells.length; i++) {
+        const cell = parsed.cells[i];
+        if (!cell || typeof cell !== 'object' || Array.isArray(cell)) {
+            return { valid: false, error: `Cell at index ${i} is not a valid object` };
+        }
+        if (typeof cell.cell_type !== 'string' || !['code', 'markdown', 'raw'].includes(cell.cell_type)) {
+            return { valid: false, error: `Cell at index ${i} has invalid cell_type '${cell.cell_type}'` };
+        }
+    }
+    return {
+        valid: true,
+        nbformat: parsed.nbformat,
+        nbformatMinor: parsed.nbformat_minor,
+        cellsCount: parsed.cells.length
     };
 }

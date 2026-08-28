@@ -242,7 +242,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'script', isPrivate: true },
+            metadata: { kernelType: 'script', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
             source: ''
           })
         })
@@ -252,12 +252,13 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     await assert.rejects(
       async () => customHandlers.handleKaggleProjectContinue({
         kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
         mutation: {
           type: 'append_notebook_cells',
           cells: [{ cellType: 'code', source: 'print(1)' }]
         }
       }, submitAuth),
-      /KAGGLE_PROJECT_STATE_SUSPICIOUS/
+      /KAGGLE_PROJECT_STATE_SUSPICIOUS|KAGGLE_MUTATION_KERNEL_TYPE_MISMATCH/
     );
   });
 
@@ -279,7 +280,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         getClient: () => ({
           getUsername: () => 'testuser',
           pullProject: async () => ({
-            metadata: { kernelType: 'script', isPrivate: true, title: 'Corrupted Script' },
+            metadata: { kernelType: 'script', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true, title: 'Corrupted Script' },
             source: ''
           })
         })
@@ -293,6 +294,9 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       source: trustedNb,
       sourceSha256: trustedSha,
       kernelType: 'notebook',
+      allowKernelTypeChange: true,
+      kernelTypeChangeReason: 'Recover corrupted script back to canonical notebook',
+      acknowledgeUnobservedBrowserDraft: true,
       reason: 'Disaster recovery from verified local backup',
       clientRequestId: 'req-restore-test-1'
     }, submitAuth);
@@ -314,6 +318,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         source: 'print("Fake source")',
         sourceSha256: 'wrong00000000000000000000000000000000000000000000000000000000000',
         kernelType: 'script',
+        acknowledgeUnobservedBrowserDraft: true,
         reason: 'Testing mismatch'
       }, submitAuth),
       /RECOVERY_MASTER_SHA_MISMATCH/
@@ -329,6 +334,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         source: 'print(1)',
         sourceSha256: crypto.createHash('sha256').update('print(1)').digest('hex'),
         kernelType: 'script',
+        acknowledgeUnobservedBrowserDraft: true,
         reason: 'Unauthorized restore'
       }, submitAuth),
       /KAGGLE_PROJECT_WRITE_FORBIDDEN/
@@ -342,6 +348,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       {
         kernelRef: 'testuser/astor-tuneup',
         expectedProjectFingerprint: getRes.projectFingerprint,
+        acknowledgeUnobservedBrowserDraft: true,
         mutation: {
           type: 'append_notebook_cells',
           cells: [{ cellType: 'code', source: 'print("Settings preservation test")' }]
@@ -440,6 +447,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         {
           kernelRef: 'otheruser/their-kernel',
           expectedProjectFingerprint: 'any',
+          acknowledgeUnobservedBrowserDraft: true,
           mutation: { type: 'append_script', code: 'print(1)' }
         },
         submitAuth
@@ -452,7 +460,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
   await runTest('Conflict protection: Reject continue when fingerprint does not match', async () => {
     (client as any).getUsername = () => 'testuser';
     (client as any).pullProject = async (owner: string, slug: string) => ({
-      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true },
+      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
       source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
     });
     await assert.rejects(
@@ -460,6 +468,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
         {
           kernelRef: 'testuser/astor-tuneup',
           expectedProjectFingerprint: 'stale-wrong-fingerprint',
+          acknowledgeUnobservedBrowserDraft: true,
           mutation: { type: 'append_notebook_cells', cells: [{ cellType: 'code', source: 'print(1)' }] }
         },
         submitAuth
@@ -472,7 +481,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
   await runTest('Idempotent replay on continue returns existing task without duplicate execution', async () => {
     (client as any).getUsername = () => 'testuser';
     (client as any).pullProject = async (owner: string, slug: string) => ({
-      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, title: 'Astor TuneUp' },
+      metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true, title: 'Astor TuneUp' },
       source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
     });
     const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
@@ -480,6 +489,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       {
         kernelRef: 'testuser/astor-tuneup',
         expectedProjectFingerprint: getRes.projectFingerprint,
+        acknowledgeUnobservedBrowserDraft: true,
         mutation: {
           type: 'append_notebook_cells',
           cells: [{ cellType: 'code', source: 'print("Continuation Step 1")' }]
@@ -492,6 +502,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       {
         kernelRef: 'testuser/astor-tuneup',
         expectedProjectFingerprint: getRes.projectFingerprint,
+        acknowledgeUnobservedBrowserDraft: true,
         mutation: {
           type: 'append_notebook_cells',
           cells: [{ cellType: 'code', source: 'print("Continuation Step 1")' }]
@@ -503,6 +514,645 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
 
     assert.strictEqual(replayRes.isReplay, true);
     assert.strictEqual(replayRes.taskId, res1.taskId);
+  });
+
+  // ==========================================
+  // P0-1: NOTEBOOK / SCRIPT SOURCE FORMAT SAFETY
+  // ==========================================
+  await runTest('P0-1: Existing Notebook + replace_source with raw python is REJECTED with 0 pushes', async () => {
+    let pushCount = 0;
+    const testKaggleClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const testBackend = new KaggleBackend(taskStore, artifactStore, testKaggleClient);
+    const testHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: testBackend });
+
+    await assert.rejects(
+      async () => testHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: 'print("raw python script")'
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+    assert.strictEqual(pushCount, 0, 'Kaggle push count must be 0');
+  });
+
+  await runTest('P0-1: Existing Notebook + valid ipynb replace_source is ACCEPTED', async () => {
+    const validNb = JSON.stringify({
+      cells: [{ cell_type: 'code', execution_count: null, metadata: {}, outputs: [], source: ['print("Valid new notebook")\n'] }],
+      metadata: { language_info: { name: 'python' } },
+      nbformat: 4,
+      nbformat_minor: 5
+    });
+    const res = await handlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'replace_source',
+        source: validNb
+      }
+    }, submitAuth);
+    assert.strictEqual(res.status, 'running');
+  });
+
+  await runTest('P0-1: Script project + append_notebook_cells is REJECTED', async () => {
+    const customHandlers = new McpHandlers({
+      ...gatewayFacade,
+      kaggleBackend: {
+        getClient: () => ({
+          getUsername: () => 'testuser',
+          pullProject: async () => ({
+            metadata: { kernelType: 'script', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+            source: 'print("Original script")\n'
+          })
+        })
+      } as any
+    });
+
+    await assert.rejects(
+      async () => customHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print(1)' }]
+        }
+      }, submitAuth),
+      /KAGGLE_MUTATION_KERNEL_TYPE_MISMATCH/
+    );
+  });
+
+  // ==========================================
+  // P0-2: RESTORE KERNEL-TYPE PRESERVATION
+  // ==========================================
+  await runTest('P0-2: Restore Notebook -> Script without allowKernelTypeChange is REJECTED', async () => {
+    const customHandlers = new McpHandlers({
+      ...gatewayFacade,
+      kaggleBackend: {
+        getClient: () => ({
+          getUsername: () => 'testuser',
+          pullProject: async () => ({
+            metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+            source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
+          })
+        })
+      } as any
+    });
+
+    await assert.rejects(
+      async () => customHandlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        source: 'print("New script")',
+        sourceSha256: crypto.createHash('sha256').update('print("New script")').digest('hex'),
+        kernelType: 'script',
+        acknowledgeUnobservedBrowserDraft: true,
+        reason: 'Attempting to change kernelType without authorization'
+      }, submitAuth),
+      /KAGGLE_KERNEL_TYPE_CHANGE_FORBIDDEN/
+    );
+  });
+
+  await runTest('P0-2: Restore Notebook -> Script with explicit allowKernelTypeChange and reason PASSES', async () => {
+    const customHandlers = new McpHandlers({
+      ...gatewayFacade,
+      kaggleBackend: {
+        getClient: () => ({
+          getUsername: () => 'testuser',
+          pullProject: async () => ({
+            metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+            source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
+          })
+        })
+      } as any
+    });
+
+    const res = await customHandlers.handleKaggleProjectRestore({
+      kernelRef: 'testuser/astor-tuneup',
+      source: 'print("New script")',
+      sourceSha256: crypto.createHash('sha256').update('print("New script")').digest('hex'),
+      kernelType: 'script',
+      allowKernelTypeChange: true,
+      kernelTypeChangeReason: 'Authorized migration from notebook to script',
+      acknowledgeUnobservedBrowserDraft: true,
+      reason: 'Migrating codebase'
+    }, submitAuth);
+    assert.strictEqual(res.status, 'running');
+  });
+
+  // ==========================================
+  // P0-3: EXTERNAL RUN STATE & RECONCILIATION
+  // ==========================================
+  await runTest('P0-3: Generic stale recovery skips external Kaggle runs', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'running' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    assert.strictEqual(pushCount, 1);
+    assert.strictEqual(task.externalRun?.provider, 'kaggle');
+    assert.strictEqual(task.externalRun?.reconciliationState, 'active');
+
+    // Force task lease expiration
+    tStore.updateTask(task.taskId, {
+      lease: { claimedBy: 'worker-1', claimedAt: Date.now() - 120000, leaseExpiresAt: Date.now() - 60000, lastHeartbeatAt: Date.now() - 120000 }
+    });
+
+    // Generic stale recovery run
+    const recResult = tStore.recoverStaleTasks();
+    assert.strictEqual(recResult.recoveredCount, 0);
+    assert.strictEqual(recResult.failedCount, 0);
+
+    const taskAfter = tStore.getTask(task.taskId);
+    assert.strictEqual(taskAfter?.status, 'running');
+    assert.strictEqual(pushCount, 1, 'No second submission occurred');
+  });
+
+  await runTest('P0-3: ReconcileTask: Remote COMPLETE finalizes task with zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 2 }; },
+      getKernelStatus: async () => ({ status: 'complete' }),
+      downloadKernelOutput: async () => ({ success: true, files: [{ name: 'result.json', content: '{"acc": 0.99}' }] })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, false);
+
+    const finishedTask = tStore.getTask(task.taskId);
+    assert.strictEqual(finishedTask?.status, 'succeeded');
+    assert.strictEqual(finishedTask?.externalRun?.reconciliationState, 'completed');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  await runTest('P0-3: ReconcileTask: Remote RUNNING preserves active state with zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 2 }; },
+      getKernelStatus: async () => ({ status: 'running', rawMessage: 'Training epoch 5' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, true);
+
+    const runningTask = tStore.getTask(task.taskId);
+    assert.strictEqual(runningTask?.status, 'running');
+    assert.strictEqual(runningTask?.externalRun?.lastRemoteStatus, 'running');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  await runTest('P0-3: ReconcileTask: Remote UNKNOWN / Network error sets pending state with zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 2 }; },
+      getKernelStatus: async () => { throw new Error('Transient 502 Bad Gateway'); }
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, true);
+
+    const pendingTask = tStore.getTask(task.taskId);
+    assert.strictEqual(pendingTask?.status, 'running');
+    assert.strictEqual(pendingTask?.externalRun?.reconciliationState, 'pending');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  // ==========================================
+  // BLOCKERS 1 & 2: TERMINAL ERRORS & CANCELLATION
+  // ==========================================
+  await runTest('Blocker 1 & 2: Remote ERROR is terminal, bypasses generic retry (no requeue), zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'error', rawMessage: 'SyntaxError: unexpected EOF' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      maxRetries: 3,
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, false);
+
+    const failedTask = tStore.getTask(task.taskId);
+    assert.strictEqual(failedTask?.status, 'failed');
+    assert.strictEqual(failedTask?.retryPolicy.retryCount, 0, 'Generic retry must be bypassed');
+    assert.strictEqual(failedTask?.externalRun?.reconciliationState, 'failed');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  await runTest('Blocker 1 & 2: Remote quotaExceeded is terminal, zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'quotaExceeded', rawMessage: 'GPU limit reached' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      maxRetries: 3,
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, false);
+
+    const failedTask = tStore.getTask(task.taskId);
+    assert.strictEqual(failedTask?.status, 'failed');
+    assert.strictEqual(failedTask?.retryPolicy.retryCount, 0);
+    assert.strictEqual(failedTask?.error?.code, 'RESOURCE_QUOTA_EXCEEDED');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  await runTest('Blocker 1: Remote cancelled maps to local terminal cancelled, zero re-push', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'cancelled', rawMessage: 'Cancelled by user' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+
+    await tBackend.submitKaggleTask(task);
+    const needMore = await tBackend.reconcileTask(task.taskId);
+    assert.strictEqual(needMore, false);
+
+    const cancelledTask = tStore.getTask(task.taskId);
+    assert.strictEqual(cancelledTask?.status, 'cancelled');
+    assert.strictEqual(cancelledTask?.externalRun?.reconciliationState, 'failed');
+    assert.strictEqual(pushCount, 1, 'Zero re-push occurred');
+  });
+
+  // ==========================================
+  // BLOCKER 3: STARTUP / HYDRATION RECONCILIATION
+  // ==========================================
+  await runTest('Blocker 3: Hydration reconcileDanglingTasks discovers non-terminal Kaggle run and finalizes remote COMPLETE', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'complete' }),
+      downloadKernelOutput: async () => ({ success: true, files: [{ name: 'out.txt', content: 'done' }] })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+
+    // 1. Create and submit external task
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+    await tBackend.submitKaggleTask(task);
+    assert.strictEqual(pushCount, 1);
+
+    // 2. Simulate process/DO restart & hydration into fresh TaskStore
+    const serializedTasks = tStore.listTasks();
+    const hydratedStore = new TaskStore();
+    hydratedStore.hydrate(serializedTasks);
+    hydratedStore.recoverStaleTasks();
+
+    const hydratedBackend = new KaggleBackend(hydratedStore, aStore, testKClient);
+
+    // 3. Production startup discovers dangling Kaggle task and reconciles
+    const reconResult = await hydratedBackend.reconcileDanglingTasks();
+    assert.strictEqual(reconResult.reconciledCount, 1);
+
+    const finalized = hydratedStore.getTask(task.taskId);
+    assert.strictEqual(finalized?.status, 'succeeded');
+    assert.strictEqual(finalized?.externalRun?.reconciliationState, 'completed');
+    assert.strictEqual(pushCount, 1, 'Zero re-push after restart/hydration');
+  });
+
+  await runTest('Blocker 3: Hydration reconcileDanglingTasks handles remote RUNNING without repush', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => ({ status: 'running', rawMessage: 'Running epoch 1' })
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+    await tBackend.submitKaggleTask(task);
+
+    // Simulate restart
+    const hydratedStore = new TaskStore();
+    hydratedStore.hydrate(tStore.listTasks());
+    const hydratedBackend = new KaggleBackend(hydratedStore, aStore, testKClient);
+
+    const reconResult = await hydratedBackend.reconcileDanglingTasks();
+    assert.strictEqual(reconResult.reconciledCount, 1);
+
+    const running = hydratedStore.getTask(task.taskId);
+    assert.strictEqual(running?.status, 'running');
+    assert.strictEqual(running?.externalRun?.lastRemoteStatus, 'running');
+    assert.strictEqual(pushCount, 1, 'Zero re-push');
+  });
+
+  await runTest('Blocker 3: Hydration reconcileDanglingTasks handles remote UNKNOWN/network failure without repush', async () => {
+    const tStore = new TaskStore();
+    const aStore = new ArtifactStore();
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/test-k', versionNumber: 1 }; },
+      getKernelStatus: async () => { throw new Error('Network timeout'); }
+    };
+    const tBackend = new KaggleBackend(tStore, aStore, testKClient);
+    const task = tStore.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { kernelSlug: 'testuser/test-k', code: 'print(1)', language: 'python' as const, kernelType: 'script' as const }
+    });
+    await tBackend.submitKaggleTask(task);
+
+    // Simulate restart
+    const hydratedStore = new TaskStore();
+    hydratedStore.hydrate(tStore.listTasks());
+    const hydratedBackend = new KaggleBackend(hydratedStore, aStore, testKClient);
+
+    const reconResult = await hydratedBackend.reconcileDanglingTasks();
+    assert.strictEqual(reconResult.reconciledCount, 1);
+
+    const pending = hydratedStore.getTask(task.taskId);
+    assert.strictEqual(pending?.status, 'running');
+    assert.strictEqual(pending?.externalRun?.reconciliationState, 'pending');
+    assert.strictEqual(pushCount, 1, 'Zero re-push');
+  });
+
+  // ==========================================
+  // BLOCKER 4: UNKNOWN SETTINGS FAIL CLOSED
+  // ==========================================
+  await runTest('Blocker 4: Unknown settings fail closed with KAGGLE_PROJECT_SETTINGS_UNKNOWN on continue', async () => {
+    const customHandlers = new McpHandlers({
+      ...gatewayFacade,
+      kaggleBackend: {
+        getClient: () => ({
+          getUsername: () => 'testuser',
+          pullProject: async () => ({
+            metadata: { title: 'Test', isPrivate: true, language: 'python', kernelType: 'notebook' }, // missing enableGpu & enableInternet
+            source: JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'] }], nbformat: 4, nbformat_minor: 5 })
+          })
+        })
+      } as any
+    });
+
+    await assert.rejects(
+      async () => customHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print(1)' }]
+        }
+      }, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_UNKNOWN/
+    );
+  });
+
+  await runTest('Blocker 4: Unknown settings fail closed with KAGGLE_PROJECT_SETTINGS_UNKNOWN on restore', async () => {
+    const customHandlers = new McpHandlers({
+      ...gatewayFacade,
+      kaggleBackend: {
+        getClient: () => ({
+          getUsername: () => 'testuser',
+          pullProject: async () => ({
+            metadata: { title: 'Test', isPrivate: true }, // missing enableGpu, enableInternet, language, kernelType
+            source: 'print(1)'
+          })
+        })
+      } as any
+    });
+
+    await assert.rejects(
+      async () => customHandlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        source: 'print("Restored")',
+        sourceSha256: crypto.createHash('sha256').update('print("Restored")').digest('hex'),
+        acknowledgeUnobservedBrowserDraft: true,
+        reason: 'Restoring'
+      }, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_UNKNOWN/
+    );
+  });
+
+  // ==========================================
+  // BLOCKER 5: SHARED NOTEBOOK VALIDATOR
+  // ==========================================
+  await runTest('Blocker 5: Shared notebook validator rejects missing nbformat', async () => {
+    const invalidNb = JSON.stringify({
+      cells: [{ cell_type: 'code', source: ['print(1)'] }]
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: invalidNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+  });
+
+  await runTest('Blocker 5: Shared notebook validator rejects invalid float or unsupported nbformat', async () => {
+    const floatNb = JSON.stringify({
+      cells: [{ cell_type: 'code', source: ['print(1)'] }],
+      nbformat: 4.5
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: floatNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+
+    const oldNb = JSON.stringify({
+      cells: [{ cell_type: 'code', source: ['print(1)'] }],
+      nbformat: 3
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: oldNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+  });
+
+  await runTest('Blocker 5: Shared notebook validator rejects missing cells array', async () => {
+    const noCellsNb = JSON.stringify({
+      nbformat: 4,
+      nbformat_minor: 5
+    });
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'replace_source',
+          source: noCellsNb
+        }
+      }, submitAuth),
+      /KAGGLE_NOTEBOOK_SOURCE_FORMAT_INVALID/
+    );
+  });
+
+  // ==========================================
+  // P0-4: PRIVACY TRI-STATE & METADATA
+  // ==========================================
+  await runTest('P0-4: Project get returns tri-state privacy and metadata', async () => {
+    const getRes = await handlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    assert.strictEqual(typeof getRes.isPrivate, 'boolean');
+    assert.strictEqual(getRes.privacyKnown, true);
+    assert.strictEqual(getRes.privacySource, 'kaggle_metadata');
+    assert.strictEqual(getRes.persistedSourceVisibility, 'AVAILABLE');
+    assert.strictEqual(getRes.browserDraftVisibility, 'UNAVAILABLE');
+    assert.strictEqual(getRes.externalDraftConflictRisk, true);
+  });
+
+  // ==========================================
+  // P1-2: BROWSER DRAFT SAFETY
+  // ==========================================
+  await runTest('P1-2: Continue requires acknowledgeUnobservedBrowserDraft', async () => {
+    await assert.rejects(
+      async () => handlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print(1)' }]
+        }
+      }, submitAuth),
+      /KAGGLE_BROWSER_DRAFT_STATE_UNOBSERVABLE/
+    );
+  });
+
+  // ==========================================
+  // P1-3: VERSION NUMBER PERSISTENCE
+  // ==========================================
+  await runTest('P1-3: Version number returned on continue and restore', async () => {
+    const res = await handlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Version check")' }]
+      }
+    }, submitAuth);
+    assert.strictEqual(res.createsNewKaggleVersion, true);
+    assert.notStrictEqual(res.createdVersionNumber, undefined);
+  });
+
+  // ==========================================
+  // P2: RESTORE DRY-RUN UX
+  // ==========================================
+  await runTest('P2: Restore dryRun performs 0 mutations and returns validation report', async () => {
+    const validNb = JSON.stringify({
+      cells: [{ cell_type: 'code', execution_count: 1, metadata: {}, outputs: [], source: ['print("Dry run master")\n'] }],
+      metadata: { language_info: { name: 'python' } },
+      nbformat: 4,
+      nbformat_minor: 5
+    });
+    const dryRes = await handlers.handleKaggleProjectRestore({
+      kernelRef: 'testuser/astor-tuneup',
+      source: validNb,
+      sourceSha256: crypto.createHash('sha256').update(validNb).digest('hex'),
+      kernelType: 'notebook',
+      dryRun: true,
+      reason: 'Dry run restore validation'
+    }, submitAuth);
+
+    assert.strictEqual(dryRes.dryRun, true);
+    assert.strictEqual(dryRes.sourceValidation, 'VALID');
+    assert.strictEqual(dryRes.writeAllowed, true);
+    assert.strictEqual(dryRes.targetKernelType, 'notebook');
+    assert.strictEqual(typeof dryRes.currentProjectFingerprint, 'string');
+    assert.strictEqual(dryRes.privacyValidation.privacyKnown, true);
   });
 
   return { passed, failed };

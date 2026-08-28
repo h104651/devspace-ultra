@@ -236,14 +236,20 @@ export class TaskStore {
     return true;
   }
 
-  public failTask(taskId: string, error: { code: string; message: string; details?: any }): boolean {
+  public failTask(
+    taskId: string,
+    error: { code: string; message: string; details?: any },
+    options?: { retryable?: boolean }
+  ): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
     task.error = error;
     task.completedAt = Date.now();
 
-    if (task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
+    const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+
+    if (isRetryable) {
       task.retryPolicy.retryCount++;
       task.lease = undefined;
 
@@ -272,6 +278,10 @@ export class TaskStore {
     return true;
   }
 
+  public failTaskTerminal(taskId: string, error: { code: string; message: string; details?: any }): boolean {
+    return this.failTask(taskId, error, { retryable: false });
+  }
+
   public cancelTask(taskId: string, reason = 'User requested cancellation'): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
@@ -288,12 +298,33 @@ export class TaskStore {
     return true;
   }
 
+  public setExternalRun(taskId: string, externalRun: any): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+    task.externalRun = externalRun;
+    this.saveTask(task);
+    return true;
+  }
+
+  public updateTask(taskId: string, updates: Partial<DurableTask>): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+    Object.assign(task, updates);
+    this.saveTask(task);
+    return true;
+  }
+
   public recoverStaleTasks(): { recoveredCount: number; failedCount: number } {
     const now = Date.now();
     let recoveredCount = 0;
     let failedCount = 0;
 
     for (const task of this.tasks.values()) {
+      // External durable jobs (such as Kaggle runs) must not be blindly requeued on local worker lease timeout.
+      if (task.externalRun && task.externalRun.provider === 'kaggle') {
+        continue;
+      }
+
       if (
         (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running') &&
         task.lease &&
