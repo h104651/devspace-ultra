@@ -6,6 +6,7 @@ export interface LocalProjectPermissions {
   write: boolean;
   test: boolean;
   build: boolean;
+  hostExecution: boolean;
 }
 
 export interface ConfiguredCommand {
@@ -33,6 +34,11 @@ export interface LocalProjectMetadata {
   displayName: string;
   enabled: boolean;
   permissions: LocalProjectPermissions;
+  hostExecutionEnabled: boolean;
+  securityModel: {
+    fileOperations: 'PROJECT_ROOT_CONFINED';
+    processExecution: 'HOST_EXECUTION_NOT_OS_SANDBOXED';
+  };
   gitDetected: boolean;
   availableCapabilities: string[];
   configuredTestRunners?: string[];
@@ -261,7 +267,7 @@ export class ProjectRegistry {
   }) {
     if (options?.configFilePath) {
       this.configFilePath = path.resolve(options.configFilePath);
-      this.loadFromFile();
+      this.loadFromFileAtomic();
     }
 
     if (options?.initialProjects) {
@@ -274,7 +280,7 @@ export class ProjectRegistry {
       for (const rawWorkspace of options.initialLegacyWorkspaces) {
         const normRoot = path.resolve(rawWorkspace);
         const baseName = ProjectPathSecurity.normalizeProjectId(path.basename(normRoot) || 'default-workspace');
-        
+
         // Detect collision on same basename from different roots
         if (this.projects.has(baseName)) {
           const existing = this.projects.get(baseName)!;
@@ -294,7 +300,7 @@ export class ProjectRegistry {
 
   /**
    * Registers a named project definition with fail-safe defaults (least privilege).
-   * Omitted sensitive permissions (write, test, build) default to false.
+   * Omitted sensitive permissions (write, test, build, hostExecution) default to false.
    */
   public registerProject(def: LocalProjectDefinition): void {
     const normalizedId = ProjectPathSecurity.normalizeProjectId(def.projectId);
@@ -310,12 +316,13 @@ export class ProjectRegistry {
       }
     }
 
-    // Fail-safe defaults: read defaults to true; write, test, build default to false
+    // Fail-safe defaults: read defaults to true; write, test, build, hostExecution default to false
     const permissions: LocalProjectPermissions = {
       read: def.permissions?.read !== false,
       write: def.permissions?.write === true,
       test: def.permissions?.test === true,
-      build: def.permissions?.build === true
+      build: def.permissions?.build === true,
+      hostExecution: def.permissions?.hostExecution === true
     };
 
     this.projects.set(normalizedId, {
@@ -343,7 +350,7 @@ export class ProjectRegistry {
       root: resolvedRoot,
       canonicalRoot,
       enabled: true,
-      permissions: { read: true, write: true, test: true, build: true }
+      permissions: { read: true, write: true, test: true, build: true, hostExecution: true }
     });
   }
 
@@ -393,10 +400,10 @@ export class ProjectRegistry {
       if (p.permissions.write) {
         availableCapabilities.push('local:write_file', 'local:patch_file');
       }
-      if (p.permissions.test) {
+      if (p.permissions.test && p.permissions.hostExecution) {
         availableCapabilities.push('local:run_tests');
       }
-      if (p.permissions.build) {
+      if (p.permissions.build && p.permissions.hostExecution) {
         availableCapabilities.push('local:build_project');
       }
 
@@ -405,6 +412,11 @@ export class ProjectRegistry {
         displayName: p.displayName,
         enabled: p.enabled,
         permissions: { ...p.permissions },
+        hostExecutionEnabled: p.permissions.hostExecution,
+        securityModel: {
+          fileOperations: 'PROJECT_ROOT_CONFINED',
+          processExecution: 'HOST_EXECUTION_NOT_OS_SANDBOXED'
+        },
         gitDetected,
         availableCapabilities,
         configuredTestRunners: p.commands?.test ? Object.keys(p.commands.test) : undefined,
@@ -429,17 +441,124 @@ export class ProjectRegistry {
     return undefined;
   }
 
-  private loadFromFile(): void {
-    if (!this.configFilePath || !fs.existsSync(this.configFilePath)) return;
+  /**
+   * Atomic, fail-closed configuration loader.
+   * If configuration file is missing or invalid, throws LOCAL_PROJECT_CONFIG_INVALID
+   * and leaves live registry untouched (zero partial registration).
+   */
+  private loadFromFileAtomic(): void {
+    if (!this.configFilePath) return;
+
+    if (!fs.existsSync(this.configFilePath)) {
+      const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Project configuration file does not exist: ${this.configFilePath}`);
+      err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+      throw err;
+    }
+
+    let parsed: any;
     try {
       const raw = fs.readFileSync(this.configFilePath, 'utf-8');
-      const data = JSON.parse(raw);
-      const items: LocalProjectDefinition[] = Array.isArray(data) ? data : data.projects || [];
-      for (const item of items) {
-        this.registerProject(item);
-      }
+      parsed = JSON.parse(raw);
     } catch (e: any) {
-      console.error(`Failed to load projects from ${this.configFilePath}:`, e.message);
+      const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Failed to parse JSON configuration file '${this.configFilePath}': ${e.message}`);
+      err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+      throw err;
+    }
+
+    const items: any[] = Array.isArray(parsed) ? parsed : (parsed?.projects || []);
+    if (!Array.isArray(items)) {
+      const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: projects configuration must be an array or { projects: [...] }`);
+      err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+      throw err;
+    }
+
+    // Temporary staging structure to validate all entries before committing
+    const staging: Array<{
+      projectId: string;
+      displayName: string;
+      root: string;
+      canonicalRoot: string;
+      enabled: boolean;
+      permissions: LocalProjectPermissions;
+      commands?: LocalProjectCommands;
+    }> = [];
+
+    const seenIds = new Set<string>();
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (!item || typeof item !== 'object') {
+        const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Project at index ${i} is not a valid object`);
+        err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+        throw err;
+      }
+
+      if (!item.projectId || typeof item.projectId !== 'string') {
+        const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Project at index ${i} is missing required 'projectId'`);
+        err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+        throw err;
+      }
+
+      const normalizedId = ProjectPathSecurity.normalizeProjectId(item.projectId);
+      if (seenIds.has(normalizedId)) {
+        const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Duplicate projectId '${normalizedId}' in configuration file`);
+        err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+        throw err;
+      }
+      seenIds.add(normalizedId);
+
+      if (!item.root || typeof item.root !== 'string') {
+        const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Project '${item.projectId}' is missing required 'root' path`);
+        err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+        throw err;
+      }
+
+      const resolvedRoot = path.resolve(item.root);
+      const canonicalRoot = ProjectPathSecurity.getCanonicalRoot(resolvedRoot);
+
+      // Validate commands if present
+      if (item.commands) {
+        if (typeof item.commands !== 'object') {
+          const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Project '${item.projectId}' commands must be an object`);
+          err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+          throw err;
+        }
+        for (const [type, group] of Object.entries(item.commands)) {
+          if (group && typeof group === 'object') {
+            for (const [cmdId, cmdDef] of Object.entries(group as any)) {
+              const def = cmdDef as any;
+              if (!def || typeof def.executable !== 'string' || !Array.isArray(def.args)) {
+                const err: any = new Error(`LOCAL_PROJECT_CONFIG_INVALID: Project '${item.projectId}' command '${type}.${cmdId}' must have string executable and string[] args`);
+                err.code = 'LOCAL_PROJECT_CONFIG_INVALID';
+                throw err;
+              }
+            }
+          }
+        }
+      }
+
+      const permissions: LocalProjectPermissions = {
+        read: item.permissions?.read !== false,
+        write: item.permissions?.write === true,
+        test: item.permissions?.test === true,
+        build: item.permissions?.build === true,
+        hostExecution: item.permissions?.hostExecution === true
+      };
+
+      staging.push({
+        projectId: normalizedId,
+        displayName: item.displayName || item.projectId,
+        root: resolvedRoot,
+        canonicalRoot,
+        enabled: item.enabled !== false,
+        permissions,
+        commands: item.commands
+      });
+    }
+
+    // All validated -> atomic commit into live registry
+    for (const project of staging) {
+      this.projects.set(project.projectId, project);
     }
   }
 

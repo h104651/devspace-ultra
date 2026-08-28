@@ -4,11 +4,12 @@ const SCOPE_HIERARCHY: Record<string, string[]> = {
   admin: ['admin:*'],
   'admin:*': [
     'admin:health', 'admin:killswitch', 'mcp:access', 'tasks:submit', 'tasks:read', 'artifacts:read',
-    'kaggle:submit', 'kaggle:read', 'local:read', 'local:write', 'local:test', 'browser:run',
+    'kaggle:submit', 'kaggle:read', 'local:read', 'local:write', 'local:test', 'local:exec', 'browser:run',
     'swarm:dispatch', 'raw_shell:run'
   ],
   'tasks:submit': ['tasks:read'],
   'tasks:read': ['artifacts:read'],
+  'local:exec': ['local:test', 'local:read'],
   'local:write': ['local:read'],
   'local:test': ['local:read'],
   'kaggle:submit': ['kaggle:read'],

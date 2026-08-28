@@ -31,6 +31,7 @@ function escapeRegExp(str: string): string {
 export class TaskExecutor {
   private projectRegistry: ProjectRegistry;
   private allowRawShell: boolean;
+  private fileLocks: Map<string, Promise<void>> = new Map();
 
   constructor(config: TaskExecutorConfig) {
     this.allowRawShell = !!config.allowRawShell;
@@ -47,6 +48,24 @@ export class TaskExecutor {
 
   public getRegistry(): ProjectRegistry {
     return this.projectRegistry;
+  }
+
+  private async acquireFileLock(key: string): Promise<() => void> {
+    while (this.fileLocks.has(key)) {
+      await this.fileLocks.get(key);
+    }
+    let release!: () => void;
+    const lockPromise = new Promise<void>((res) => {
+      release = res;
+    });
+    this.fileLocks.set(key, lockPromise);
+
+    return () => {
+      if (this.fileLocks.get(key) === lockPromise) {
+        this.fileLocks.delete(key);
+      }
+      release();
+    };
   }
 
   private resolveProjectForTask(payload: any): {
@@ -113,6 +132,11 @@ export class TaskExecutor {
           headCommit: gitInfo?.headCommit,
           isClean: gitInfo?.isClean,
           permissions: { ...project.permissions },
+          hostExecutionEnabled: project.permissions.hostExecution,
+          securityModel: {
+            fileOperations: 'PROJECT_ROOT_CONFINED',
+            processExecution: 'HOST_EXECUTION_NOT_OS_SANDBOXED'
+          },
           configuredTestRunners: project.commands?.test ? Object.keys(project.commands.test) : undefined,
           configuredBuildCommands: project.commands?.build ? Object.keys(project.commands.build) : undefined
         };
@@ -162,25 +186,32 @@ export class TaskExecutor {
         }
 
         const effectiveRelPath = relativePath || (isLegacy ? '' : task.payload.relativePath);
-        const targetPath = ProjectPathSecurity.resolveWritePath(project.canonicalRoot, effectiveRelPath);
-        const dir = path.dirname(targetPath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
+        const lockKey = `${project.projectId}:${path.normalize(effectiveRelPath || '').toLowerCase()}`;
+        const unlock = await this.acquireFileLock(lockKey);
+
+        try {
+          const targetPath = ProjectPathSecurity.resolveWritePath(project.canonicalRoot, effectiveRelPath);
+          const dir = path.dirname(targetPath);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+
+          const content = typeof task.payload.content === 'string' ? task.payload.content : '';
+          const tmpPath = `${targetPath}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
+          fs.writeFileSync(tmpPath, content, 'utf-8');
+          fs.renameSync(tmpPath, targetPath);
+
+          onLog(`[EXECUTOR] Successfully wrote ${Buffer.byteLength(content)} bytes to ${effectiveRelPath}`);
+
+          return {
+            projectId: project.projectId,
+            relativePath: effectiveRelPath,
+            status: 'written',
+            sizeBytes: Buffer.byteLength(content)
+          };
+        } finally {
+          unlock();
         }
-
-        const content = typeof task.payload.content === 'string' ? task.payload.content : '';
-        const tmpPath = `${targetPath}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
-        fs.writeFileSync(tmpPath, content, 'utf-8');
-        fs.renameSync(tmpPath, targetPath);
-
-        onLog(`[EXECUTOR] Successfully wrote ${Buffer.byteLength(content)} bytes to ${effectiveRelPath}`);
-
-        return {
-          projectId: project.projectId,
-          relativePath: effectiveRelPath,
-          status: 'written',
-          sizeBytes: Buffer.byteLength(content)
-        };
       }
 
       case 'local:patch_file': {
@@ -215,72 +246,89 @@ export class TaskExecutor {
           throw err;
         }
 
-        // 1. Resolve read path and verify realpath/symlink boundaries
-        const targetPath = ProjectPathSecurity.resolveReadPath(project.canonicalRoot, effectiveRelPath);
-        const currentContent = fs.readFileSync(targetPath, 'utf-8');
+        // Per-file mutation lock critical section
+        const lockKey = `${project.projectId}:${path.normalize(effectiveRelPath).toLowerCase()}`;
+        const unlock = await this.acquireFileLock(lockKey);
 
-        // 2. Compute current SHA256 and verify expectedSha256
-        const currentSha256 = crypto.createHash('sha256').update(currentContent, 'utf-8').digest('hex');
-        if (currentSha256.toLowerCase() !== expectedSha256.trim().toLowerCase()) {
-          const err: any = new Error(`LOCAL_FILE_CONFLICT: Expected SHA256 '${expectedSha256}' does not match current file SHA256 '${currentSha256}'`);
-          err.code = 'LOCAL_FILE_CONFLICT';
-          throw err;
-        }
+        try {
+          // 1. Resolve read path and verify realpath/symlink boundaries
+          const targetPath = ProjectPathSecurity.resolveReadPath(project.canonicalRoot, effectiveRelPath);
+          const currentContent = fs.readFileSync(targetPath, 'utf-8');
 
-        // 3. Apply patches in memory
-        let patchedContent = currentContent;
-        for (let i = 0; i < rawPatches.length; i++) {
-          const patch = rawPatches[i];
-          if (typeof patch.oldText !== 'string' || typeof patch.newText !== 'string') {
-            const err: any = new Error(`LOCAL_PATCH_INVALID: Patch at index ${i} must have string oldText and newText`);
-            err.code = 'LOCAL_PATCH_INVALID';
+          // 2. Compute current SHA256 and verify expectedSha256
+          const currentSha256 = crypto.createHash('sha256').update(currentContent, 'utf-8').digest('hex');
+          if (currentSha256.toLowerCase() !== expectedSha256.trim().toLowerCase()) {
+            const err: any = new Error(`LOCAL_FILE_CONFLICT: Expected SHA256 '${expectedSha256}' does not match current file SHA256 '${currentSha256}'`);
+            err.code = 'LOCAL_FILE_CONFLICT';
             throw err;
           }
 
-          const expectedOccurrences = patch.expectedOccurrences !== undefined ? patch.expectedOccurrences : 1;
-          const matchCount = (patchedContent.match(new RegExp(escapeRegExp(patch.oldText), 'g')) || []).length;
+          // 3. Apply patches in memory
+          let patchedContent = currentContent;
+          for (let i = 0; i < rawPatches.length; i++) {
+            const patch = rawPatches[i];
+            if (typeof patch.oldText !== 'string' || typeof patch.newText !== 'string') {
+              const err: any = new Error(`LOCAL_PATCH_INVALID: Patch at index ${i} must have string oldText and newText`);
+              err.code = 'LOCAL_PATCH_INVALID';
+              throw err;
+            }
 
-          if (matchCount !== expectedOccurrences) {
-            const err: any = new Error(`LOCAL_PATCH_FAILED: Patch at index ${i} expected ${expectedOccurrences} occurrence(s) of target text, but found ${matchCount}`);
-            err.code = 'LOCAL_PATCH_FAILED';
+            const expectedOccurrences = patch.expectedOccurrences !== undefined ? patch.expectedOccurrences : 1;
+            const matchCount = (patchedContent.match(new RegExp(escapeRegExp(patch.oldText), 'g')) || []).length;
+
+            if (matchCount !== expectedOccurrences) {
+              const err: any = new Error(`LOCAL_PATCH_FAILED: Patch at index ${i} expected ${expectedOccurrences} occurrence(s) of target text, but found ${matchCount}`);
+              err.code = 'LOCAL_PATCH_FAILED';
+              throw err;
+            }
+
+            patchedContent = patchedContent.replaceAll(patch.oldText, patch.newText);
+          }
+
+          // 4. Verify write path and nearest parent boundaries
+          const writeTargetPath = ProjectPathSecurity.resolveWritePath(project.canonicalRoot, effectiveRelPath);
+
+          // 5. Pre-commit check: confirm target on disk still matches currentSha256
+          const preCommitContent = fs.readFileSync(writeTargetPath, 'utf-8');
+          const preCommitSha = crypto.createHash('sha256').update(preCommitContent, 'utf-8').digest('hex');
+          if (preCommitSha.toLowerCase() !== currentSha256.toLowerCase()) {
+            const err: any = new Error(`LOCAL_FILE_CONFLICT: Target file was modified concurrently prior to commit`);
+            err.code = 'LOCAL_FILE_CONFLICT';
             throw err;
           }
 
-          patchedContent = patchedContent.replaceAll(patch.oldText, patch.newText);
+          // 6. Atomic disk replacement
+          const dir = path.dirname(writeTargetPath);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+          const tmpPath = `${writeTargetPath}.patch-tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
+          fs.writeFileSync(tmpPath, patchedContent, 'utf-8');
+          fs.renameSync(tmpPath, writeTargetPath);
+
+          // 7. Read back and compute new SHA256
+          const newReadback = fs.readFileSync(writeTargetPath, 'utf-8');
+          const newSha256 = crypto.createHash('sha256').update(newReadback, 'utf-8').digest('hex');
+
+          onLog(`[EXECUTOR] Successfully patched ${effectiveRelPath} (previous: ${currentSha256.substring(0, 8)}, new: ${newSha256.substring(0, 8)})`);
+
+          return {
+            projectId: project.projectId,
+            relativePath: effectiveRelPath,
+            status: 'patched',
+            previousSha256: currentSha256,
+            newSha256,
+            sizeBytes: Buffer.byteLength(newReadback)
+          };
+        } finally {
+          unlock();
         }
-
-        // 4. Verify write path and nearest parent boundaries
-        const writeTargetPath = ProjectPathSecurity.resolveWritePath(project.canonicalRoot, effectiveRelPath);
-
-        // 5. Atomic disk replacement
-        const dir = path.dirname(writeTargetPath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        const tmpPath = `${writeTargetPath}.patch-tmp.${Date.now()}.${Math.random().toString(36).substring(2, 7)}`;
-        fs.writeFileSync(tmpPath, patchedContent, 'utf-8');
-        fs.renameSync(tmpPath, writeTargetPath);
-
-        // 6. Read back and compute new SHA256
-        const newReadback = fs.readFileSync(writeTargetPath, 'utf-8');
-        const newSha256 = crypto.createHash('sha256').update(newReadback, 'utf-8').digest('hex');
-
-        onLog(`[EXECUTOR] Successfully patched ${effectiveRelPath} (previous: ${currentSha256.substring(0, 8)}, new: ${newSha256.substring(0, 8)})`);
-
-        return {
-          projectId: project.projectId,
-          relativePath: effectiveRelPath,
-          status: 'patched',
-          previousSha256: currentSha256,
-          newSha256,
-          sizeBytes: Buffer.byteLength(newReadback)
-        };
       }
 
       case 'local:run_tests': {
         const { project } = this.resolveProjectForTask(task.payload);
-        if (!project.permissions.test) {
-          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Test execution is forbidden on project '${project.projectId}'`);
+        if (!project.permissions.test || !project.permissions.hostExecution) {
+          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Host process execution for tests is forbidden on project '${project.projectId}'. Set permissions.test = true and permissions.hostExecution = true to allow.`);
           err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
           throw err;
         }
@@ -301,8 +349,8 @@ export class TaskExecutor {
 
       case 'local:build_project': {
         const { project } = this.resolveProjectForTask(task.payload);
-        if (!project.permissions.build) {
-          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Build execution is forbidden on project '${project.projectId}'`);
+        if (!project.permissions.build || !project.permissions.hostExecution) {
+          const err: any = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Host process execution for build is forbidden on project '${project.projectId}'. Set permissions.build = true and permissions.hostExecution = true to allow.`);
           err.code = 'LOCAL_PROJECT_PERMISSION_DENIED';
           throw err;
         }
