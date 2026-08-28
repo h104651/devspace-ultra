@@ -25,6 +25,11 @@ export class EnvironmentProbe {
       'local:read_file',
       'local:write_file',
       'local:patch_file',
+      'local:list_directory',
+      'local:find_files',
+      'local:search_text',
+      'local:find_repositories',
+      'local:create_directory',
       'local:run_tests'
     ];
 
