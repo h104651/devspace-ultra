@@ -822,7 +822,7 @@ class TaskExecutor {
                 let branchOut = '';
                 branchChild.stdout?.on('data', (d) => { branchOut += d.toString(); });
                 branchChild.on('close', () => {
-                    let branch = (branchOut || '').trim() || fallbackBranch || null;
+                    let branch = (branchOut || '').trim() || fallbackBranch || 'HEAD';
                     const commitChild = (0, child_process_1.spawn)(gitExe, ['rev-parse', 'HEAD'], { cwd: repoPath, shell: false });
                     let commitOut = '';
                     commitChild.stdout?.on('data', (d) => { commitOut += d.toString(); });
@@ -848,7 +848,7 @@ class TaskExecutor {
                 });
                 branchChild.on('error', () => {
                     resolve({
-                        branch: fallbackBranch,
+                        branch: fallbackBranch || 'HEAD',
                         headCommit: null,
                         isClean,
                         changes: statusOut.trim().split('\n').filter(Boolean),
@@ -905,7 +905,7 @@ class TaskExecutor {
                             let statusOut = '';
                             statusChild.stdout?.on('data', (d) => { statusOut += d.toString(); });
                             statusChild.on('close', (statusCode) => {
-                                const branch = (branchOut || '').trim() || fallbackBranch || null;
+                                const branch = (branchOut || '').trim() || fallbackBranch || (statusCode === 0 ? 'HEAD' : null);
                                 const isClean = statusCode === 0 ? (statusOut.trim().length === 0) : null;
                                 resolve({
                                     branch,
