@@ -295,11 +295,31 @@ class TaskStore {
         this.saveTask(task);
         return true;
     }
+    setExternalRun(taskId, externalRun) {
+        const task = this.tasks.get(taskId);
+        if (!task)
+            return false;
+        task.externalRun = externalRun;
+        this.saveTask(task);
+        return true;
+    }
+    updateTask(taskId, updates) {
+        const task = this.tasks.get(taskId);
+        if (!task)
+            return false;
+        Object.assign(task, updates);
+        this.saveTask(task);
+        return true;
+    }
     recoverStaleTasks() {
         const now = Date.now();
         let recoveredCount = 0;
         let failedCount = 0;
         for (const task of this.tasks.values()) {
+            // External durable jobs (such as Kaggle runs) must not be blindly requeued on local worker lease timeout.
+            if (task.externalRun && task.externalRun.provider === 'kaggle') {
+                continue;
+            }
             if ((task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running') &&
                 task.lease &&
                 now > task.lease.leaseExpiresAt) {

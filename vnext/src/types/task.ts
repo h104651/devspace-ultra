@@ -36,6 +36,17 @@ export interface TaskArtifactSummary {
   preview?: string;
 }
 
+export interface ExternalRunInfo {
+  provider: 'kaggle' | 'browser' | 'swarm';
+  kernelRef?: string;
+  versionNumber?: number | 'unknown';
+  submittedAt: number;
+  lastPolledAt?: number;
+  lastRemoteStatus?: string;
+  reconciliationState?: 'pending' | 'active' | 'completed' | 'failed';
+  metadata?: Record<string, any>;
+}
+
 export interface DurableTask<TPayload = any, TResult = any> {
   taskId: string;
   taskKey?: string;
@@ -57,6 +68,7 @@ export interface DurableTask<TPayload = any, TResult = any> {
   retryPolicy: TaskRetryPolicy;
   artifacts: TaskArtifactSummary[];
   logs: string[];
+  externalRun?: ExternalRunInfo;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;

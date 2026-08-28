@@ -454,17 +454,22 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
   });
 
   await runTest('pre-rejects oversized kernel source (>1MB) in kaggle_project_continue and recommends workspace mode', async () => {
-    const giantSource = 'print("giant")\n' + 'x = 1\n'.repeat(200000); // > 1MB
-    assert.ok(giantSource.length > 1000000);
+    const giantNb = JSON.stringify({
+      cells: [{ cell_type: 'code', execution_count: null, metadata: {}, outputs: [], source: ['# giant\n' + 'x = 1\n'.repeat(150000)] }],
+      metadata: { language_info: { name: 'python' } },
+      nbformat: 4,
+      nbformat_minor: 5
+    });
 
     let errCaught = false;
     try {
       await handlers.handleKaggleProjectContinue({
         kernelRef: 'testuser/mock-notebook',
         expectedCurrentFingerprint: 'dummy',
+        acknowledgeUnobservedBrowserDraft: true,
         mutation: {
           type: 'replace_source',
-          source: giantSource
+          source: giantNb
         },
         reason: 'Attempting giant source push'
       }, adminCaller);
@@ -485,6 +490,9 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
       await handlers.handleKaggleProjectRestore({
         kernelRef: 'testuser/mock-notebook',
         kernelType: 'script',
+        allowKernelTypeChange: true,
+        kernelTypeChangeReason: 'Authorized oversized test',
+        acknowledgeUnobservedBrowserDraft: true,
         source: giantSource,
         sourceSha256: sha,
         reason: 'Attempting giant source restore'
