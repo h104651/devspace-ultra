@@ -1,5 +1,9 @@
 import * as assert from 'assert';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { spawnSync } from 'child_process';
 import { CloudflareKaggleHttpClient } from '../../src/kaggle/http-client';
 import { TaskStore } from '../../src/storage/task-store';
 import { ArtifactStore } from '../../src/storage/artifact-store';
@@ -549,5 +553,260 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.strictEqual(expFailResult.experimentExecution, 'FAIL');
   });
 
+  // ============================================================================
+  // Canonical Workspace Thin Runner Template Tests (Python Runtime)
+  // ============================================================================
+  const templatePath = path.resolve(__dirname, '../../src/kaggle/canonical-runner-template.py');
+
+  function runPythonRunner(inputDir: string, workDir: string): { status: number | null; stdout: string; stderr: string } {
+    const res = spawnSync('python', [templatePath], {
+      env: {
+        ...process.env,
+        DEVSPACE_INPUT_ROOT: inputDir,
+        DEVSPACE_WORK_ROOT: workDir
+      },
+      encoding: 'utf-8'
+    });
+    return {
+      status: res.status,
+      stdout: res.stdout || '',
+      stderr: res.stderr || ''
+    };
+  }
+
+  await runTest('canonical runner fails closed when devspace-execution-context.json is missing', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-1-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-1-'));
+    try {
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_EXECUTION_CONTEXT_MISSING'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner fails closed on malformed devspace-execution-context.json', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-2-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-2-'));
+    try {
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), '{ invalid json ...', 'utf-8');
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_EXECUTION_CONTEXT_MALFORMED'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner fails closed on execution context with missing required fields', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-3-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-3-'));
+    try {
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), JSON.stringify({ project: 'test' }), 'utf-8');
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_EXECUTION_CONTEXT_INVALID'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner fails closed when no workspace matches context slug', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-4-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-4-'));
+    try {
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), JSON.stringify({
+        project: 'Target Project',
+        slug: 'target-slug',
+        expectedDatasetVersion: 2,
+        expectedWorkspaceFingerprint: 'dummy-fp',
+        entrypoint: 'src/main.py'
+      }), 'utf-8');
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_WORKSPACE_NOT_FOUND'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner fails closed on multiple ambiguous matching workspaces', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-5-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-5-'));
+    try {
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), JSON.stringify({
+        project: 'Target Project',
+        slug: 'target-slug',
+        expectedDatasetVersion: 2,
+        expectedWorkspaceFingerprint: 'dummy-fp',
+        entrypoint: 'src/main.py'
+      }), 'utf-8');
+
+      const ds1 = path.join(tmpInput, 'ds1');
+      const ds2 = path.join(tmpInput, 'ds2');
+      fs.mkdirSync(ds1);
+      fs.mkdirSync(ds2);
+      fs.writeFileSync(path.join(ds1, 'devspace-project.json'), JSON.stringify({ slug: 'target-slug', name: 'Target Project' }), 'utf-8');
+      fs.writeFileSync(path.join(ds2, 'devspace-project.json'), JSON.stringify({ slug: 'target-slug', name: 'Target Project' }), 'utf-8');
+
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_WORKSPACE_AMBIGUOUS'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner rejects entrypoint mismatch between context and manifest', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-6-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-6-'));
+    try {
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), JSON.stringify({
+        project: 'Target Project',
+        slug: 'target-slug',
+        expectedDatasetVersion: 2,
+        expectedWorkspaceFingerprint: 'dummy-fp',
+        entrypoint: 'src/entry_a.py'
+      }), 'utf-8');
+
+      fs.writeFileSync(path.join(tmpInput, 'devspace-project.json'), JSON.stringify({
+        name: 'Target Project',
+        slug: 'target-slug',
+        version: 2,
+        entrypoint: 'src/entry_b.py',
+        files: {}
+      }), 'utf-8');
+
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_WORKSPACE_VERSION_MISMATCH'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner rejects version mismatch between context and manifest', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-7-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-7-'));
+    try {
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), JSON.stringify({
+        project: 'Target Project',
+        slug: 'target-slug',
+        expectedDatasetVersion: 2,
+        expectedWorkspaceFingerprint: 'dummy-fp',
+        entrypoint: 'src/main.py'
+      }), 'utf-8');
+
+      fs.writeFileSync(path.join(tmpInput, 'devspace-project.json'), JSON.stringify({
+        name: 'Target Project',
+        slug: 'target-slug',
+        version: 3, // actual is 3 vs expected 2
+        entrypoint: 'src/main.py',
+        files: {}
+      }), 'utf-8');
+
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_WORKSPACE_VERSION_MISMATCH'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner rejects fingerprint mismatch between context and runtime', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-8-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-8-'));
+    try {
+      const man = {
+        name: 'Target Project',
+        slug: 'target-slug',
+        version: 2,
+        entrypoint: 'src/main.py',
+        runnerKernelRef: 'user/runner',
+        files: { 'src/main.py': { size: 10, sha256: 'abc' } }
+      };
+      const realFp = computeWorkspaceFingerprint(man as any);
+
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), JSON.stringify({
+        project: 'Target Project',
+        slug: 'target-slug',
+        expectedDatasetVersion: 2,
+        expectedWorkspaceFingerprint: 'wrong-stale-fingerprint',
+        entrypoint: 'src/main.py'
+      }), 'utf-8');
+
+      fs.writeFileSync(path.join(tmpInput, 'devspace-project.json'), JSON.stringify(man), 'utf-8');
+
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 1);
+      assert.ok(res.stdout.includes('DEVSPACE_WORKSPACE_VERSION_MISMATCH'));
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
+  await runTest('canonical runner successfully executes entrypoint and writes devspace-result.json on valid context', () => {
+    const tmpInput = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-test-9-'));
+    const tmpWork = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-runner-work-9-'));
+    try {
+      const entryCode = 'print("Running Valid Entrypoint!")\nx = 42\n';
+      const entrySha = crypto.createHash('sha256').update(entryCode).digest('hex');
+      const srcDir = path.join(tmpInput, 'src');
+      fs.mkdirSync(srcDir);
+      fs.writeFileSync(path.join(srcDir, 'main.py'), entryCode, 'utf-8');
+
+      const man: DevSpaceProjectManifest = {
+        name: 'Target Project',
+        slug: 'target-slug',
+        owner: 'testuser',
+        version: 2,
+        type: 'workspace',
+        entrypoint: 'src/main.py',
+        runnerKernelRef: 'testuser/runner',
+        files: { 'src/main.py': { size: Buffer.byteLength(entryCode), sha256: entrySha } }
+      };
+      const realFp = computeWorkspaceFingerprint(man);
+
+      fs.writeFileSync(path.join(tmpInput, 'devspace-execution-context.json'), JSON.stringify({
+        project: 'Target Project',
+        slug: 'target-slug',
+        expectedDatasetVersion: 2,
+        expectedWorkspaceFingerprint: realFp,
+        entrypoint: 'src/main.py'
+      }), 'utf-8');
+
+      fs.writeFileSync(path.join(tmpInput, 'devspace-project.json'), JSON.stringify(man), 'utf-8');
+
+      const res = runPythonRunner(tmpInput, tmpWork);
+      assert.strictEqual(res.status, 0);
+      assert.ok(res.stdout.includes('RUNTIME_WORKSPACE_IDENTITY_GUARD: PASS'));
+      assert.ok(res.stdout.includes('Project Entrypoint Execution: SUCCESS'));
+      assert.ok(res.stdout.includes('DEVSPACE_RUNNER_FINISH_PASS'));
+
+      // Check devspace-result.json
+      const resultPath = path.join(tmpWork, 'devspace-result.json');
+      assert.ok(fs.existsSync(resultPath));
+      const resData = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+      assert.strictEqual(resData.project, 'Target Project');
+      assert.strictEqual(resData.datasetVersion, 2);
+      assert.strictEqual(resData.workspaceFingerprint, realFp);
+      assert.strictEqual(resData.workspaceValidation, 'PASS');
+      assert.strictEqual(resData.experimentExecution, 'PASS');
+    } finally {
+      fs.rmSync(tmpInput, { recursive: true, force: true });
+      fs.rmSync(tmpWork, { recursive: true, force: true });
+    }
+  });
+
   return { passed, failed };
 }
+
