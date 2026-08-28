@@ -2,6 +2,8 @@ import { StandardScope } from '../types/auth';
 import { ScopeChecker } from '../security/scope-checker';
 
 export const LOCAL_EXECUTABLE_CAPABILITIES = [
+  'local:list_projects',
+  'local:project_status',
   'local:git_status',
   'local:read_file',
   'local:write_file',

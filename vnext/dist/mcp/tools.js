@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = exports.KAGGLE_WORKSPACE_FILE_SCHEMA = exports.KAGGLE_WORKSPACE_GET_SCHEMA = exports.KAGGLE_PROJECT_RESTORE_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
+exports.LOCAL_WRITE_FILE_SCHEMA = exports.LOCAL_READ_FILE_SCHEMA = exports.LOCAL_PROJECT_STATUS_SCHEMA = exports.LOCAL_PROJECT_LIST_SCHEMA = exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = exports.KAGGLE_WORKSPACE_FILE_SCHEMA = exports.KAGGLE_WORKSPACE_GET_SCHEMA = exports.KAGGLE_PROJECT_RESTORE_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
+exports.LOCAL_BUILD_PROJECT_SCHEMA = exports.LOCAL_RUN_TESTS_SCHEMA = exports.LOCAL_GIT_STATUS_SCHEMA = exports.LOCAL_PATCH_FILE_SCHEMA = void 0;
 exports.getCanonicalToolsList = getCanonicalToolsList;
 exports.REMOTE_TASK_SUBMIT_SCHEMA = {
     type: 'object',
@@ -361,6 +362,96 @@ exports.KILL_SWITCH_TRIGGER_SCHEMA = {
     required: ['action'],
     additionalProperties: false
 };
+exports.LOCAL_PROJECT_LIST_SCHEMA = {
+    type: 'object',
+    properties: {},
+    additionalProperties: false
+};
+exports.LOCAL_PROJECT_STATUS_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier (e.g. "astor-tuneup", "devspace-ultra")' }
+    },
+    required: ['projectId'],
+    additionalProperties: false
+};
+exports.LOCAL_READ_FILE_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier' },
+        relativePath: { type: 'string', description: 'Relative path within the target project' },
+        limit: { type: 'number', description: 'Maximum character limit to read' },
+        clientRequestId: { type: 'string' }
+    },
+    required: ['projectId', 'relativePath'],
+    additionalProperties: false
+};
+exports.LOCAL_WRITE_FILE_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier' },
+        relativePath: { type: 'string', description: 'Relative path within the target project' },
+        content: { type: 'string', description: 'Content to write to the file' },
+        clientRequestId: { type: 'string' }
+    },
+    required: ['projectId', 'relativePath', 'content'],
+    additionalProperties: false
+};
+exports.LOCAL_PATCH_FILE_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier' },
+        relativePath: { type: 'string', description: 'Relative path within the target project' },
+        expectedSha256: { type: 'string', description: 'Expected current file SHA256 hex digest for optimistic concurrency control' },
+        patches: {
+            type: 'array',
+            minItems: 1,
+            items: {
+                type: 'object',
+                properties: {
+                    oldText: { type: 'string', description: 'Exact text chunk to match and replace' },
+                    newText: { type: 'string', description: 'New text chunk to substitute' },
+                    expectedOccurrences: { type: 'number', default: 1, description: 'Expected occurrence count (default: 1)' }
+                },
+                required: ['oldText', 'newText'],
+                additionalProperties: false
+            },
+            description: 'Ordered list of deterministic text replacement operations'
+        },
+        clientRequestId: { type: 'string' }
+    },
+    required: ['projectId', 'relativePath', 'expectedSha256', 'patches'],
+    additionalProperties: false
+};
+exports.LOCAL_GIT_STATUS_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier' },
+        clientRequestId: { type: 'string' }
+    },
+    required: ['projectId'],
+    additionalProperties: false
+};
+exports.LOCAL_RUN_TESTS_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier' },
+        runnerId: { type: 'string', description: 'Configured test runner ID or standard runner (npm, pytest, flutter)', default: 'npm' },
+        clientRequestId: { type: 'string' }
+    },
+    required: ['projectId'],
+    additionalProperties: false
+};
+exports.LOCAL_BUILD_PROJECT_SCHEMA = {
+    type: 'object',
+    properties: {
+        projectId: { type: 'string', description: 'Target registered project identifier' },
+        commandId: { type: 'string', description: 'Configured build command ID or standard command (npm, flutter)', default: 'npm' },
+        clientRequestId: { type: 'string' }
+    },
+    required: ['projectId'],
+    additionalProperties: false
+};
 function getCanonicalToolsList() {
     return [
         { name: 'remote_task_submit', description: 'Submit durable task to local agent, Kaggle, browser, or swarm backend', inputSchema: exports.REMOTE_TASK_SUBMIT_SCHEMA },
@@ -383,6 +474,14 @@ function getCanonicalToolsList() {
         { name: 'kaggle_workspace_get', description: 'Retrieve Kaggle dataset-backed project workspace manifest, fingerprint, and file outline', inputSchema: exports.KAGGLE_WORKSPACE_GET_SCHEMA },
         { name: 'kaggle_workspace_file', description: 'Read a specific file from the project workspace with bounded chunking', inputSchema: exports.KAGGLE_WORKSPACE_FILE_SCHEMA },
         { name: 'kaggle_workspace_continue', description: 'Atomically update project workspace dataset version, apply file changes, and trigger thin runner execution', inputSchema: exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA },
+        { name: 'local_project_list', description: 'List registered and authorized local projects with capabilities and metadata', inputSchema: exports.LOCAL_PROJECT_LIST_SCHEMA },
+        { name: 'local_project_status', description: 'Inspect status, git branch, and capabilities of an authorized local project', inputSchema: exports.LOCAL_PROJECT_STATUS_SCHEMA },
+        { name: 'local_read_file', description: 'Read file content from an authorized local project using relative path', inputSchema: exports.LOCAL_READ_FILE_SCHEMA },
+        { name: 'local_write_file', description: 'Write or overwrite file in an authorized local project using relative path', inputSchema: exports.LOCAL_WRITE_FILE_SCHEMA },
+        { name: 'local_patch_file', description: 'Patch or create file in an authorized local project using relative path', inputSchema: exports.LOCAL_PATCH_FILE_SCHEMA },
+        { name: 'local_git_status', description: 'Get git status of an authorized local project repository', inputSchema: exports.LOCAL_GIT_STATUS_SCHEMA },
+        { name: 'local_run_tests', description: 'Run test suite inside an authorized local project root', inputSchema: exports.LOCAL_RUN_TESTS_SCHEMA },
+        { name: 'local_build_project', description: 'Execute build command inside an authorized local project root', inputSchema: exports.LOCAL_BUILD_PROJECT_SCHEMA },
         { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: exports.CHAT_SWARM_CREATE_SCHEMA },
         { name: 'chat_swarm_join', description: 'Join an existing Chat Swarm worker slot using its invite code', inputSchema: exports.CHAT_SWARM_JOIN_SCHEMA },
         { name: 'chat_swarm_dock', description: 'Mount the persistent Worker Dock stream for an existing worker token', inputSchema: exports.CHAT_SWARM_DOCK_SCHEMA },

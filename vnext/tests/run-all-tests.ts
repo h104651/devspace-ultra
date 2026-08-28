@@ -4,6 +4,7 @@ import { runTaskStateUnitTests } from './unit/task-state.test';
 import { runRedactorUnitTests } from './unit/redactor.test';
 import { runPathSanitizerUnitTests } from './unit/path-sanitizer.test';
 import { runArtifactsUnitTests } from './unit/artifacts.test';
+import { runProjectRegistryUnitTests } from './unit/project-registry.test';
 import { runGatewayFlowIntegrationTests } from './integration/gateway-flow.test';
 import { runKaggleIntegrationTests } from './integration/kaggle-mock.test';
 import { runSwarmIntegrationTests } from './integration/swarm.test';
@@ -11,6 +12,7 @@ import { runStaleRecoveryIntegrationTests } from './integration/stale-recovery.t
 import { runIdempotencyIntegrationTests } from './integration/idempotency.test';
 import { runRemoteMcpHttpTests } from './integration/remote-mcp-http.test';
 import { runAgentLifecycleDurabilityTests } from './integration/agent-lifecycle-durability.test';
+import { runLocalProjectRoutingIntegrationTests } from './integration/local-project-routing.test';
 import { runSecurityTests } from './security/security.test';
 import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-security.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
@@ -35,10 +37,12 @@ async function main() {
     { name: 'Unit: Secret & PII Redactor', runner: runRedactorUnitTests },
     { name: 'Unit: Path Sanitizer & Sandbox', runner: runPathSanitizerUnitTests },
     { name: 'Unit: Artifacts & Integrity', runner: runArtifactsUnitTests },
+    { name: 'Unit: Local Project Registry & Path Security', runner: runProjectRegistryUnitTests },
     { name: 'Protocol: MCP 2026-07-28 Wire Validation', runner: runMcp2026Tests },
     { name: 'Integration: Gateway Flow (REST + WS Agent)', runner: runGatewayFlowIntegrationTests },
     { name: 'Integration: Remote MCP Transport (HTTP POST /mcp)', runner: runRemoteMcpHttpTests },
     { name: 'Integration: Agent Lifecycle & Durability', runner: runAgentLifecycleDurabilityTests },
+    { name: 'Integration: Local Multi-Project Named Routing', runner: runLocalProjectRoutingIntegrationTests },
     { name: 'Integration: Kaggle Mock Backend', runner: runKaggleIntegrationTests },
     { name: 'Integration: Kaggle Persistent Project Control v1', runner: runKaggleProjectTests },
     { name: 'Integration: Kaggle Large Project Workspace Mode', runner: runKaggleWorkspaceTests },

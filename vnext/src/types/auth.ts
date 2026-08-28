@@ -9,6 +9,7 @@ export type StandardScope =
   | 'local:read'
   | 'local:write'
   | 'local:test'
+  | 'local:exec'
   | 'browser:run'
   | 'swarm:dispatch'
   | 'raw_shell:run'

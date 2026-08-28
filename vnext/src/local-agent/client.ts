@@ -1,7 +1,8 @@
 import { WebSocket } from 'ws';
 import * as crypto from 'crypto';
-import { TaskExecutor } from './task-executor';
+import { TaskExecutor, TaskExecutorConfig } from './task-executor';
 import { EnvironmentProbe } from './environment-probe';
+import { ProjectRegistry, LocalProjectDefinition } from './project-registry';
 import { DurableTask } from '../types/task';
 import { GatewayMessage } from '../types/gateway';
 
@@ -10,7 +11,10 @@ export interface LocalAgentClientConfig {
   deviceId: string;
   token: string;
   name?: string;
-  allowedWorkspaces: string[];
+  allowedWorkspaces?: string[];
+  projects?: LocalProjectDefinition[];
+  projectRegistry?: ProjectRegistry;
+  projectsConfigFile?: string;
   allowRawShell?: boolean;
   heartbeatIntervalMs?: number;
   pollIntervalMs?: number;
@@ -35,6 +39,9 @@ export class LocalAgentClient {
     };
     this.executor = new TaskExecutor({
       allowedWorkspaces: config.allowedWorkspaces,
+      projects: config.projects,
+      projectRegistry: config.projectRegistry,
+      projectsConfigFile: config.projectsConfigFile,
       allowRawShell: config.allowRawShell
     });
   }
@@ -210,6 +217,7 @@ export class LocalAgentClient {
         result
       });
     } catch (err: any) {
+      const errCode = err.code || (typeof err.message === 'string' && err.message.split(':')[0]) || 'LOCAL_TASK_EXECUTION_ERROR';
       this.send({
         type: 'TASK_FAIL',
         messageId: crypto.randomUUID(),
@@ -217,7 +225,7 @@ export class LocalAgentClient {
         taskId: task.taskId,
         deviceId: this.config.deviceId,
         error: {
-          code: 'LOCAL_TASK_EXECUTION_ERROR',
+          code: errCode,
           message: err.message || 'Unknown execution error'
         }
       });

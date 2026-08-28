@@ -40,6 +40,8 @@ class EnvironmentProbe {
     static probe(options) {
         const platform = os.platform() === 'win32' ? 'windows' : os.platform() === 'darwin' ? 'darwin' : 'linux';
         const capabilities = [
+            'local:list_projects',
+            'local:project_status',
             'local:git_status',
             'local:read_file',
             'local:write_file',

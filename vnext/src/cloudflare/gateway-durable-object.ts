@@ -1257,6 +1257,14 @@ export class GatewayDurableObject {
             case 'kaggle_workspace_get': result = await this.mcpHandlers.handleKaggleWorkspaceGet(args, caller); break;
             case 'kaggle_workspace_file': result = await this.mcpHandlers.handleKaggleWorkspaceFile(args, caller); break;
             case 'kaggle_workspace_continue': result = await this.mcpHandlers.handleKaggleWorkspaceContinue(args, caller); break;
+            case 'local_project_list': result = await this.mcpHandlers.handleLocalProjectList(args, caller); break;
+            case 'local_project_status': result = await this.mcpHandlers.handleLocalProjectStatus(args, caller); break;
+            case 'local_read_file': result = await this.mcpHandlers.handleLocalReadFile(args, caller); break;
+            case 'local_write_file': result = await this.mcpHandlers.handleLocalWriteFile(args, caller); break;
+            case 'local_patch_file': result = await this.mcpHandlers.handleLocalPatchFile(args, caller); break;
+            case 'local_git_status': result = await this.mcpHandlers.handleLocalGitStatus(args, caller); break;
+            case 'local_run_tests': result = await this.mcpHandlers.handleLocalRunTests(args, caller); break;
+            case 'local_build_project': result = await this.mcpHandlers.handleLocalBuildProject(args, caller); break;
             case 'swarm_dispatch': result = await this.mcpHandlers.handleSwarmDispatch(args, caller); break;
             case 'swarm_status': result = await this.mcpHandlers.handleSwarmStatus(caller); break;
             case 'chat_swarm_runtime_status': result = await this.mcpHandlers.handleChatSwarmRuntimeStatus(caller); break;
