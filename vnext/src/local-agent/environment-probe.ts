@@ -19,6 +19,8 @@ export class EnvironmentProbe {
   static probe(options?: ProbeOptions): LocalEnvironmentReport {
     const platform = os.platform() === 'win32' ? 'windows' : os.platform() === 'darwin' ? 'darwin' : 'linux';
     const capabilities: string[] = [
+      'local:list_projects',
+      'local:project_status',
       'local:git_status',
       'local:read_file',
       'local:write_file',

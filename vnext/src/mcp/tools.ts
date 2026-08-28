@@ -388,6 +388,104 @@ export const KILL_SWITCH_TRIGGER_SCHEMA = {
   additionalProperties: false
 };
 
+export const LOCAL_PROJECT_LIST_SCHEMA = {
+  type: 'object',
+  properties: {},
+  additionalProperties: false
+};
+
+export const LOCAL_PROJECT_STATUS_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectId: { type: 'string', description: 'Target registered project identifier (e.g. "astor-tuneup", "devspace-ultra")' }
+  },
+  required: ['projectId'],
+  additionalProperties: false
+};
+
+export const LOCAL_READ_FILE_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectId: { type: 'string', description: 'Target registered project identifier' },
+    relativePath: { type: 'string', description: 'Relative path within the target project' },
+    limit: { type: 'number', description: 'Maximum character limit to read' },
+    clientRequestId: { type: 'string' }
+  },
+  required: ['projectId', 'relativePath'],
+  additionalProperties: false
+};
+
+export const LOCAL_WRITE_FILE_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectId: { type: 'string', description: 'Target registered project identifier' },
+    relativePath: { type: 'string', description: 'Relative path within the target project' },
+    content: { type: 'string', description: 'Content to write to the file' },
+    clientRequestId: { type: 'string' }
+  },
+  required: ['projectId', 'relativePath', 'content'],
+  additionalProperties: false
+};
+
+export const LOCAL_PATCH_FILE_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectId: { type: 'string', description: 'Target registered project identifier' },
+    relativePath: { type: 'string', description: 'Relative path within the target project' },
+    expectedSha256: { type: 'string', description: 'Expected current file SHA256 hex digest for optimistic concurrency control' },
+    patches: {
+      type: 'array',
+      minItems: 1,
+      items: {
+        type: 'object',
+        properties: {
+          oldText: { type: 'string', description: 'Exact text chunk to match and replace' },
+          newText: { type: 'string', description: 'New text chunk to substitute' },
+          expectedOccurrences: { type: 'number', default: 1, description: 'Expected occurrence count (default: 1)' }
+        },
+        required: ['oldText', 'newText'],
+        additionalProperties: false
+      },
+      description: 'Ordered list of deterministic text replacement operations'
+    },
+    clientRequestId: { type: 'string' }
+  },
+  required: ['projectId', 'relativePath', 'expectedSha256', 'patches'],
+  additionalProperties: false
+};
+
+export const LOCAL_GIT_STATUS_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectId: { type: 'string', description: 'Target registered project identifier' },
+    clientRequestId: { type: 'string' }
+  },
+  required: ['projectId'],
+  additionalProperties: false
+};
+
+export const LOCAL_RUN_TESTS_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectId: { type: 'string', description: 'Target registered project identifier' },
+    runnerId: { type: 'string', description: 'Configured test runner ID or standard runner (npm, pytest, flutter)', default: 'npm' },
+    clientRequestId: { type: 'string' }
+  },
+  required: ['projectId'],
+  additionalProperties: false
+};
+
+export const LOCAL_BUILD_PROJECT_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectId: { type: 'string', description: 'Target registered project identifier' },
+    commandId: { type: 'string', description: 'Configured build command ID or standard command (npm, flutter)', default: 'npm' },
+    clientRequestId: { type: 'string' }
+  },
+  required: ['projectId'],
+  additionalProperties: false
+};
+
 export interface McpToolDefinition {
   name: string;
   description: string;
@@ -417,6 +515,15 @@ export function getCanonicalToolsList(): McpToolDefinition[] {
     { name: 'kaggle_workspace_get', description: 'Retrieve Kaggle dataset-backed project workspace manifest, fingerprint, and file outline', inputSchema: KAGGLE_WORKSPACE_GET_SCHEMA },
     { name: 'kaggle_workspace_file', description: 'Read a specific file from the project workspace with bounded chunking', inputSchema: KAGGLE_WORKSPACE_FILE_SCHEMA },
     { name: 'kaggle_workspace_continue', description: 'Atomically update project workspace dataset version, apply file changes, and trigger thin runner execution', inputSchema: KAGGLE_WORKSPACE_CONTINUE_SCHEMA },
+
+    { name: 'local_project_list', description: 'List registered and authorized local projects with capabilities and metadata', inputSchema: LOCAL_PROJECT_LIST_SCHEMA },
+    { name: 'local_project_status', description: 'Inspect status, git branch, and capabilities of an authorized local project', inputSchema: LOCAL_PROJECT_STATUS_SCHEMA },
+    { name: 'local_read_file', description: 'Read file content from an authorized local project using relative path', inputSchema: LOCAL_READ_FILE_SCHEMA },
+    { name: 'local_write_file', description: 'Write or overwrite file in an authorized local project using relative path', inputSchema: LOCAL_WRITE_FILE_SCHEMA },
+    { name: 'local_patch_file', description: 'Patch or create file in an authorized local project using relative path', inputSchema: LOCAL_PATCH_FILE_SCHEMA },
+    { name: 'local_git_status', description: 'Get git status of an authorized local project repository', inputSchema: LOCAL_GIT_STATUS_SCHEMA },
+    { name: 'local_run_tests', description: 'Run test suite inside an authorized local project root', inputSchema: LOCAL_RUN_TESTS_SCHEMA },
+    { name: 'local_build_project', description: 'Execute build command inside an authorized local project root', inputSchema: LOCAL_BUILD_PROJECT_SCHEMA },
 
     { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: CHAT_SWARM_CREATE_SCHEMA },
     { name: 'chat_swarm_join', description: 'Join an existing Chat Swarm worker slot using its invite code', inputSchema: CHAT_SWARM_JOIN_SCHEMA },

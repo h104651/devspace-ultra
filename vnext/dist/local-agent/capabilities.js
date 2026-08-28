@@ -6,6 +6,8 @@ exports.getRequiredScopeForLocalCapability = getRequiredScopeForLocalCapability;
 exports.isCapabilityAuthorized = isCapabilityAuthorized;
 const scope_checker_1 = require("../security/scope-checker");
 exports.LOCAL_EXECUTABLE_CAPABILITIES = [
+    'local:list_projects',
+    'local:project_status',
     'local:git_status',
     'local:read_file',
     'local:write_file',
