@@ -709,6 +709,12 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
    */
   public async getDataset(owner: string, slug: string): Promise<KaggleDatasetMetadata> {
     if (this.isMockMode) {
+      if (owner === 'forbidden' || slug.includes('forbidden') || slug.includes('access-denied')) {
+        throw new Error(`KAGGLE_GET_DATASET_FAILED: HTTP 403: Forbidden - Access denied for ${owner}/${slug}`);
+      }
+      if (slug.includes('server-error') || slug.includes('500')) {
+        throw new Error(`KAGGLE_GET_DATASET_FAILED: HTTP 500: Internal Server Error`);
+      }
       const key = `${owner}/${slug}`;
       const mockDs = this.mockDatasets.get(key);
       if (mockDs) {
@@ -776,6 +782,12 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
     pageToken?: string
   ): Promise<{ datasetFiles: KaggleDatasetFileEntry[]; nextPageToken?: string }> {
     if (this.isMockMode) {
+      if (owner === 'forbidden' || slug.includes('forbidden') || slug.includes('access-denied')) {
+        throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 403: Forbidden - Access denied for ${owner}/${slug}`);
+      }
+      if (slug.includes('server-error') || slug.includes('500')) {
+        throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 500: Internal Server Error`);
+      }
       const key = `${owner}/${slug}`;
       const mockDs = this.mockDatasets.get(key);
       if (mockDs) {
@@ -793,6 +805,8 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
             return { datasetFiles: slice, nextPageToken: nextTok };
           }
           return { datasetFiles: files };
+        } else if (version !== undefined) {
+          throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 404: Version ${version} of dataset ${owner}/${slug} not found`);
         }
       }
       if (

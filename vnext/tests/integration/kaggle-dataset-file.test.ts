@@ -240,6 +240,115 @@ export async function runKaggleDatasetFileTests(): Promise<{ passed: number; fai
       kaggleClient.pushKernel = origPushKernel;
     }
 
+    // 13. Hardening: Raw path traversal (foo/../bar.json, ./result.json, foo//bar.json)
+    const rawTraversalPaths = [
+      'foo/../bar.json',
+      './result.json',
+      'foo//bar.json',
+      'results/./result.json',
+      'results/result.json/..'
+    ];
+    for (const p of rawTraversalPaths) {
+      await assert.rejects(
+        async () => {
+          await handlers.handleKaggleDatasetFile({
+            datasetRef: `${owner}/${slug}`,
+            relativePath: p,
+            datasetVersion: 1
+          }, callerContext);
+        },
+        (err: any) => err.message.includes('INVALID_KAGGLE_DATASET_PATH')
+      );
+    }
+    passed++;
+
+    // 14. Hardening: Unknown extension fail-closed (artifact.customblob with printable ASCII)
+    const customBlobContent = Buffer.from('HELLO_THIS_LOOKS_LIKE_TEXT', 'utf-8');
+    const customBlobSha256 = crypto.createHash('sha256').update(customBlobContent).digest('hex');
+    v1Files.set('artifacts/artifact.customblob', customBlobContent);
+    kaggleClient.registerMockDataset(owner, slug, 1, v1Files);
+
+    const resUnknownExt = await handlers.handleKaggleDatasetFile({
+      datasetRef: `${owner}/${slug}`,
+      relativePath: 'artifacts/artifact.customblob',
+      datasetVersion: 1
+    }, callerContext);
+
+    assert.strictEqual(resUnknownExt.isText, false, 'Unknown extension must not be inferred as text');
+    assert.strictEqual(resUnknownExt.contentType, 'application/octet-stream');
+    assert.strictEqual(resUnknownExt.encoding, null);
+    assert.strictEqual(resUnknownExt.content, null);
+    assert.strictEqual(resUnknownExt.sha256, customBlobSha256);
+    passed++;
+
+    // 15. Hardening: Post-download hard fetch ceiling (metadata says small, actual payload > 20 MiB)
+    const sneakyOversized = 'artifacts/sneaky_oversized.bin';
+    v1Files.set(sneakyOversized, Buffer.alloc(100, 0x41)); // inventory says 100 bytes
+    kaggleClient.registerMockDataset(owner, slug, 1, v1Files);
+    const origDownload = kaggleClient.downloadDatasetFile;
+    kaggleClient.downloadDatasetFile = async (o: string, s: string, fn: string, ver?: number) => {
+      if (fn === sneakyOversized) {
+        const big = Buffer.alloc(20971520 + 1024, 0x42);
+        return { content: big, sizeBytes: big.length };
+      }
+      return origDownload.call(kaggleClient, o, s, fn, ver);
+    };
+
+    try {
+      await assert.rejects(
+        async () => {
+          await handlers.handleKaggleDatasetFile({
+            datasetRef: `${owner}/${slug}`,
+            relativePath: sneakyOversized,
+            datasetVersion: 1
+          }, callerContext);
+        },
+        (err: any) => err.message.includes('KAGGLE_DATASET_FILE_TOO_LARGE')
+      );
+      passed++;
+    } finally {
+      kaggleClient.downloadDatasetFile = origDownload;
+    }
+
+    // 16. Hardening: Explicit missing dataset version returns KAGGLE_DATASET_VERSION_NOT_FOUND
+    await assert.rejects(
+      async () => {
+        await handlers.handleKaggleDatasetFile({
+          datasetRef: `${owner}/${slug}`,
+          relativePath: 'results/result.json',
+          datasetVersion: 999
+        }, callerContext);
+      },
+      (err: any) => err.message.includes('KAGGLE_DATASET_VERSION_NOT_FOUND')
+    );
+    passed++;
+
+    // 17. Hardening: 403 Forbidden is NOT converted to NOT_FOUND
+    await assert.rejects(
+      async () => {
+        await handlers.handleKaggleDatasetFile({
+          datasetRef: 'forbidden/dataset-slug',
+          relativePath: 'results/result.json',
+          datasetVersion: 1
+        }, callerContext);
+      },
+      (err: any) => err.message.includes('KAGGLE_DATASET_ACCESS_DENIED')
+    );
+    passed++;
+
+    // 18. Hardening: 500 Server Error is NOT converted to NOT_FOUND
+    await assert.rejects(
+      async () => {
+        await handlers.handleKaggleDatasetFile({
+          datasetRef: 'testuser/server-error-dataset',
+          relativePath: 'results/result.json',
+          datasetVersion: 1
+        }, callerContext);
+      },
+      (err: any) => err.message.includes('KAGGLE_DATASET_FILE_LIST_FAILED') || err.message.includes('KAGGLE_DATASET_LOOKUP_FAILED')
+    );
+    passed++;
+
   } catch (err: any) {
     console.error('Kaggle dataset file integration test failed:', err);
     failed++;

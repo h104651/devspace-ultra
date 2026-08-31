@@ -3,7 +3,7 @@ import * as path from 'path';
 import { GatewayServer } from '../gateway/server';
 import { redactObject } from '../security/redactor';
 import { ScopeChecker } from '../security/scope-checker';
-import { KaggleDatasetFileEntry } from '../kaggle/kaggle-client.interface';
+import { KaggleDatasetFileEntry, KaggleDatasetMetadata } from '../kaggle/kaggle-client.interface';
 import {
   computeProjectFingerprint,
   parseNotebookCells,
@@ -1379,13 +1379,15 @@ export class McpHandlers {
     if (rawPath.includes('\\')) {
       throw new Error(`INVALID_KAGGLE_DATASET_PATH: Backslash path separators are forbidden: "${rawPath}"`);
     }
-    const normalized = path.posix.normalize(rawPath);
-    if (normalized === '.' || normalized === '..' || normalized.startsWith('../') || normalized.includes('/../') || normalized.endsWith('/..')) {
-      throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path traversal is forbidden: "${rawPath}"`);
+    const rawSegments = rawPath.split('/');
+    for (const segment of rawSegments) {
+      if (segment === '' || segment === '.' || segment === '..' || /^\.{2,}$/.test(segment)) {
+        throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path contains empty or traversal segments: "${rawPath}"`);
+      }
     }
-    const segments = normalized.split('/');
-    if (segments.some(s => !s || s === '.' || s === '..' || /^\.{2,}$/.test(s))) {
-      throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path contains invalid or traversal segments: "${rawPath}"`);
+    const normalized = path.posix.normalize(rawPath);
+    if (normalized !== rawPath) {
+      throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path is not in canonical normalized form: "${rawPath}"`);
     }
     const validPath = normalized;
 
@@ -1415,19 +1417,30 @@ export class McpHandlers {
 
     // 1. Resolve Dataset Version
     let resolvedVersion: number;
+    let dsMeta: KaggleDatasetMetadata;
+    try {
+      dsMeta = await client.getDataset(owner, slug);
+    } catch (err: any) {
+      if (err.message?.includes('403') || err.message?.includes('401') || err.message?.includes('ACCESS_DENIED') || err.message?.includes('AUTH_') || err.message?.includes('Forbidden')) {
+        throw new Error(`KAGGLE_DATASET_ACCESS_DENIED: Access denied for dataset ${canonicalRef}: ${err.message}`);
+      }
+      if (err.message?.includes('404') || err.message?.includes('NOT_FOUND') || err.message?.includes('not found')) {
+        throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found: ${err.message}`);
+      }
+      throw new Error(`KAGGLE_DATASET_LOOKUP_FAILED: Failed to lookup dataset ${canonicalRef}: ${err.message}`);
+    }
+
+    if (!dsMeta || typeof dsMeta.currentVersionNumber !== 'number') {
+      throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found`);
+    }
+
     if (explicitVersion !== undefined) {
+      if (explicitVersion > dsMeta.currentVersionNumber) {
+        throw new Error(`KAGGLE_DATASET_VERSION_NOT_FOUND: Version ${explicitVersion} not found for dataset ${canonicalRef} (current version: ${dsMeta.currentVersionNumber})`);
+      }
       resolvedVersion = explicitVersion;
     } else {
-      try {
-        const dsMeta = await client.getDataset(owner, slug);
-        if (!dsMeta || typeof dsMeta.currentVersionNumber !== 'number') {
-          throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found or has no version`);
-        }
-        resolvedVersion = dsMeta.currentVersionNumber;
-      } catch (err: any) {
-        if (err.message?.startsWith('KAGGLE_DATASET_NOT_FOUND')) throw err;
-        throw new Error(`KAGGLE_DATASET_NOT_FOUND: Failed to resolve dataset ${canonicalRef}: ${err.message}`);
-      }
+      resolvedVersion = dsMeta.currentVersionNumber;
     }
 
     // 2. File Existence & Safety Precheck via listDatasetFiles
@@ -1435,10 +1448,16 @@ export class McpHandlers {
     try {
       fileListResult = await client.listDatasetFiles(owner, slug, resolvedVersion);
     } catch (err: any) {
-      if (err.message?.includes('404') || err.message?.includes('NOT_FOUND') || err.message?.includes('FAILED')) {
-        throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} or version ${resolvedVersion} not found: ${err.message}`);
+      if (err.message?.includes('403') || err.message?.includes('401') || err.message?.includes('ACCESS_DENIED') || err.message?.includes('AUTH_') || err.message?.includes('Forbidden')) {
+        throw new Error(`KAGGLE_DATASET_ACCESS_DENIED: Access denied listing files for ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
       }
-      throw new Error(`KAGGLE_DATASET_FILE_NOT_FOUND: Could not list files for ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+      if (err.message?.includes('404') || err.message?.includes('NOT_FOUND') || err.message?.includes('Version') || err.message?.includes('not found')) {
+        if (explicitVersion !== undefined) {
+          throw new Error(`KAGGLE_DATASET_VERSION_NOT_FOUND: Version ${resolvedVersion} of dataset ${canonicalRef} not found`);
+        }
+        throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found`);
+      }
+      throw new Error(`KAGGLE_DATASET_FILE_LIST_FAILED: Failed to list files for ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
     }
 
     const exactFile = fileListResult.datasetFiles.find(f => f.name === validPath);
@@ -1456,11 +1475,19 @@ export class McpHandlers {
     try {
       dl = await client.downloadDatasetFile(owner, slug, validPath, resolvedVersion);
     } catch (err: any) {
+      if (err.message?.includes('403') || err.message?.includes('401') || err.message?.includes('ACCESS_DENIED') || err.message?.includes('AUTH_') || err.message?.includes('Forbidden')) {
+        throw new Error(`KAGGLE_DATASET_ACCESS_DENIED: Access denied when downloading "${validPath}" from ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+      }
       throw new Error(`KAGGLE_DATASET_FILE_DOWNLOAD_FAILED: Failed to download "${validPath}" from ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
     }
 
-    // 4. Authoritative Actual Byte SHA256 Calculation
+    // Post-download hard fetch ceiling check
     const actualBytes = dl.content;
+    if (actualBytes.length > MAX_FETCH_CEILING) {
+      throw new Error(`KAGGLE_DATASET_FILE_TOO_LARGE: Downloaded file "${validPath}" size (${actualBytes.length} bytes) exceeds maximum fetch ceiling of 20 MiB`);
+    }
+
+    // 4. Authoritative Actual Byte SHA256 Calculation
     const actualSha256 = crypto.createHash('sha256').update(actualBytes).digest('hex');
     const actualSize = actualBytes.length;
 
@@ -1512,9 +1539,9 @@ export class McpHandlers {
       isText = false;
       contentType = BINARY_MIME_TYPES[ext];
     } else {
-      const sample = actualBytes.subarray(0, Math.min(actualBytes.length, 8192));
-      isText = !sample.includes(0);
-      contentType = isText ? 'text/plain' : 'application/octet-stream';
+      // Fail-closed: ANY unknown extension is classified as binary
+      isText = false;
+      contentType = 'application/octet-stream';
     }
 
     let encoding: string | null = null;
