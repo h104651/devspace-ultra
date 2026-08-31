@@ -1452,15 +1452,127 @@ class McpHandlers {
     // ==========================================
     // LOCAL MULTI-PROJECT ROUTING HANDLERS
     // ==========================================
+    async submitLocalTaskAndWait(options, auth, waitMs) {
+        const defaultWaitMs = 8000;
+        const boundedWaitMs = typeof waitMs === 'number' ? Math.min(Math.max(waitMs, 100), 15000) : defaultWaitMs;
+        const pollIntervalMs = 100;
+        // 1. Submit durable task via TaskRouter (preserves auth, scopes, audit, idempotency, killswitch)
+        const submitResult = await this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local',
+            capability: options.capability,
+            payload: options.payload,
+            clientRequestId: options.clientRequestId,
+            idempotencyKey: options.idempotencyKey
+        }, auth.scopes, auth.subjectId);
+        const taskId = submitResult.taskId;
+        // 2. Check if already terminal (e.g. cached completed idempotent replay)
+        let currentTask = this.gateway.taskStore.getTask(taskId);
+        if (currentTask) {
+            if (currentTask.status === 'succeeded') {
+                return {
+                    taskId,
+                    status: 'succeeded',
+                    result: (0, redactor_1.redactObject)(currentTask.result),
+                    completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
+                    directResult: true
+                };
+            }
+            if (currentTask.status === 'failed') {
+                return {
+                    taskId,
+                    status: 'failed',
+                    error: currentTask.error,
+                    completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
+                    directResult: true
+                };
+            }
+            if (currentTask.status === 'cancelled') {
+                return {
+                    taskId,
+                    status: 'cancelled',
+                    error: currentTask.error,
+                    completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
+                    directResult: true
+                };
+            }
+        }
+        // 3. Preflight check: live connected agents (PR #5 source of truth)
+        const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+        if (connected.length === 0) {
+            return {
+                taskId,
+                status: submitResult.status || 'queued',
+                pending: true,
+                waitingForEligibleDevice: true,
+                reason: 'NO_ONLINE_DEVICE',
+                isReplay: !!submitResult.isReplay,
+                message: 'Task queued, but no local agents are currently connected.'
+            };
+        }
+        const eligible = connected.some((c) => c.capabilities?.includes(options.capability));
+        if (!eligible) {
+            return {
+                taskId,
+                status: submitResult.status || 'queued',
+                pending: true,
+                waitingForEligibleDevice: true,
+                reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
+                isReplay: !!submitResult.isReplay,
+                message: `Task queued, but currently connected devices are not authorized for capability '${options.capability}'.`
+            };
+        }
+        // 4. Bounded wait for eligible live agent execution
+        const startTime = Date.now();
+        while (Date.now() - startTime < boundedWaitMs) {
+            await new Promise(r => setTimeout(r, pollIntervalMs));
+            currentTask = this.gateway.taskStore.getTask(taskId);
+            if (!currentTask)
+                break;
+            if (currentTask.status === 'succeeded') {
+                return {
+                    taskId,
+                    status: 'succeeded',
+                    result: (0, redactor_1.redactObject)(currentTask.result),
+                    completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
+                    directResult: true
+                };
+            }
+            if (currentTask.status === 'failed') {
+                return {
+                    taskId,
+                    status: 'failed',
+                    error: currentTask.error,
+                    completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
+                    directResult: true
+                };
+            }
+            if (currentTask.status === 'cancelled') {
+                return {
+                    taskId,
+                    status: 'cancelled',
+                    error: currentTask.error,
+                    completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
+                    directResult: true
+                };
+            }
+        }
+        // 5. Bounded wait timeout: return pending=true, directResult=false (do NOT cancel task)
+        return {
+            taskId,
+            status: currentTask?.status || 'queued',
+            pending: true,
+            directResult: false,
+            message: 'Task is still executing; query remote_task_status using this taskId.'
+        };
+    }
     async handleLocalProjectList(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'local:read', 'tasks:submit');
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:list_projects',
             payload: args || {},
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalProjectStatus(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1468,12 +1580,11 @@ class McpHandlers {
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_project_status');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:project_status',
             payload: { projectId: args.projectId },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalReadFile(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1481,8 +1592,7 @@ class McpHandlers {
         if (!args?.projectId || !args?.relativePath) {
             throw new Error('INVALID_ARGUMENT: projectId and relativePath are required for local_read_file');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:read_file',
             payload: {
                 projectId: args.projectId,
@@ -1490,7 +1600,7 @@ class McpHandlers {
                 limit: args.limit
             },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalWriteFile(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1501,16 +1611,15 @@ class McpHandlers {
         if (args?.content === undefined || args?.content === null) {
             throw new Error('INVALID_ARGUMENT: content is required for local_write_file');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:write_file',
             payload: {
                 projectId: args.projectId,
                 relativePath: args.relativePath,
                 content: args.content
             },
-            clientRequestId: args.clientRequestId
-        }, auth.scopes, auth.subjectId);
+            clientRequestId: args?.clientRequestId
+        }, auth, args?.waitMs);
     }
     async handleLocalPatchFile(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1524,8 +1633,7 @@ class McpHandlers {
         if (!Array.isArray(args?.patches) || args.patches.length === 0) {
             throw new Error('INVALID_ARGUMENT: patches array is required and must contain at least one patch object');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:patch_file',
             payload: {
                 projectId: args.projectId,
@@ -1533,8 +1641,8 @@ class McpHandlers {
                 expectedSha256: args.expectedSha256,
                 patches: args.patches
             },
-            clientRequestId: args.clientRequestId
-        }, auth.scopes, auth.subjectId);
+            clientRequestId: args?.clientRequestId
+        }, auth, args?.waitMs);
     }
     async handleLocalListDirectory(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1542,8 +1650,7 @@ class McpHandlers {
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_list_directory');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:list_directory',
             payload: {
                 projectId: args.projectId,
@@ -1551,7 +1658,7 @@ class McpHandlers {
                 maxEntries: args.maxEntries
             },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalFindFiles(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1559,8 +1666,7 @@ class McpHandlers {
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_find_files');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:find_files',
             payload: {
                 projectId: args.projectId,
@@ -1573,7 +1679,7 @@ class McpHandlers {
                 type: args.type || 'all'
             },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalSearchText(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1581,8 +1687,7 @@ class McpHandlers {
         if (!args?.projectId || !args?.query) {
             throw new Error('INVALID_ARGUMENT: projectId and query are required for local_search_text');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:search_text',
             payload: {
                 projectId: args.projectId,
@@ -1595,7 +1700,7 @@ class McpHandlers {
                 maxResults: args.maxResults
             },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalFindRepositories(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1603,8 +1708,7 @@ class McpHandlers {
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_find_repositories');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:find_repositories',
             payload: {
                 projectId: args.projectId,
@@ -1612,7 +1716,7 @@ class McpHandlers {
                 maxDepth: args.maxDepth
             },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalCreateDirectory(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1620,15 +1724,14 @@ class McpHandlers {
         if (!args?.projectId || !args?.relativePath) {
             throw new Error('INVALID_ARGUMENT: projectId and relativePath are required for local_create_directory');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:create_directory',
             payload: {
                 projectId: args.projectId,
                 relativePath: args.relativePath
             },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalGitStatus(args, caller) {
         const auth = this.requireCaller(caller);
@@ -1636,15 +1739,14 @@ class McpHandlers {
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_git_status');
         }
-        return this.gateway.taskRouter.routeTaskSubmit({
-            backend: 'local',
+        return this.submitLocalTaskAndWait({
             capability: 'local:git_status',
             payload: {
                 projectId: args.projectId,
                 repoRelativePath: args?.repoRelativePath
             },
             clientRequestId: args?.clientRequestId
-        }, auth.scopes, auth.subjectId);
+        }, auth, args?.waitMs);
     }
     async handleLocalRunTests(args, caller) {
         const auth = this.requireCaller(caller);
