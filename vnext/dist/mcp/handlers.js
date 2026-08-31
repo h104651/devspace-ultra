@@ -65,20 +65,30 @@ class McpHandlers {
         }, auth.scopes, auth.subjectId);
         if (args.backend === 'local') {
             const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
-            if (connected.length > 0) {
-                const eligible = connected.some((c) => c.capabilities?.includes(args.capability));
-                if (!eligible) {
-                    return {
-                        taskId: result.taskId,
-                        status: result.status,
-                        backend: args.backend,
-                        capability: args.capability,
-                        waitingForEligibleDevice: true,
-                        reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
-                        isReplay: !!result.isReplay,
-                        message: `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
-                    };
-                }
+            if (connected.length === 0) {
+                return {
+                    taskId: result.taskId,
+                    status: result.status,
+                    backend: args.backend,
+                    capability: args.capability,
+                    waitingForEligibleDevice: true,
+                    reason: 'NO_ONLINE_DEVICE',
+                    isReplay: !!result.isReplay,
+                    message: 'Task queued, but no local agents are currently connected.'
+                };
+            }
+            const eligible = connected.some((c) => c.capabilities?.includes(args.capability));
+            if (!eligible) {
+                return {
+                    taskId: result.taskId,
+                    status: result.status,
+                    backend: args.backend,
+                    capability: args.capability,
+                    waitingForEligibleDevice: true,
+                    reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
+                    isReplay: !!result.isReplay,
+                    message: `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
+                };
             }
         }
         return {
@@ -981,7 +991,8 @@ class McpHandlers {
         }
         return {
             totalRegistered: devices.length,
-            totalOnline: connected.length,
+            totalOnline: connectedByDevice.size,
+            totalConnections: connected.length,
             devices: deviceResults
         };
     }

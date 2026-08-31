@@ -72,33 +72,50 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     assert.strictEqual(store.getTask(task2.taskId)?.retryPolicy.retryCount, 1);
     passed++;
 
-    // Test 8: Default task failure is terminal
+    // Test 8: Default failTask is retryable according to existing default policy (cross-backend compatibility)
     const task3 = store.createTask({
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      payload: { code: 'print(1)' }
+    });
+    store.claimTask('worker-1', ['kaggle:run']);
+    const defaultFailRes = store.failTask(task3.taskId, { code: 'API_TIMEOUT', message: 'Kaggle backend timeout' });
+    assert.strictEqual(defaultFailRes, true);
+    const defaultFailedTask = store.getTask(task3.taskId);
+    assert.ok(defaultFailedTask?.status === 'retrying' || defaultFailedTask?.status === 'queued', 'Default failTask must remain retryable (retrying or queued)');
+    assert.strictEqual(defaultFailedTask?.completedAt, undefined, 'Retryable failure must NOT set completedAt');
+    assert.strictEqual(defaultFailedTask?.retryPolicy.retryCount, 1, 'Default failure increments retryCount');
+    assert.strictEqual(defaultFailedTask?.metadata?.lastRetryError?.code, 'API_TIMEOUT');
+    assert.strictEqual(defaultFailedTask?.lease, undefined, 'Lease cleared on failure');
+    passed++;
+
+    // Test 9: Explicit terminal task failure (retryable: false)
+    const task4 = store.createTask({
       backend: 'local',
       capability: 'local:write_file',
       payload: { path: 'b.txt', content: 'test' }
     });
     store.claimTask('device-1', ['local:write_file']);
-    const failRes = store.failTask(task3.taskId, { code: 'WRITE_ERROR', message: 'Permission denied' });
-    assert.strictEqual(failRes, true);
-    const failedTask = store.getTask(task3.taskId);
-    assert.strictEqual(failedTask?.status, 'failed', 'Default failTask must be terminal (status = failed)');
-    assert.ok(failedTask?.completedAt, 'Terminal failure must set completedAt timestamp');
-    assert.strictEqual(failedTask?.error?.code, 'WRITE_ERROR');
-    assert.strictEqual(failedTask?.retryPolicy.retryCount, 0, 'Terminal failure must not increment retryCount');
-    assert.strictEqual(failedTask?.lease, undefined, 'Terminal failure must clear lease');
+    const terminalFailRes = store.failTask(task4.taskId, { code: 'WRITE_ERROR', message: 'Permission denied' }, { retryable: false });
+    assert.strictEqual(terminalFailRes, true);
+    const terminalFailedTask = store.getTask(task4.taskId);
+    assert.strictEqual(terminalFailedTask?.status, 'failed', 'Explicit retryable:false must be terminal (status = failed)');
+    assert.ok(terminalFailedTask?.completedAt, 'Terminal failure must set completedAt timestamp');
+    assert.strictEqual(terminalFailedTask?.error?.code, 'WRITE_ERROR');
+    assert.strictEqual(terminalFailedTask?.retryPolicy.retryCount, 0, 'Terminal failure must not increment retryCount');
+    assert.strictEqual(terminalFailedTask?.lease, undefined, 'Terminal failure must clear lease');
     passed++;
 
-    // Test 9: Explicit retryable task failure
-    const task4 = store.createTask({
+    // Test 10: Explicit retryable task failure (retryable: true)
+    const task5 = store.createTask({
       backend: 'local',
       capability: 'local:read_file',
       payload: { path: 'c.txt' }
     });
     store.claimTask('device-1', ['local:read_file']);
-    const retryRes = store.failTask(task4.taskId, { code: 'NETWORK_TIMEOUT', message: 'Temporary network glitch' }, { retryable: true });
+    const retryRes = store.failTask(task5.taskId, { code: 'NETWORK_TIMEOUT', message: 'Temporary network glitch' }, { retryable: true });
     assert.strictEqual(retryRes, true);
-    const retryingTask = store.getTask(task4.taskId);
+    const retryingTask = store.getTask(task5.taskId);
     assert.ok(retryingTask?.status === 'retrying' || retryingTask?.status === 'queued', 'Retryable failure must be retrying or queued');
     assert.strictEqual(retryingTask?.completedAt, undefined, 'Retryable failure must NOT set completedAt');
     assert.strictEqual(retryingTask?.retryPolicy.retryCount, 1, 'Retryable failure must increment retryCount');

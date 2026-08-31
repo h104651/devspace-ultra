@@ -251,7 +251,7 @@ class TaskStore {
         const task = this.tasks.get(taskId);
         if (!task)
             return false;
-        const isRetryable = options?.retryable === true && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+        const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
         if (isRetryable) {
             task.retryPolicy.retryCount++;
             task.lease = undefined;

@@ -55,9 +55,21 @@ export async function runDeviceStatusLiveCapabilitiesUnitTests(): Promise<{ pass
 
     const offlineStatus = await handlers.handleDeviceStatus(callerAdmin);
     assert.strictEqual(offlineStatus.totalOnline, 0);
+    assert.strictEqual(offlineStatus.totalConnections, 0);
     const offlineDev = offlineStatus.devices.find((d: any) => d.deviceId === deviceId);
     assert.strictEqual(offlineDev?.status, 'offline');
     assert.deepStrictEqual(offlineDev?.capabilities, ['local:read_file', 'local:git_status']);
+    passed++;
+
+    // 1b. When zero online devices: remote_task_submit returns waitingForEligibleDevice with NO_ONLINE_DEVICE
+    const submitZeroOnline = await handlers.handleRemoteTaskSubmit({
+      backend: 'local',
+      capability: 'local:git_status',
+      payload: { projectId: 'devspace-ultra' }
+    }, callerAdmin);
+    assert.strictEqual(submitZeroOnline.status, 'queued');
+    assert.strictEqual(submitZeroOnline.waitingForEligibleDevice, true);
+    assert.strictEqual(submitZeroOnline.reason, 'NO_ONLINE_DEVICE');
     passed++;
 
     // 2. When live connection exists with updated PR #3/#4 discovery capabilities:
@@ -90,6 +102,7 @@ export async function runDeviceStatusLiveCapabilitiesUnitTests(): Promise<{ pass
 
     const onlineStatus = await handlers.handleDeviceStatus(callerAdmin);
     assert.strictEqual(onlineStatus.totalOnline, 1);
+    assert.strictEqual(onlineStatus.totalConnections, 1);
     const onlineDev = onlineStatus.devices.find((d: any) => d.deviceId === deviceId);
     assert.strictEqual(onlineDev?.status, 'online');
     assert.deepStrictEqual(onlineDev?.capabilities, liveCapabilities, 'Live connection capabilities must override stale DeviceRecord');
@@ -120,7 +133,7 @@ export async function runDeviceStatusLiveCapabilitiesUnitTests(): Promise<{ pass
     assert.strictEqual(submitUnsupported.reason, 'NO_ELIGIBLE_DEVICE_CAPABILITY');
     passed++;
 
-    // 4. Duplicate same-device WebSocket connections are detectable
+    // 4. Duplicate same-device WebSocket connections: totalOnline is unique devices (1), totalConnections is sockets (2)
     mockConnectedAgents = [
       {
         deviceId,
@@ -141,10 +154,37 @@ export async function runDeviceStatusLiveCapabilitiesUnitTests(): Promise<{ pass
     ];
 
     const duplicateStatus = await handlers.handleDeviceStatus(callerAdmin);
-    assert.strictEqual(duplicateStatus.totalOnline, 2);
+    assert.strictEqual(duplicateStatus.totalOnline, 1, 'totalOnline must count unique online devices');
+    assert.strictEqual(duplicateStatus.totalConnections, 2, 'totalConnections must count total live sockets');
     const dupDev = duplicateStatus.devices.find((d: any) => d.deviceId === deviceId);
     assert.strictEqual(dupDev?.connectionCount, 2, 'Must report connectionCount = 2');
     assert.strictEqual(dupDev?.duplicateConnection, true, 'Must report duplicateConnection = true');
+    passed++;
+
+    // 5. Local TASK_FAIL protocol regression: Local Agent TASK_FAIL without retryable field defaults to retryable:false in Gateway
+    const localFailTask = taskStore.createTask({
+      backend: 'local',
+      capability: 'local:write_file',
+      payload: { path: 'out.txt', content: 'data' }
+    });
+    taskStore.claimTask(deviceId, ['local:write_file']);
+
+    // Simulate Gateway TASK_FAIL message handling: msg.retryable ?? false
+    const rawMsgWithoutRetryable = {
+      type: 'TASK_FAIL',
+      taskId: localFailTask.taskId,
+      deviceId,
+      error: { code: 'IO_ERROR', message: 'Disk full' }
+    };
+    taskStore.failTask(rawMsgWithoutRetryable.taskId, rawMsgWithoutRetryable.error, {
+      retryable: (rawMsgWithoutRetryable as any).retryable ?? false
+    });
+
+    const failedLocalTask = taskStore.getTask(localFailTask.taskId);
+    assert.strictEqual(failedLocalTask?.status, 'failed', 'Local TASK_FAIL without retryable flag must default to terminal failure');
+    assert.ok(failedLocalTask?.completedAt, 'completedAt must be set on terminal failure');
+    assert.strictEqual(failedLocalTask?.error?.code, 'IO_ERROR');
+    assert.strictEqual(failedLocalTask?.retryPolicy.retryCount, 0, 'retryCount must not increment on terminal failure');
     passed++;
 
   } catch (err: any) {
