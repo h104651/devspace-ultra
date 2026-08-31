@@ -95,6 +95,7 @@ export interface TaskFailMessage {
     message: string;
     details?: any;
   };
+  retryable?: boolean;
 }
 
 export interface GenericErrorMessage {

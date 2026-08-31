@@ -6,6 +6,7 @@ import { runPathSanitizerUnitTests } from './unit/path-sanitizer.test';
 import { runArtifactsUnitTests } from './unit/artifacts.test';
 import { runProjectRegistryUnitTests } from './unit/project-registry.test';
 import { runEnvironmentProbeUnitTests } from './unit/environment-probe.test';
+import { runDeviceStatusLiveCapabilitiesUnitTests } from './unit/device-status-live-capabilities.test';
 import { runGatewayFlowIntegrationTests } from './integration/gateway-flow.test';
 import { runKaggleIntegrationTests } from './integration/kaggle-mock.test';
 import { runSwarmIntegrationTests } from './integration/swarm.test';
@@ -41,6 +42,7 @@ async function main() {
     { name: 'Unit: Artifacts & Integrity', runner: runArtifactsUnitTests },
     { name: 'Unit: Local Project Registry & Path Security', runner: runProjectRegistryUnitTests },
     { name: 'Unit: Local Agent Environment Probe Capabilities', runner: runEnvironmentProbeUnitTests },
+    { name: 'Unit: Device Status Live Capabilities & Eligibility', runner: runDeviceStatusLiveCapabilitiesUnitTests },
     { name: 'Protocol: MCP 2026-07-28 Wire Validation', runner: runMcp2026Tests },
     { name: 'Integration: Gateway Flow (REST + WS Agent)', runner: runGatewayFlowIntegrationTests },
     { name: 'Integration: Remote MCP Transport (HTTP POST /mcp)', runner: runRemoteMcpHttpTests },

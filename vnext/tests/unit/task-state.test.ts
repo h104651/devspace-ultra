@@ -71,6 +71,40 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     assert.strictEqual(store.getTask(task2.taskId)?.status, 'queued');
     assert.strictEqual(store.getTask(task2.taskId)?.retryPolicy.retryCount, 1);
     passed++;
+
+    // Test 8: Default task failure is terminal
+    const task3 = store.createTask({
+      backend: 'local',
+      capability: 'local:write_file',
+      payload: { path: 'b.txt', content: 'test' }
+    });
+    store.claimTask('device-1', ['local:write_file']);
+    const failRes = store.failTask(task3.taskId, { code: 'WRITE_ERROR', message: 'Permission denied' });
+    assert.strictEqual(failRes, true);
+    const failedTask = store.getTask(task3.taskId);
+    assert.strictEqual(failedTask?.status, 'failed', 'Default failTask must be terminal (status = failed)');
+    assert.ok(failedTask?.completedAt, 'Terminal failure must set completedAt timestamp');
+    assert.strictEqual(failedTask?.error?.code, 'WRITE_ERROR');
+    assert.strictEqual(failedTask?.retryPolicy.retryCount, 0, 'Terminal failure must not increment retryCount');
+    assert.strictEqual(failedTask?.lease, undefined, 'Terminal failure must clear lease');
+    passed++;
+
+    // Test 9: Explicit retryable task failure
+    const task4 = store.createTask({
+      backend: 'local',
+      capability: 'local:read_file',
+      payload: { path: 'c.txt' }
+    });
+    store.claimTask('device-1', ['local:read_file']);
+    const retryRes = store.failTask(task4.taskId, { code: 'NETWORK_TIMEOUT', message: 'Temporary network glitch' }, { retryable: true });
+    assert.strictEqual(retryRes, true);
+    const retryingTask = store.getTask(task4.taskId);
+    assert.ok(retryingTask?.status === 'retrying' || retryingTask?.status === 'queued', 'Retryable failure must be retrying or queued');
+    assert.strictEqual(retryingTask?.completedAt, undefined, 'Retryable failure must NOT set completedAt');
+    assert.strictEqual(retryingTask?.retryPolicy.retryCount, 1, 'Retryable failure must increment retryCount');
+    assert.strictEqual(retryingTask?.metadata?.lastRetryError?.code, 'NETWORK_TIMEOUT', 'Retryable error stored in metadata');
+    assert.strictEqual(retryingTask?.lease, undefined, 'Retryable failure must clear lease for next attempt');
+    passed++;
   } catch (err: any) {
     console.error('Task state test failed:', err);
     failed++;
