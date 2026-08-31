@@ -1,7 +1,9 @@
 import * as crypto from 'crypto';
+import * as path from 'path';
 import { GatewayServer } from '../gateway/server';
 import { redactObject } from '../security/redactor';
 import { ScopeChecker } from '../security/scope-checker';
+import { KaggleDatasetFileEntry } from '../kaggle/kaggle-client.interface';
 import {
   computeProjectFingerprint,
   parseNotebookCells,
@@ -1340,6 +1342,245 @@ export class McpHandlers {
       size: computedSize,
       hasMore,
       sha256: computedSha256
+    };
+  }
+
+  /**
+   * Reads a specific file from a Kaggle Dataset version with server-side actual byte SHA256 integrity verification.
+   * Strictly READ ONLY.
+   */
+  public async handleKaggleDatasetFile(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'kaggle:read', 'tasks:read', 'admin:*');
+    const client = (this.gateway.kaggleBackend.getClient() as any);
+    if (!client || typeof client.listDatasetFiles !== 'function' || typeof client.downloadDatasetFile !== 'function') {
+      throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle dataset operations are not supported by backend client');
+    }
+
+    if (typeof args.datasetRef !== 'string' || !args.datasetRef.trim()) {
+      throw new Error('INVALID_KAGGLE_DATASET_REF: datasetRef is required');
+    }
+    const trimmedRef = args.datasetRef.trim();
+    const refParts = trimmedRef.split('/');
+    if (refParts.length !== 2 || !refParts[0] || !refParts[1] || !/^[a-zA-Z0-9_\-.]+$/.test(refParts[0]) || !/^[a-zA-Z0-9_\-.]+$/.test(refParts[1])) {
+      throw new Error(`INVALID_KAGGLE_DATASET_REF: Invalid dataset reference "${trimmedRef}". Must be in "owner/dataset-slug" format.`);
+    }
+    const owner = refParts[0];
+    const slug = refParts[1];
+    const canonicalRef = `${owner}/${slug}`;
+
+    if (typeof args.relativePath !== 'string' || !args.relativePath.trim()) {
+      throw new Error('INVALID_KAGGLE_DATASET_PATH: relativePath is required');
+    }
+    const rawPath = args.relativePath.trim();
+    if (rawPath.startsWith('/') || rawPath.startsWith('\\') || /^[a-zA-Z]:/.test(rawPath)) {
+      throw new Error(`INVALID_KAGGLE_DATASET_PATH: Absolute paths are forbidden: "${rawPath}"`);
+    }
+    if (rawPath.includes('\\')) {
+      throw new Error(`INVALID_KAGGLE_DATASET_PATH: Backslash path separators are forbidden: "${rawPath}"`);
+    }
+    const normalized = path.posix.normalize(rawPath);
+    if (normalized === '.' || normalized === '..' || normalized.startsWith('../') || normalized.includes('/../') || normalized.endsWith('/..')) {
+      throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path traversal is forbidden: "${rawPath}"`);
+    }
+    const segments = normalized.split('/');
+    if (segments.some(s => !s || s === '.' || s === '..' || /^\.{2,}$/.test(s))) {
+      throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path contains invalid or traversal segments: "${rawPath}"`);
+    }
+    const validPath = normalized;
+
+    let expectedSha256: string | undefined = undefined;
+    if (args.expectedSha256 !== undefined && args.expectedSha256 !== null) {
+      if (typeof args.expectedSha256 !== 'string' || !/^[a-fA-F0-9]{64}$/.test(args.expectedSha256.trim())) {
+        throw new Error(`INVALID_EXPECTED_SHA256: expectedSha256 must be a 64-character hexadecimal string`);
+      }
+      expectedSha256 = args.expectedSha256.trim();
+    }
+
+    let explicitVersion: number | undefined = undefined;
+    if (args.datasetVersion !== undefined && args.datasetVersion !== null) {
+      if (typeof args.datasetVersion !== 'number' || !Number.isInteger(args.datasetVersion) || args.datasetVersion < 1) {
+        throw new Error('INVALID_KAGGLE_DATASET_VERSION: datasetVersion must be a positive integer');
+      }
+      explicitVersion = args.datasetVersion;
+    }
+
+    let maxBytes = 262144; // 256 KiB default
+    if (args.maxBytes !== undefined && args.maxBytes !== null) {
+      if (typeof args.maxBytes !== 'number' || !Number.isInteger(args.maxBytes) || args.maxBytes < 1 || args.maxBytes > 1048576) {
+        throw new Error('INVALID_MAX_BYTES: maxBytes must be a positive integer between 1 and 1048576 bytes (1 MiB)');
+      }
+      maxBytes = args.maxBytes;
+    }
+
+    // 1. Resolve Dataset Version
+    let resolvedVersion: number;
+    if (explicitVersion !== undefined) {
+      resolvedVersion = explicitVersion;
+    } else {
+      try {
+        const dsMeta = await client.getDataset(owner, slug);
+        if (!dsMeta || typeof dsMeta.currentVersionNumber !== 'number') {
+          throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found or has no version`);
+        }
+        resolvedVersion = dsMeta.currentVersionNumber;
+      } catch (err: any) {
+        if (err.message?.startsWith('KAGGLE_DATASET_NOT_FOUND')) throw err;
+        throw new Error(`KAGGLE_DATASET_NOT_FOUND: Failed to resolve dataset ${canonicalRef}: ${err.message}`);
+      }
+    }
+
+    // 2. File Existence & Safety Precheck via listDatasetFiles
+    let fileListResult: { datasetFiles: KaggleDatasetFileEntry[] };
+    try {
+      fileListResult = await client.listDatasetFiles(owner, slug, resolvedVersion);
+    } catch (err: any) {
+      if (err.message?.includes('404') || err.message?.includes('NOT_FOUND') || err.message?.includes('FAILED')) {
+        throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} or version ${resolvedVersion} not found: ${err.message}`);
+      }
+      throw new Error(`KAGGLE_DATASET_FILE_NOT_FOUND: Could not list files for ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+    }
+
+    const exactFile = fileListResult.datasetFiles.find(f => f.name === validPath);
+    if (!exactFile) {
+      throw new Error(`KAGGLE_DATASET_FILE_NOT_FOUND: Exact file "${validPath}" not found in dataset ${canonicalRef} version ${resolvedVersion}`);
+    }
+
+    const MAX_FETCH_CEILING = 20971520; // 20 MiB safety ceiling
+    if (exactFile.totalBytes > MAX_FETCH_CEILING) {
+      throw new Error(`KAGGLE_DATASET_FILE_TOO_LARGE: File "${validPath}" size (${exactFile.totalBytes} bytes) exceeds maximum fetch ceiling of 20 MiB`);
+    }
+
+    // 3. Download File Content Pinned to Exact Version
+    let dl: { content: Buffer; sizeBytes: number };
+    try {
+      dl = await client.downloadDatasetFile(owner, slug, validPath, resolvedVersion);
+    } catch (err: any) {
+      throw new Error(`KAGGLE_DATASET_FILE_DOWNLOAD_FAILED: Failed to download "${validPath}" from ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+    }
+
+    // 4. Authoritative Actual Byte SHA256 Calculation
+    const actualBytes = dl.content;
+    const actualSha256 = crypto.createHash('sha256').update(actualBytes).digest('hex');
+    const actualSize = actualBytes.length;
+
+    let hashMatch: boolean | null = null;
+    if (expectedSha256) {
+      hashMatch = actualSha256.toLowerCase() === expectedSha256.toLowerCase();
+    }
+
+    // 5. Content-Type and Encoding Determination
+    const ext = path.posix.extname(validPath).toLowerCase();
+    const TEXT_MIME_TYPES: Record<string, string> = {
+      '.json': 'application/json',
+      '.txt': 'text/plain',
+      '.log': 'text/plain',
+      '.md': 'text/markdown',
+      '.csv': 'text/csv',
+      '.tsv': 'text/tab-separated-values',
+      '.yaml': 'application/yaml',
+      '.yml': 'application/yaml',
+      '.xml': 'application/xml',
+      '.html': 'text/html',
+      '.htm': 'text/html',
+      '.py': 'text/x-python',
+      '.ts': 'text/typescript',
+      '.js': 'text/javascript',
+      '.ipynb': 'application/x-ipynb+json'
+    };
+
+    const BINARY_MIME_TYPES: Record<string, string> = {
+      '.zip': 'application/zip',
+      '.tar': 'application/x-tar',
+      '.gz': 'application/gzip',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.parquet': 'application/x-parquet',
+      '.pt': 'application/octet-stream',
+      '.bin': 'application/octet-stream',
+      '.pkl': 'application/octet-stream'
+    };
+
+    let isText = false;
+    let contentType = 'application/octet-stream';
+
+    if (TEXT_MIME_TYPES[ext]) {
+      isText = true;
+      contentType = TEXT_MIME_TYPES[ext];
+    } else if (BINARY_MIME_TYPES[ext]) {
+      isText = false;
+      contentType = BINARY_MIME_TYPES[ext];
+    } else {
+      const sample = actualBytes.subarray(0, Math.min(actualBytes.length, 8192));
+      isText = !sample.includes(0);
+      contentType = isText ? 'text/plain' : 'application/octet-stream';
+    }
+
+    let encoding: string | null = null;
+    let content: string | null = null;
+    let isTruncated = false;
+    let returnedBytes = 0;
+
+    if (isText) {
+      encoding = 'utf-8';
+      if (actualBytes.length <= maxBytes) {
+        content = actualBytes.toString('utf-8');
+        isTruncated = false;
+        returnedBytes = actualBytes.length;
+      } else {
+        isTruncated = true;
+        let end = maxBytes;
+        let i = end - 1;
+        let seqLen = 1;
+        while (i >= 0 && i >= end - 4) {
+          const b = actualBytes[i];
+          if ((b & 0x80) === 0) {
+            seqLen = 1;
+            break;
+          } else if ((b & 0xe0) === 0xc0) {
+            seqLen = 2;
+            break;
+          } else if ((b & 0xf0) === 0xe0) {
+            seqLen = 3;
+            break;
+          } else if ((b & 0xf8) === 0xf0) {
+            seqLen = 4;
+            break;
+          }
+          i--;
+        }
+        if (seqLen > 1 && i >= 0) {
+          const availableBytes = end - i;
+          if (availableBytes < seqLen) {
+            end = i;
+          }
+        }
+        const sliceBuf = actualBytes.subarray(0, end);
+        content = new TextDecoder('utf-8').decode(sliceBuf);
+        returnedBytes = sliceBuf.length;
+      }
+    } else {
+      encoding = null;
+      content = null;
+      isTruncated = false;
+      returnedBytes = 0;
+    }
+
+    return {
+      datasetRef: canonicalRef,
+      datasetVersion: resolvedVersion,
+      relativePath: validPath,
+      size: actualSize,
+      sha256: actualSha256,
+      hashMatch,
+      contentType,
+      encoding,
+      content,
+      expectedSha256,
+      isText,
+      isTruncated,
+      returnedBytes
     };
   }
 

@@ -1265,6 +1265,7 @@ export class GatewayDurableObject {
             case 'kaggle_project_restore': result = await this.mcpHandlers.handleKaggleProjectRestore(args, caller); break;
             case 'kaggle_workspace_get': result = await this.mcpHandlers.handleKaggleWorkspaceGet(args, caller); break;
             case 'kaggle_workspace_file': result = await this.mcpHandlers.handleKaggleWorkspaceFile(args, caller); break;
+            case 'kaggle_dataset_file': result = await this.mcpHandlers.handleKaggleDatasetFile(args, caller); break;
             case 'kaggle_workspace_continue': result = await this.mcpHandlers.handleKaggleWorkspaceContinue(args, caller); break;
             case 'local_project_list': result = await this.mcpHandlers.handleLocalProjectList(args, caller); break;
             case 'local_project_status': result = await this.mcpHandlers.handleLocalProjectStatus(args, caller); break;

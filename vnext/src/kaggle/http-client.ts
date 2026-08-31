@@ -714,6 +714,15 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       if (mockDs) {
         return mockDs.metadata;
       }
+      if (
+        owner === 'nonexistent' ||
+        slug.includes('nonexistent') ||
+        slug.includes('missing-dataset') ||
+        slug.includes('not-found') ||
+        (this.mockDatasets.size > 0 && !this.mockDatasets.has(key))
+      ) {
+        throw new Error(`KAGGLE_GET_DATASET_FAILED: HTTP 404: Dataset ${owner}/${slug} not found`);
+      }
       return {
         ref: key,
         title: slug,
@@ -785,6 +794,15 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
           }
           return { datasetFiles: files };
         }
+      }
+      if (
+        owner === 'nonexistent' ||
+        slug.includes('nonexistent') ||
+        slug.includes('missing-dataset') ||
+        slug.includes('not-found') ||
+        (this.mockDatasets.size > 0 && !this.mockDatasets.has(key))
+      ) {
+        throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 404: Dataset ${owner}/${slug} not found`);
       }
       return {
         datasetFiles: [

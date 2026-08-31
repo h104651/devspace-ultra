@@ -183,6 +183,19 @@ export const KAGGLE_WORKSPACE_FILE_SCHEMA = {
   additionalProperties: false
 };
 
+export const KAGGLE_DATASET_FILE_SCHEMA = {
+  type: 'object',
+  properties: {
+    datasetRef: { type: 'string', description: 'Kaggle dataset reference in owner/dataset-slug format' },
+    relativePath: { type: 'string', description: 'Relative POSIX path of file within the dataset' },
+    datasetVersion: { type: 'integer', minimum: 1, description: 'Optional explicit dataset version number' },
+    expectedSha256: { type: 'string', description: 'Optional expected 64-character hex SHA-256 hash' },
+    maxBytes: { type: 'integer', minimum: 1, maximum: 1048576, default: 262144, description: 'Optional maximum bytes to return inline (default 262144, max 1048576)' }
+  },
+  required: ['datasetRef', 'relativePath'],
+  additionalProperties: false
+};
+
 export const KAGGLE_WORKSPACE_CONTINUE_SCHEMA = {
   type: 'object',
   properties: {
@@ -599,6 +612,7 @@ export function getCanonicalToolsList(): McpToolDefinition[] {
     { name: 'kaggle_project_restore', description: 'Explicitly restore an owned Kaggle project from trusted source when remote state is corrupted or suspicious', inputSchema: KAGGLE_PROJECT_RESTORE_SCHEMA },
     { name: 'kaggle_workspace_get', description: 'Retrieve Kaggle dataset-backed project workspace manifest, fingerprint, and file outline', inputSchema: KAGGLE_WORKSPACE_GET_SCHEMA },
     { name: 'kaggle_workspace_file', description: 'Read a specific file from the project workspace with bounded chunking', inputSchema: KAGGLE_WORKSPACE_FILE_SCHEMA },
+    { name: 'kaggle_dataset_file', description: 'Read a specific file from a Kaggle dataset version with actual byte SHA256 integrity verification', inputSchema: KAGGLE_DATASET_FILE_SCHEMA },
     { name: 'kaggle_workspace_continue', description: 'Atomically update project workspace dataset version, apply file changes, and trigger thin runner execution', inputSchema: KAGGLE_WORKSPACE_CONTINUE_SCHEMA },
 
     { name: 'local_project_list', description: 'List registered and authorized local projects with capabilities and metadata. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_PROJECT_LIST_SCHEMA },

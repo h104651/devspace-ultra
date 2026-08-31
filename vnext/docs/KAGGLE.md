@@ -49,3 +49,56 @@ ChatGPT or remote clients call the `kaggle_run` MCP tool:
 
 * When Kaggle returns `429 Too Many Requests` or `GPU quota exceeded`, the backend captures the exact message and marks the task with structured error `RESOURCE_QUOTA_EXCEEDED`.
 * Jobs can be cancelled at any time via `remote_task_cancel`.
+
+---
+
+## 5. First-Class Kaggle Dataset File Retrieval (`kaggle_dataset_file`)
+
+The `kaggle_dataset_file` MCP tool provides safe, server-side direct file retrieval and authoritative SHA-256 integrity verification for files stored in any Kaggle Dataset version.
+
+### 5.1 Guarantees & Invariants
+* **Strictly READ ONLY**: Operates via read-only HTTP endpoints; performs **zero** Kaggle mutations (no dataset creation, versioning, kernel push, or execution).
+* **Exact Version Resolution**:
+  * If `datasetVersion` is omitted, the tool queries dataset metadata, determines `currentVersionNumber`, and explicitly pins both file listing and download to that exact resolved version.
+  * If `datasetVersion` is supplied, it lists and downloads from that exact version.
+* **Authoritative Actual-Byte SHA256**:
+  * SHA-256 is computed server-side directly on the actual fetched byte payload (`crypto.createHash('sha256').update(actualBytes).digest('hex')`).
+  * If `expectedSha256` is provided, a case-insensitive check determines `hashMatch: true | false`. The actual payload SHA is always preserved in `sha256`.
+* **Bounded Inline Content**:
+  * Textual files (`.json`, `.txt`, `.log`, `.md`, `.csv`, `.tsv`, `.yaml`, `.xml`, `.py`, etc.) return bounded UTF-8 text (default `maxBytes: 262144`, hard limit `1048576`).
+  * Truncation uses safe UTF-8 byte boundary trimming to prevent broken multi-byte replacement characters.
+* **Binary Safety**:
+  * Binary files (`.zip`, `.parquet`, `.png`, `.pt`, etc.) return `content: null` and `encoding: null` without dumping binary data or Base64 inline, while preserving full file `size`, `sha256`, and `hashMatch`.
+
+### 5.2 Example Usage
+
+```json
+{
+  "datasetRef": "owner/dataset-slug",
+  "relativePath": "results/result.json",
+  "datasetVersion": 1,
+  "expectedSha256": "c2f72c19cdac27a8e487931d904f1f2061481192b9b341fccd40832610fa89f9",
+  "maxBytes": 262144
+}
+```
+
+### 5.3 Example Response
+
+```json
+{
+  "datasetRef": "owner/dataset-slug",
+  "datasetVersion": 1,
+  "relativePath": "results/result.json",
+  "size": 1420,
+  "sha256": "c2f72c19cdac27a8e487931d904f1f2061481192b9b341fccd40832610fa89f9",
+  "hashMatch": true,
+  "contentType": "application/json",
+  "encoding": "utf-8",
+  "content": "{\n  \"status\": \"PASS\"\n}",
+  "expectedSha256": "c2f72c19cdac27a8e487931d904f1f2061481192b9b341fccd40832610fa89f9",
+  "isText": true,
+  "isTruncated": false,
+  "returnedBytes": 1420
+}
+```
+
