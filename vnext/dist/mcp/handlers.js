@@ -64,22 +64,31 @@ class McpHandlers {
             clientRequestId: args.clientRequestId
         }, auth.scopes, auth.subjectId);
         if (args.backend === 'local') {
-            const devices = this.gateway.authManager.listDevices();
-            const onlineDevices = devices.filter(d => d.status === 'online');
-            if (onlineDevices.length > 0) {
-                const eligible = onlineDevices.some(d => d.capabilities?.includes(args.capability));
-                if (!eligible) {
-                    return {
-                        taskId: result.taskId,
-                        status: result.status,
-                        backend: args.backend,
-                        capability: args.capability,
-                        waitingForEligibleDevice: true,
-                        reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
-                        isReplay: !!result.isReplay,
-                        message: `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
-                    };
-                }
+            const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+            if (connected.length === 0) {
+                return {
+                    taskId: result.taskId,
+                    status: result.status,
+                    backend: args.backend,
+                    capability: args.capability,
+                    waitingForEligibleDevice: true,
+                    reason: 'NO_ONLINE_DEVICE',
+                    isReplay: !!result.isReplay,
+                    message: 'Task queued, but no local agents are currently connected.'
+                };
+            }
+            const eligible = connected.some((c) => c.capabilities?.includes(args.capability));
+            if (!eligible) {
+                return {
+                    taskId: result.taskId,
+                    status: result.status,
+                    backend: args.backend,
+                    capability: args.capability,
+                    waitingForEligibleDevice: true,
+                    reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
+                    isReplay: !!result.isReplay,
+                    message: `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
+                };
             }
         }
         return {
@@ -925,18 +934,66 @@ class McpHandlers {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'local:read', 'admin:*');
         const devices = this.gateway.authManager.listDevices();
-        const connected = this.gateway.connectionManager.getConnectedAgents();
+        const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+        // Group connected sockets by deviceId
+        const connectedByDevice = new Map();
+        for (const agent of connected) {
+            if (!agent || !agent.deviceId)
+                continue;
+            const list = connectedByDevice.get(agent.deviceId) || [];
+            list.push(agent);
+            connectedByDevice.set(agent.deviceId, list);
+        }
+        const deviceResults = [];
+        const seenDeviceIds = new Set();
+        for (const d of devices) {
+            seenDeviceIds.add(d.deviceId);
+            const liveConns = connectedByDevice.get(d.deviceId) || [];
+            const isOnline = liveConns.length > 0;
+            const primaryLive = liveConns[0];
+            const connectionCount = liveConns.length;
+            const duplicateConnection = connectionCount > 1;
+            // Authoritative capabilities for online device come from live WebSocket connection
+            const capabilities = isOnline ? (primaryLive.capabilities || []) : (d.capabilities || []);
+            const entry = {
+                deviceId: d.deviceId,
+                name: isOnline ? (primaryLive.name || d.name) : d.name,
+                platform: d.platform,
+                status: isOnline ? 'online' : 'offline',
+                capabilities,
+                lastHeartbeatAt: d.lastHeartbeatAt ? new Date(d.lastHeartbeatAt).toISOString() : undefined
+            };
+            if (isOnline) {
+                entry.connectionCount = connectionCount;
+                if (duplicateConnection) {
+                    entry.duplicateConnection = true;
+                }
+            }
+            deviceResults.push(entry);
+        }
+        for (const [deviceId, liveConns] of connectedByDevice.entries()) {
+            if (!seenDeviceIds.has(deviceId)) {
+                const primaryLive = liveConns[0];
+                const connectionCount = liveConns.length;
+                const entry = {
+                    deviceId,
+                    name: primaryLive.name || deviceId,
+                    platform: primaryLive.platform || 'windows',
+                    status: 'online',
+                    capabilities: primaryLive.capabilities || [],
+                    connectionCount
+                };
+                if (connectionCount > 1) {
+                    entry.duplicateConnection = true;
+                }
+                deviceResults.push(entry);
+            }
+        }
         return {
             totalRegistered: devices.length,
-            totalOnline: connected.length,
-            devices: devices.map(d => ({
-                deviceId: d.deviceId,
-                name: d.name,
-                platform: d.platform,
-                status: connected.some(c => c.deviceId === d.deviceId) ? 'online' : 'offline',
-                capabilities: d.capabilities,
-                lastHeartbeatAt: d.lastHeartbeatAt ? new Date(d.lastHeartbeatAt).toISOString() : undefined
-            }))
+            totalOnline: connectedByDevice.size,
+            totalConnections: connected.length,
+            devices: deviceResults
         };
     }
     async handleKillSwitchTrigger(args, caller) {

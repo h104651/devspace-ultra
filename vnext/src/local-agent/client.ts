@@ -224,6 +224,7 @@ export class LocalAgentClient {
         timestamp: Date.now(),
         taskId: task.taskId,
         deviceId: this.config.deviceId,
+        retryable: false,
         error: {
           code: errCode,
           message: err.message || 'Unknown execution error'

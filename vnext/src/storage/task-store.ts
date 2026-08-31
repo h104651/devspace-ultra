@@ -244,21 +244,21 @@ export class TaskStore {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
-    task.error = error;
-    task.completedAt = Date.now();
-
     const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
 
     if (isRetryable) {
       task.retryPolicy.retryCount++;
       task.lease = undefined;
+      task.completedAt = undefined;
+      if (!task.metadata) task.metadata = {};
+      task.metadata.lastRetryError = error;
 
       // File-backed local runtimes can honor the requested backoff timer. Durable
       // cloud runtimes requeue immediately so a process eviction cannot strand a
       // task in an in-memory "retrying" timer that will never fire.
       if (this.storageAdapter) {
         task.status = 'queued';
-        task.logs.push(`[RETRY] Requeued durably after failure (attempt ${task.retryPolicy.retryCount}/${task.retryPolicy.maxRetries})`);
+        task.logs.push(`[RETRY] Requeued durably after failure (attempt ${task.retryPolicy.retryCount}/${task.retryPolicy.maxRetries}): ${error.message}`);
       } else {
         task.status = 'retrying';
         setTimeout(() => {
@@ -271,6 +271,8 @@ export class TaskStore {
       }
     } else {
       task.status = 'failed';
+      task.error = error;
+      task.completedAt = Date.now();
       task.lease = undefined;
     }
 

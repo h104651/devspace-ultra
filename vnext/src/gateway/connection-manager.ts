@@ -20,6 +20,7 @@ export interface ConnectedAgent {
 
 export class ConnectionManager {
   private agents: Map<string, ConnectedAgent> = new Map();
+  private sockets: Map<WebSocket, ConnectedAgent> = new Map();
   private authManager: AuthManager;
   private killSwitch: KillSwitch;
   private auditLogger: AuditLogger;
@@ -58,9 +59,15 @@ export class ConnectionManager {
     });
 
     socket.on('close', () => {
+      this.sockets.delete(socket);
       if (authenticatedDeviceId) {
-        this.agents.delete(authenticatedDeviceId);
-        this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+        const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
+        if (remaining.length === 0) {
+          this.agents.delete(authenticatedDeviceId);
+          this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+        } else {
+          this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
+        }
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
@@ -139,6 +146,7 @@ export class ConnectionManager {
       };
 
       this.agents.set(authoritativeDeviceId, agent);
+      this.sockets.set(socket, agent);
       this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online', ip);
       this.auditLogger.log({
         actor: authoritativeDeviceId,
@@ -296,7 +304,7 @@ export class ConnectionManager {
         }));
         return;
       }
-      this.taskStore.failTask(msg.taskId, msg.error);
+      this.taskStore.failTask(msg.taskId, msg.error, { retryable: msg.retryable ?? false });
       this.auditLogger.log({
         actor: authenticatedDeviceId,
         actorType: 'device',
@@ -310,7 +318,7 @@ export class ConnectionManager {
   }
 
   public getConnectedAgents(): ConnectedAgent[] {
-    return Array.from(this.agents.values());
+    return Array.from(this.sockets.values());
   }
 
   public getAgent(deviceId: string): ConnectedAgent | undefined {

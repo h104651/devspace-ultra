@@ -6,6 +6,7 @@ const scope_checker_1 = require("../security/scope-checker");
 const capabilities_1 = require("../local-agent/capabilities");
 class ConnectionManager {
     agents = new Map();
+    sockets = new Map();
     authManager;
     killSwitch;
     auditLogger;
@@ -36,9 +37,16 @@ class ConnectionManager {
             }
         });
         socket.on('close', () => {
+            this.sockets.delete(socket);
             if (authenticatedDeviceId) {
-                this.agents.delete(authenticatedDeviceId);
-                this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+                const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
+                if (remaining.length === 0) {
+                    this.agents.delete(authenticatedDeviceId);
+                    this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+                }
+                else {
+                    this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
+                }
                 this.auditLogger.log({
                     actor: authenticatedDeviceId,
                     actorType: 'device',
@@ -104,6 +112,7 @@ class ConnectionManager {
                 ip
             };
             this.agents.set(authoritativeDeviceId, agent);
+            this.sockets.set(socket, agent);
             this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online', ip);
             this.auditLogger.log({
                 actor: authoritativeDeviceId,
@@ -250,7 +259,7 @@ class ConnectionManager {
                 }));
                 return;
             }
-            this.taskStore.failTask(msg.taskId, msg.error);
+            this.taskStore.failTask(msg.taskId, msg.error, { retryable: msg.retryable ?? false });
             this.auditLogger.log({
                 actor: authenticatedDeviceId,
                 actorType: 'device',
@@ -263,7 +272,7 @@ class ConnectionManager {
         }
     }
     getConnectedAgents() {
-        return Array.from(this.agents.values());
+        return Array.from(this.sockets.values());
     }
     getAgent(deviceId) {
         return this.agents.get(deviceId);

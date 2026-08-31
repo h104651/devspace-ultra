@@ -155,11 +155,18 @@ export class GatewayDurableObject {
       authManager: this.authManager,
       killSwitch: this.killSwitch,
       connectionManager: {
-        getConnectedAgents: () => this.ctx.getWebSockets().map((ws: any) => ({
-          deviceId: ws.deserializeAttachment()?.deviceId || 'unknown',
-          platform: 'windows',
-          connectedAt: Date.now()
-        }))
+        getConnectedAgents: () => (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).map((ws: any) => {
+          const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) || {};
+          return {
+            deviceId: att.deviceId || 'unknown',
+            name: att.name || att.deviceId || 'unknown',
+            platform: att.platform || 'windows',
+            capabilities: att.capabilities || [],
+            connectedAt: att.connectedAt || Date.now(),
+            lastHeartbeatAt: Date.now(),
+            socket: ws
+          };
+        }).filter((a: any) => a.deviceId !== 'unknown')
       }
     };
     this.mcpHandlers = new McpHandlers(gatewayFacade);
@@ -879,7 +886,9 @@ export class GatewayDurableObject {
         (ws as any).serializeAttachment({
           deviceId: authoritativeDeviceId,
           name: msg.name || authoritativeDeviceId,
-          capabilities: authorizedCaps
+          platform: (msg.platform as any) || 'windows',
+          capabilities: authorizedCaps,
+          connectedAt: Date.now()
         });
 
         ws.send(JSON.stringify({
@@ -976,7 +985,7 @@ export class GatewayDurableObject {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device' }));
           return;
         }
-        this.taskStore.failTask(msg.taskId, msg.error);
+        this.taskStore.failTask(msg.taskId, msg.error, { retryable: msg.retryable ?? false });
         return;
       }
     } catch (err) {
