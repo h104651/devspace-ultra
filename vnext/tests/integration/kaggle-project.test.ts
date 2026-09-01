@@ -2469,6 +2469,217 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(pushCount, 0);
   });
 
+  // CONTINUE TEST 20 — Direct handler settings.title is rejected with KAGGLE_PROJECT_SETTINGS_UNSUPPORTED
+  await runTest('Continue Test 20: Direct handler settings.title is rejected with KAGGLE_PROJECT_SETTINGS_UNSUPPORTED and 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true, title: 'Original' },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        settings: {
+          title: 'Unexpected title mutation'
+        } as any,
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Title mutation attempt")' }]
+        }
+      }, submitAuth),
+      (err: any) => {
+        const str = err.message || '';
+        return str.includes('KAGGLE_PROJECT_SETTINGS_UNSUPPORTED') && str.includes('title');
+      }
+    );
+    assert.strictEqual(pushCount, 0, 'Zero pushes on settings.title');
+  });
+
+  // CONTINUE TEST 21 — Unknown structured setting is rejected with KAGGLE_PROJECT_SETTINGS_UNSUPPORTED
+  await runTest('Continue Test 21: Unknown structured setting is rejected with KAGGLE_PROJECT_SETTINGS_UNSUPPORTED and 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        settings: {
+          machineShape: 'NvidiaTeslaT4'
+        } as any,
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Unknown setting attempt")' }]
+        }
+      }, submitAuth),
+      (err: any) => {
+        const str = err.message || '';
+        return str.includes('KAGGLE_PROJECT_SETTINGS_UNSUPPORTED') && str.includes('machineShape');
+      }
+    );
+    assert.strictEqual(pushCount, 0, 'Zero pushes on unknown setting');
+  });
+
+  // CONTINUE TEST 22 — Continue preserves authoritative title in task payload and Kaggle submission payload
+  await runTest('Continue Test 22: Continue preserves authoritative title in task payload and Kaggle submission payload', async () => {
+    let capturedPayload: any = null;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true, title: 'Authoritative Current Title' },
+        source: validRestoreNb
+      }),
+      pushKernel: async (payloadOrDir: any, maybePayload?: any) => {
+        capturedPayload = maybePayload || payloadOrDir;
+        return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 8 };
+      }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: currentFp,
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Preserve title test")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    const task = tStore.getTask(res.taskId);
+    assert.strictEqual(task?.payload?.title, 'Authoritative Current Title');
+    assert.strictEqual(capturedPayload?.title, 'Authoritative Current Title');
+  });
+
+  // CONTINUE TEST 23 — Title falls back to slug only when current title is missing
+  await runTest('Continue Test 23: Title falls back to slug when current title is missing', async () => {
+    let capturedPayload: any = null;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true }, // no title
+        source: validRestoreNb
+      }),
+      pushKernel: async (payloadOrDir: any, maybePayload?: any) => {
+        capturedPayload = maybePayload || payloadOrDir;
+        return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 9 };
+      }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: currentFp,
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Fallback title to slug")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    const task = tStore.getTask(res.taskId);
+    assert.strictEqual(task?.payload?.title, 'astor-tuneup');
+    assert.strictEqual(capturedPayload?.title, 'astor-tuneup');
+  });
+
+  // CONTINUE TEST 24 — Canonical schema does NOT expose title and has additionalProperties: false
+  await runTest('Continue Test 24: Canonical schema does NOT expose title in continue settings and preserves additionalProperties: false', () => {
+    const tools = getCanonicalToolsList();
+    const continueTool = tools.find(t => t.name === 'kaggle_project_continue');
+    assert.ok(continueTool);
+    const schema = continueTool.inputSchema as any;
+    assert.strictEqual(schema.properties.settings.properties.title, undefined, 'settings.title must NOT exist');
+    assert.strictEqual(schema.properties.settings.additionalProperties, false);
+  });
+
+  // CONTINUE TEST 25 — Browser ACK cannot bypass unsupported settings
+  await runTest('Continue Test 25: acknowledgeUnobservedBrowserDraft=true cannot bypass KAGGLE_PROJECT_SETTINGS_UNSUPPORTED', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        settings: {
+          title: 'Bypass attempt'
+        } as any,
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Bypass attempt")' }]
+        }
+      }, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_UNSUPPORTED/
+    );
+    assert.strictEqual(pushCount, 0);
+  });
+
   return { passed, failed };
 }
 

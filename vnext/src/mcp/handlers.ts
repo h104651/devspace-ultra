@@ -518,8 +518,22 @@ export class McpHandlers {
     const currentRawSource = current.source || '';
     const currentSourceSha256 = crypto.createHash('sha256').update(currentRawSource).digest('hex');
 
-    // P0-4: Settings fill-only resolution and conflict guard
+    // P0-4: Settings fill-only resolution, whitelist, and conflict guard
     const settings = args.settings || {};
+    if (args.settings && typeof args.settings === 'object') {
+      const allowedKeys = new Set(['kernelType', 'language', 'isPrivate', 'enableGpu', 'enableInternet']);
+      const unsupportedSettings = Object.keys(args.settings).filter(k => !allowedKeys.has(k));
+      if (unsupportedSettings.length > 0) {
+        throw new Error(
+          JSON.stringify({
+            error: 'KAGGLE_PROJECT_SETTINGS_UNSUPPORTED',
+            message: 'kaggle_project_continue settings contains unsupported fields. Continue settings are recovery-only and cannot mutate project metadata.',
+            kernelRef: ref,
+            unsupportedSettings
+          })
+        );
+      }
+    }
     const conflictingSettings: string[] = [];
 
     if (current.metadata.kernelType !== undefined) {
@@ -689,7 +703,7 @@ export class McpHandlers {
     // Submit task reusing existing durable pipeline - preserve exact known settings
     const payload: any = {
       kernelSlug: ref,
-      title: settings.title || current.metadata.title || slug,
+      title: current.metadata.title || slug,
       code: newSource,
       language: currentLanguage,
       kernelType: currentKernelType,
