@@ -2724,6 +2724,222 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(pushCount, 1);
   });
 
+  // =========================================================================
+  // KAGGLE PROJECT FILES PAGINATION TEST SUITE
+  // =========================================================================
+
+  // FILES TEST 1 — Default first page with 75 files
+  await runTest('Files Test 1: Default first page returns first 50 files and nextPageToken "50"', async () => {
+    const mockFiles = Array.from({ length: 75 }, (_, i) => ({
+      name: `output_file_${String(i).padStart(2, '0')}.csv`,
+      sizeBytes: 100 + i
+    }));
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: mockFiles })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const res = await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    assert.strictEqual(res.totalFiles, 75);
+    assert.strictEqual(res.filesCount, 50);
+    assert.strictEqual(res.files.length, 50);
+    assert.strictEqual(res.pageSize, 50);
+    assert.strictEqual(res.nextPageToken, '50');
+    assert.strictEqual(res.files[0].name, 'output_file_00.csv');
+    assert.strictEqual(res.files[49].name, 'output_file_49.csv');
+  });
+
+  // FILES TEST 2 — Second page using returned token
+  await runTest('Files Test 2: Second page returns remaining 25 files with nextPageToken undefined', async () => {
+    const mockFiles = Array.from({ length: 75 }, (_, i) => ({
+      name: `output_file_${String(i).padStart(2, '0')}.csv`,
+      sizeBytes: 100 + i
+    }));
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: mockFiles })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const res = await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageToken: '50' }, readAuth);
+    assert.strictEqual(res.totalFiles, 75);
+    assert.strictEqual(res.filesCount, 25);
+    assert.strictEqual(res.files.length, 25);
+    assert.strictEqual(res.pageSize, 50);
+    assert.strictEqual(res.nextPageToken, undefined);
+    assert.strictEqual(res.files[0].name, 'output_file_50.csv');
+    assert.strictEqual(res.files[24].name, 'output_file_74.csv');
+  });
+
+  // FILES TEST 3 — Custom pageSize & multi-page roundtrip without duplicates or omissions
+  await runTest('Files Test 3: Custom pageSize=3 pages completely through 7 files with perfect reconstruction', async () => {
+    const mockFiles = Array.from({ length: 7 }, (_, i) => ({
+      name: `item_${i}.json`,
+      sizeBytes: 10 * i
+    }));
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: mockFiles })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const collectedFiles: any[] = [];
+    let currentToken: string | undefined = undefined;
+
+    // Page 1
+    const p1 = await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageSize: 3, pageToken: currentToken }, readAuth);
+    assert.strictEqual(p1.totalFiles, 7);
+    assert.strictEqual(p1.filesCount, 3);
+    assert.strictEqual(p1.files.length, 3);
+    assert.strictEqual(p1.nextPageToken, '3');
+    collectedFiles.push(...p1.files);
+    currentToken = p1.nextPageToken;
+
+    // Page 2
+    const p2 = await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageSize: 3, pageToken: currentToken }, readAuth);
+    assert.strictEqual(p2.totalFiles, 7);
+    assert.strictEqual(p2.filesCount, 3);
+    assert.strictEqual(p2.files.length, 3);
+    assert.strictEqual(p2.nextPageToken, '6');
+    collectedFiles.push(...p2.files);
+    currentToken = p2.nextPageToken;
+
+    // Page 3
+    const p3 = await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageSize: 3, pageToken: currentToken }, readAuth);
+    assert.strictEqual(p3.totalFiles, 7);
+    assert.strictEqual(p3.filesCount, 1);
+    assert.strictEqual(p3.files.length, 1);
+    assert.strictEqual(p3.nextPageToken, undefined);
+    collectedFiles.push(...p3.files);
+
+    // Verify complete reconstruction
+    assert.strictEqual(collectedFiles.length, 7);
+    assert.deepStrictEqual(collectedFiles.map(f => f.name), mockFiles.map(f => f.name));
+  });
+
+  // FILES TEST 4 — Empty list
+  await runTest('Files Test 4: Empty output files list returns totalFiles 0 and empty files array', async () => {
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: [] })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const res = await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    assert.strictEqual(res.totalFiles, 0);
+    assert.strictEqual(res.filesCount, 0);
+    assert.deepStrictEqual(res.files, []);
+    assert.strictEqual(res.nextPageToken, undefined);
+  });
+
+  // FILES TEST 5 — Invalid pageToken rejected
+  await runTest('Files Test 5: Invalid pageToken format is rejected with KAGGLE_PROJECT_FILES_PAGE_TOKEN_INVALID', async () => {
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: [{ name: 'a.txt' }] })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    for (const badToken of ['abc', '-1', '1.5', ' ']) {
+      await assert.rejects(
+        async () => tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageToken: badToken }, readAuth),
+        /KAGGLE_PROJECT_FILES_PAGE_TOKEN_INVALID/
+      );
+    }
+  });
+
+  // FILES TEST 6 — Out-of-range token vs terminal token
+  await runTest('Files Test 6: Out-of-range token is rejected while offset === totalFiles returns empty terminal page', async () => {
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: Array.from({ length: 5 }, (_, i) => ({ name: `f_${i}.txt` })) })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    // Out of range (6 > 5) -> throws
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageToken: '6' }, readAuth),
+      /KAGGLE_PROJECT_FILES_PAGE_TOKEN_INVALID/
+    );
+
+    // Terminal page (5 === 5) -> valid empty page
+    const res = await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageToken: '5' }, readAuth);
+    assert.strictEqual(res.totalFiles, 5);
+    assert.strictEqual(res.filesCount, 0);
+    assert.deepStrictEqual(res.files, []);
+    assert.strictEqual(res.nextPageToken, undefined);
+  });
+
+  // FILES TEST 7 — Invalid pageSize rejected
+  await runTest('Files Test 7: Invalid pageSize values are rejected with KAGGLE_PROJECT_FILES_PAGE_SIZE_INVALID', async () => {
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: [{ name: 'a.txt' }] })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    for (const badSize of [0, -1, 1.5, 51, -10, 100]) {
+      await assert.rejects(
+        async () => tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup', pageSize: badSize as any }, readAuth),
+        /KAGGLE_PROJECT_FILES_PAGE_SIZE_INVALID/
+      );
+    }
+  });
+
+  // FILES TEST 8 — Canonical schema validation
+  await runTest('Files Test 8: Canonical tools list has correct integer pageSize and string pageToken in schema', () => {
+    const tools = getCanonicalToolsList();
+    const filesTool = tools.find(t => t.name === 'kaggle_project_files');
+    assert.ok(filesTool);
+    const schema = filesTool.inputSchema;
+    assert.strictEqual(schema.properties.pageSize.type, 'integer');
+    assert.strictEqual(schema.properties.pageSize.minimum, 1);
+    assert.strictEqual(schema.properties.pageSize.maximum, 50);
+    assert.strictEqual(schema.properties.pageSize.default, 50);
+    assert.strictEqual(schema.properties.pageToken.type, 'string');
+    assert.strictEqual(schema.additionalProperties, false);
+  });
+
+  // FILES TEST 9 — Client getProjectOutputFiles is called exactly once per handler request
+  await runTest('Files Test 9: Backend client is called exactly once per handler request', async () => {
+    let callCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => {
+        callCount++;
+        return { files: [{ name: 'a.txt' }, { name: 'b.txt' }] };
+      }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup' }, readAuth);
+    assert.strictEqual(callCount, 1, 'Client called exactly once');
+  });
+
+  // FILES TEST 10 — Read-only scope enforcement
+  await runTest('Files Test 10: Scope enforcement requires kaggle:read and tasks:read', async () => {
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      getProjectOutputFiles: async () => ({ files: [{ name: 'a.txt' }] })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectFiles({ kernelRef: 'testuser/astor-tuneup' }, writeForbiddenAuth),
+      /AUTH_FORBIDDEN/
+    );
+  });
+
   return { passed, failed };
 }
 

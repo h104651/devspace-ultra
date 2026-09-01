@@ -362,11 +362,79 @@ export class McpHandlers {
       throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle project files is not supported by backend client');
     }
     const { owner, slug, ref } = parseKernelRef(args.kernelRef, client.getUsername());
+
+    // Validate pageSize: default 50, integer 1..50
+    let pageSize = 50;
+    if (args.pageSize !== undefined) {
+      if (typeof args.pageSize !== 'number' || !Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > 50) {
+        throw new Error(
+          JSON.stringify({
+            error: 'KAGGLE_PROJECT_FILES_PAGE_SIZE_INVALID',
+            message: `Invalid pageSize '${args.pageSize}'. Must be an integer between 1 and 50.`,
+            kernelRef: ref,
+            pageSize: args.pageSize
+          })
+        );
+      }
+      pageSize = args.pageSize;
+    }
+
     const res = await client.getProjectOutputFiles(owner, slug);
+    const allFiles = Array.isArray(res?.files) ? res.files : [];
+    const totalFiles = allFiles.length;
+
+    // Validate pageToken: decimal offset string
+    let offset = 0;
+    if (args.pageToken !== undefined && args.pageToken !== null && args.pageToken !== '') {
+      if (typeof args.pageToken !== 'string' || !/^\d+$/.test(args.pageToken)) {
+        throw new Error(
+          JSON.stringify({
+            error: 'KAGGLE_PROJECT_FILES_PAGE_TOKEN_INVALID',
+            message: `Invalid pageToken '${args.pageToken}'. Must be a non-negative integer string offset.`,
+            kernelRef: ref,
+            pageToken: args.pageToken,
+            totalFiles
+          })
+        );
+      }
+      const parsedOffset = Number(args.pageToken);
+      if (!Number.isSafeInteger(parsedOffset) || parsedOffset < 0) {
+        throw new Error(
+          JSON.stringify({
+            error: 'KAGGLE_PROJECT_FILES_PAGE_TOKEN_INVALID',
+            message: `Invalid pageToken '${args.pageToken}'. Must be a safe non-negative integer.`,
+            kernelRef: ref,
+            pageToken: args.pageToken,
+            totalFiles
+          })
+        );
+      }
+      if (parsedOffset > totalFiles) {
+        throw new Error(
+          JSON.stringify({
+            error: 'KAGGLE_PROJECT_FILES_PAGE_TOKEN_INVALID',
+            message: `pageToken offset ${parsedOffset} is out of range. Total files available: ${totalFiles}.`,
+            kernelRef: ref,
+            pageToken: args.pageToken,
+            totalFiles
+          })
+        );
+      }
+      offset = parsedOffset;
+    }
+
+    const files = allFiles.slice(offset, offset + pageSize);
+    const filesCount = files.length;
+    const nextOffset = offset + filesCount;
+    const nextPageToken = nextOffset < totalFiles ? String(nextOffset) : undefined;
+
     return {
       kernelRef: ref,
-      filesCount: res.files.length,
-      files: res.files
+      totalFiles,
+      filesCount,
+      files,
+      pageSize,
+      nextPageToken
     };
   }
 

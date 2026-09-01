@@ -78,8 +78,17 @@ export const KAGGLE_PROJECT_FILES_SCHEMA = {
   type: 'object',
   properties: {
     kernelRef: { type: 'string', description: 'Kaggle project reference, e.g. "owner/kernel-slug"' },
-    pageSize: { type: 'number', default: 50 },
-    pageToken: { type: 'string' }
+    pageSize: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 50,
+      default: 50,
+      description: 'Maximum number of files to return per page (1-50, default: 50)'
+    },
+    pageToken: {
+      type: 'string',
+      description: 'Pagination token for the next page of files'
+    }
   },
   required: ['kernelRef'],
   additionalProperties: false
