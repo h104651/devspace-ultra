@@ -2196,6 +2196,279 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(capturedPayload?.enableInternet, false, 'Kaggle submission payload must contain resolved enableInternet');
   });
 
+  // CONTINUE TEST 13 — Known metadata cannot be overridden: enableGpu throws KAGGLE_PROJECT_SETTINGS_CONFLICT
+  await runTest('Continue Test 13: Conflicting settings.enableGpu on known metadata is rejected with KAGGLE_PROJECT_SETTINGS_CONFLICT and 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        settings: {
+          enableGpu: true // conflicts with current metadata enableGpu: false
+        },
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Override attempt")' }]
+        }
+      }, submitAuth),
+      (err: any) => {
+        const str = err.message || '';
+        return str.includes('KAGGLE_PROJECT_SETTINGS_CONFLICT') && str.includes('enableGpu');
+      }
+    );
+    assert.strictEqual(pushCount, 0, 'Zero pushes on conflicting enableGpu');
+  });
+
+  // CONTINUE TEST 14 — Known metadata cannot be overridden: kernelType throws KAGGLE_PROJECT_SETTINGS_CONFLICT
+  await runTest('Continue Test 14: Conflicting settings.kernelType on known metadata is rejected with KAGGLE_PROJECT_SETTINGS_CONFLICT and 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        settings: {
+          kernelType: 'script' // conflicts with current metadata kernelType: 'notebook'
+        },
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Kernel type change attempt via continue")' }]
+        }
+      }, submitAuth),
+      (err: any) => {
+        const str = err.message || '';
+        return str.includes('KAGGLE_PROJECT_SETTINGS_CONFLICT') && str.includes('kernelType');
+      }
+    );
+    assert.strictEqual(pushCount, 0, 'Zero pushes on conflicting kernelType');
+  });
+
+  // CONTINUE TEST 15 — Same-value explicit settings is safe and succeeds
+  await runTest('Continue Test 15: Same-value explicit settings matching current metadata does not conflict and succeeds', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: false },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 6 }; }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: false
+    });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: currentFp,
+      settings: {
+        enableGpu: true,
+        enableInternet: false
+      },
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Same value settings")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    assert.strictEqual(pushCount, 1, 'Exactly 1 push on same-value settings continue');
+  });
+
+  // CONTINUE TEST 16 — Browser ACK cannot bypass settings conflict
+  await runTest('Continue Test 16: acknowledgeUnobservedBrowserDraft=true cannot bypass KAGGLE_PROJECT_SETTINGS_CONFLICT', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        settings: {
+          enableGpu: true
+        },
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Bypass attempt")' }]
+        }
+      }, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_CONFLICT/
+    );
+    assert.strictEqual(pushCount, 0);
+  });
+
+  // CONTINUE TEST 17 — Settings conflict cannot be hidden by matching caller fingerprint
+  await runTest('Continue Test 17: Caller calculating fingerprint with override value still rejected with KAGGLE_PROJECT_SETTINGS_CONFLICT', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    // Caller computes fingerprint using its desired override (enableGpu: true)
+    const callerOverrideFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedProjectFingerprint: callerOverrideFp,
+        settings: {
+          enableGpu: true
+        },
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Fingerprint hide attempt")' }]
+        }
+      }, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_CONFLICT/
+    );
+    assert.strictEqual(pushCount, 0);
+  });
+
+  // CONTINUE TEST 18 — Normal continue payload preserves known current settings
+  await runTest('Continue Test 18: Normal continue payload preserves known current metadata settings', async () => {
+    let capturedPayload: any = null;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async (payloadOrDir: any, maybePayload?: any) => {
+        capturedPayload = maybePayload || payloadOrDir;
+        return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 7 };
+      }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: false,
+      enableInternet: true
+    });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: currentFp,
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Normal continue")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    const task = tStore.getTask(res.taskId);
+    assert.strictEqual(task?.payload?.enableGpu, false);
+    assert.strictEqual(task?.payload?.enableInternet, true);
+    assert.strictEqual(capturedPayload?.enableGpu, false);
+    assert.strictEqual(capturedPayload?.enableInternet, true);
+  });
+
+  // CONTINUE TEST 19 — Legacy internal top-level fallback cannot override known metadata
+  await runTest('Continue Test 19: Legacy internal top-level fallback cannot override known metadata', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        enableGpu: true, // legacy top-level conflicting override attempt
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Legacy override attempt")' }]
+        }
+      } as any, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_CONFLICT/
+    );
+    assert.strictEqual(pushCount, 0);
+  });
+
   return { passed, failed };
 }
 

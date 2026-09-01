@@ -480,13 +480,73 @@ class McpHandlers {
         const current = await client.pullProject(owner, slug);
         const currentRawSource = current.source || '';
         const currentSourceSha256 = crypto.createHash('sha256').update(currentRawSource).digest('hex');
-        // P0-4: Settings fail-closed guard (kernelType, language, isPrivate, enableGpu, enableInternet)
+        // P0-4: Settings fill-only resolution and conflict guard
         const settings = args.settings || {};
-        const currentKernelType = settings.kernelType || args.kernelType || current.metadata.kernelType;
-        const currentLanguage = settings.language || args.language || current.metadata.language;
-        const currentIsPrivate = settings.isPrivate !== undefined ? settings.isPrivate : (args.isPrivate !== undefined ? args.isPrivate : current.metadata.isPrivate);
-        const currentEnableGpu = settings.enableGpu !== undefined ? settings.enableGpu : (args.enableGpu !== undefined ? args.enableGpu : current.metadata.enableGpu);
-        const currentEnableInternet = settings.enableInternet !== undefined ? settings.enableInternet : (args.enableInternet !== undefined ? args.enableInternet : current.metadata.enableInternet);
+        const conflictingSettings = [];
+        if (current.metadata.kernelType !== undefined) {
+            if (settings.kernelType !== undefined && settings.kernelType !== current.metadata.kernelType) {
+                conflictingSettings.push('kernelType');
+            }
+            else if (args.kernelType !== undefined && args.kernelType !== current.metadata.kernelType) {
+                conflictingSettings.push('kernelType');
+            }
+        }
+        if (current.metadata.language !== undefined) {
+            if (settings.language !== undefined && settings.language !== current.metadata.language) {
+                conflictingSettings.push('language');
+            }
+            else if (args.language !== undefined && args.language !== current.metadata.language) {
+                conflictingSettings.push('language');
+            }
+        }
+        if (current.metadata.isPrivate !== undefined && current.metadata.isPrivate !== null) {
+            if (settings.isPrivate !== undefined && settings.isPrivate !== current.metadata.isPrivate) {
+                conflictingSettings.push('isPrivate');
+            }
+            else if (args.isPrivate !== undefined && args.isPrivate !== current.metadata.isPrivate) {
+                conflictingSettings.push('isPrivate');
+            }
+        }
+        if (typeof current.metadata.enableGpu === 'boolean') {
+            if (settings.enableGpu !== undefined && settings.enableGpu !== current.metadata.enableGpu) {
+                conflictingSettings.push('enableGpu');
+            }
+            else if (args.enableGpu !== undefined && args.enableGpu !== current.metadata.enableGpu) {
+                conflictingSettings.push('enableGpu');
+            }
+        }
+        if (typeof current.metadata.enableInternet === 'boolean') {
+            if (settings.enableInternet !== undefined && settings.enableInternet !== current.metadata.enableInternet) {
+                conflictingSettings.push('enableInternet');
+            }
+            else if (args.enableInternet !== undefined && args.enableInternet !== current.metadata.enableInternet) {
+                conflictingSettings.push('enableInternet');
+            }
+        }
+        if (conflictingSettings.length > 0) {
+            throw new Error(JSON.stringify({
+                error: 'KAGGLE_PROJECT_SETTINGS_CONFLICT',
+                message: 'Explicit continue fallback settings conflict with authoritative current Kaggle project metadata.',
+                kernelRef: ref,
+                conflictingSettings
+            }));
+        }
+        // Resolve authoritative values: known current metadata > structured settings fallback > legacy top-level fallback
+        const currentKernelType = current.metadata.kernelType !== undefined
+            ? current.metadata.kernelType
+            : (settings.kernelType || args.kernelType);
+        const currentLanguage = current.metadata.language !== undefined
+            ? current.metadata.language
+            : (settings.language || args.language);
+        const currentIsPrivate = (current.metadata.isPrivate !== undefined && current.metadata.isPrivate !== null)
+            ? current.metadata.isPrivate
+            : (settings.isPrivate !== undefined ? settings.isPrivate : args.isPrivate);
+        const currentEnableGpu = typeof current.metadata.enableGpu === 'boolean'
+            ? current.metadata.enableGpu
+            : (settings.enableGpu !== undefined ? settings.enableGpu : args.enableGpu);
+        const currentEnableInternet = typeof current.metadata.enableInternet === 'boolean'
+            ? current.metadata.enableInternet
+            : (settings.enableInternet !== undefined ? settings.enableInternet : args.enableInternet);
         const unknownSettings = [];
         if (currentKernelType === undefined)
             unknownSettings.push('kernelType');

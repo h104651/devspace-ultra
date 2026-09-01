@@ -154,7 +154,7 @@ export const KAGGLE_PROJECT_CONTINUE_SCHEMA = {
         }
       },
       additionalProperties: false,
-      description: 'Explicit authoritative fallback settings used only when required Kaggle project metadata is unavailable or incomplete.'
+      description: 'Fallback values used only to recover required project settings that are unavailable in current Kaggle metadata. Values must not conflict with authoritative current metadata and do not provide a metadata mutation mechanism.'
     },
     acknowledgeUnobservedBrowserDraft: {
       type: 'boolean',
