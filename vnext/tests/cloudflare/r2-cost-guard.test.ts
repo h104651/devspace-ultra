@@ -163,11 +163,14 @@ export async function runR2CostGuardTests(): Promise<{ passed: number; failed: n
     failed++;
   }
 
+  const currentMonthKey = new Date().toISOString().slice(0, 7);
+  const prevMonthKey = new Date(Date.now() - 35 * 86400000).toISOString().slice(0, 7);
+
   // Test 5: 100,000 monthly Class A cap cannot be exceeded
   try {
     const mockStorage = new MockStorage();
     mockStorage.saved = {
-      monthKey: '2026-08',
+      monthKey: currentMonthKey,
       storedBytes: 1024,
       objectCount: 50,
       classAOperations: 100000, // Limit reached
@@ -195,7 +198,7 @@ export async function runR2CostGuardTests(): Promise<{ passed: number; failed: n
   try {
     const mockStorage = new MockStorage();
     mockStorage.saved = {
-      monthKey: '2026-08',
+      monthKey: currentMonthKey,
       storedBytes: 1024,
       objectCount: 50,
       classAOperations: 100,
@@ -242,7 +245,7 @@ export async function runR2CostGuardTests(): Promise<{ passed: number; failed: n
   try {
     const mockStorage = new MockStorage();
     mockStorage.saved = {
-      monthKey: '2026-07', // Previous month
+      monthKey: prevMonthKey, // Previous month
       storedBytes: 1048576, // 1 MiB
       objectCount: 42,
       classAOperations: 5000,
@@ -251,9 +254,9 @@ export async function runR2CostGuardTests(): Promise<{ passed: number; failed: n
     const guard = new R2UsageGuard(mockStorage);
     await guard.hydrate();
 
-    guard.ensureMonthCurrent(new Date('2026-08-15T12:00:00Z'));
+    guard.ensureMonthCurrent(new Date());
     const state = guard.getState();
-    assert.strictEqual(state.monthKey, '2026-08');
+    assert.strictEqual(state.monthKey, currentMonthKey);
     assert.strictEqual(state.classAOperations, 0, 'Class A ops must reset on month rollover');
     assert.strictEqual(state.classBOperations, 0, 'Class B ops must reset on month rollover');
     assert.strictEqual(state.storedBytes, 1048576, 'storedBytes must NOT reset on month rollover');
@@ -511,7 +514,7 @@ export async function runR2CostGuardTests(): Promise<{ passed: number; failed: n
   try {
     const mockStorage = new MockStorage();
     mockStorage.saved = {
-      monthKey: '2026-08',
+      monthKey: currentMonthKey,
       storedBytes: 1024,
       objectCount: 10,
       classAOperations: 99999, // 1 Class A op remaining

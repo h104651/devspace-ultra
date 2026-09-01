@@ -102,3 +102,16 @@ The `kaggle_dataset_file` MCP tool provides safe, server-side direct file retrie
 }
 ```
 
+---
+
+## 6. Workspace Execution & Additional Dataset Mounts (`kaggle_workspace_continue`)
+
+The `kaggle_workspace_continue` tool supports atomic workspace version increments and thin runner execution.
+
+### 6.1 Additional Dataset Mounts (`additionalDatasetDataSources`)
+When executing a workspace thin runner, you can mount additional Kaggle datasets explicitly without modifying the canonical runner source code:
+* Pass `additionalDatasetDataSources: ["owner/dataset-slug", ...]` (up to 8 datasets).
+* The gateway validates each dataset ref, deduplicates against existing runner dataset sources and the workspace dataset, and attaches them to the runner kernel execution payload.
+* The response returns `runnerDatasetSources: string[]` containing the complete, deduplicated dataset list mounted on the runner.
+
+

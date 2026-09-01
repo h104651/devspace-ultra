@@ -453,6 +453,160 @@ export async function runKaggleWorkspaceTests(): Promise<{ passed: number; faile
     assert.ok(errCaught, 'Expected KAGGLE_PROJECT_WRITE_FORBIDDEN');
   });
 
+  // ============================================================================
+  // additionalDatasetDataSources Integration & Validation Tests
+  // ============================================================================
+
+  await runTest('kaggle_workspace_continue without additionalDatasetDataSources preserves existing sources and returns runnerDatasetSources', async () => {
+    const v2Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    const fpV2 = v2Get.workspaceFingerprint;
+
+    const continueRes = await handlers.handleKaggleWorkspaceContinue({
+      project: 'testuser/astor-tuneup-project',
+      expectedWorkspaceFingerprint: fpV2,
+      changes: [{ path: 'src/astor_tuneup/config.py', content: 'import os\n# V3 change\n' }],
+      reason: 'Standard workspace continue without additional datasets'
+    }, adminCaller);
+
+    assert.strictEqual(continueRes.workspaceVersion, 3);
+    assert.ok(Array.isArray(continueRes.runnerDatasetSources), 'runnerDatasetSources must be returned in response');
+    assert.ok(continueRes.runnerDatasetSources.includes('testuser/astor-tuneup-project'), 'Workspace dataset must be in runner sources');
+    assert.strictEqual(continueRes.runnerSourceShaBefore, continueRes.runnerSourceShaAfter);
+  });
+
+  await runTest('kaggle_workspace_continue with single additionalDatasetDataSources mounts existing, workspace, and additional dataset', async () => {
+    const v3Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    const fpV3 = v3Get.workspaceFingerprint;
+
+    const continueRes = await handlers.handleKaggleWorkspaceContinue({
+      project: 'testuser/astor-tuneup-project',
+      expectedWorkspaceFingerprint: fpV3,
+      changes: [{ path: 'src/astor_tuneup/config.py', content: 'import os\n# V4 change\n' }],
+      additionalDatasetDataSources: ['astorhsu/astor-gate2c-9a-miningpool-kaggle-package'],
+      reason: 'Mount miningpool dataset for gate2c runner execution'
+    }, adminCaller);
+
+    assert.strictEqual(continueRes.workspaceVersion, 4);
+    assert.ok(continueRes.runnerDatasetSources.includes('testuser/astor-tuneup-project'), 'Workspace dataset must be present');
+    assert.ok(continueRes.runnerDatasetSources.includes('astorhsu/astor-gate2c-9a-miningpool-kaggle-package'), 'Additional dataset must be present');
+    assert.strictEqual(continueRes.runnerSourceShaBefore, continueRes.runnerSourceShaAfter, 'Runner source code must remain unmodified');
+  });
+
+  await runTest('kaggle_workspace_continue deduplicates duplicate additionalDatasetDataSources', async () => {
+    const v4Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    const fpV4 = v4Get.workspaceFingerprint;
+
+    const continueRes = await handlers.handleKaggleWorkspaceContinue({
+      project: 'testuser/astor-tuneup-project',
+      expectedWorkspaceFingerprint: fpV4,
+      changes: [{ path: 'src/astor_tuneup/config.py', content: 'import os\n# V5 change\n' }],
+      additionalDatasetDataSources: [
+        'astorhsu/astor-gate2c-9a-miningpool-kaggle-package',
+        'astorhsu/astor-gate2c-9a-miningpool-kaggle-package',
+        'astorhsu/astor-gate2c-9a-miningpool-kaggle-package'
+      ],
+      reason: 'Deduplicate duplicate datasets'
+    }, adminCaller);
+
+    assert.strictEqual(continueRes.workspaceVersion, 5);
+    const occurrences = continueRes.runnerDatasetSources.filter((s: string) => s === 'astorhsu/astor-gate2c-9a-miningpool-kaggle-package').length;
+    assert.strictEqual(occurrences, 1, 'Duplicate additional dataset must appear exactly once');
+  });
+
+  await runTest('kaggle_workspace_continue deduplicates additional dataset identical to workspace dataset', async () => {
+    const v5Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    const fpV5 = v5Get.workspaceFingerprint;
+
+    const continueRes = await handlers.handleKaggleWorkspaceContinue({
+      project: 'testuser/astor-tuneup-project',
+      expectedWorkspaceFingerprint: fpV5,
+      changes: [{ path: 'src/astor_tuneup/config.py', content: 'import os\n# V6 change\n' }],
+      additionalDatasetDataSources: ['testuser/astor-tuneup-project'],
+      reason: 'Additional dataset is same as workspace'
+    }, adminCaller);
+
+    assert.strictEqual(continueRes.workspaceVersion, 6);
+    const occurrences = continueRes.runnerDatasetSources.filter((s: string) => s === 'testuser/astor-tuneup-project').length;
+    assert.strictEqual(occurrences, 1, 'Workspace dataset must appear exactly once');
+  });
+
+  await runTest('kaggle_workspace_continue rejects invalid additional dataset refs before mutation', async () => {
+    const v6Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    const fpV6 = v6Get.workspaceFingerprint;
+
+    const invalidTestCases = [
+      'foo',
+      '/owner/dataset',
+      'owner/dataset/extra',
+      'owner\\dataset',
+      '',
+      '   ',
+      'owner/..',
+      '../slug'
+    ];
+
+    for (const invalidRef of invalidTestCases) {
+      let errCaught = false;
+      try {
+        await handlers.handleKaggleWorkspaceContinue({
+          project: 'testuser/astor-tuneup-project',
+          expectedWorkspaceFingerprint: fpV6,
+          changes: [{ path: 'src/astor_tuneup/config.py', content: 'import os\n# invalid test\n' }],
+          additionalDatasetDataSources: [invalidRef],
+          reason: 'Invalid ref test'
+        }, adminCaller);
+      } catch (err: any) {
+        errCaught = true;
+        assert.ok(err.message.includes('INVALID_ADDITIONAL_DATASET_SOURCE'), `Expected INVALID_ADDITIONAL_DATASET_SOURCE for "${invalidRef}", got: ${err.message}`);
+      }
+      assert.ok(errCaught, `Should reject invalid ref "${invalidRef}"`);
+    }
+
+    // Verify no mutation occurred (version remains 6)
+    const checkGet = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    assert.strictEqual(checkGet.datasetVersion, 6, 'Workspace version must not increment on validation failure');
+  });
+
+  await runTest('kaggle_workspace_continue rejects exceeding maximum allowed additional dataset refs (>8)', async () => {
+    const v6Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    const fpV6 = v6Get.workspaceFingerprint;
+
+    const nineRefs = Array.from({ length: 9 }, (_, i) => `owner/dataset-${i + 1}`);
+
+    let errCaught = false;
+    try {
+      await handlers.handleKaggleWorkspaceContinue({
+        project: 'testuser/astor-tuneup-project',
+        expectedWorkspaceFingerprint: fpV6,
+        changes: [{ path: 'src/astor_tuneup/config.py', content: 'import os\n# max test\n' }],
+        additionalDatasetDataSources: nineRefs,
+        reason: 'Too many datasets'
+      }, adminCaller);
+    } catch (err: any) {
+      errCaught = true;
+      assert.ok(err.message.includes('INVALID_ADDITIONAL_DATASET_SOURCE'));
+    }
+    assert.ok(errCaught, 'Should reject >8 additional dataset refs');
+  });
+
+  await runTest('representative Astor workspace continue mounts workspace and gate2c miningpool dataset', async () => {
+    const v6Get = await handlers.handleKaggleWorkspaceGet({ project: 'testuser/astor-tuneup-project' }, adminCaller);
+    const fpV6 = v6Get.workspaceFingerprint;
+
+    const continueRes = await handlers.handleKaggleWorkspaceContinue({
+      project: 'testuser/astor-tuneup-project',
+      expectedWorkspaceFingerprint: fpV6,
+      changes: [{ path: 'experiments/gate2c_9a_mining.py', content: 'print("Representative Astor V11 mining call test")\n' }],
+      additionalDatasetDataSources: ['astorhsu/astor-gate2c-9a-miningpool-kaggle-package'],
+      reason: 'Representative Astor Gate2C 9A mining run'
+    }, adminCaller);
+
+    assert.strictEqual(continueRes.workspaceVersion, 7);
+    assert.ok(continueRes.runnerDatasetSources.includes('testuser/astor-tuneup-project'));
+    assert.ok(continueRes.runnerDatasetSources.includes('astorhsu/astor-gate2c-9a-miningpool-kaggle-package'));
+    assert.strictEqual(continueRes.runnerSourceShaBefore, continueRes.runnerSourceShaAfter);
+  });
+
   await runTest('pre-rejects oversized kernel source (>1MB) in kaggle_project_continue and recommends workspace mode', async () => {
     const giantNb = JSON.stringify({
       cells: [{ cell_type: 'code', execution_count: null, metadata: {}, outputs: [], source: ['# giant\n' + 'x = 1\n'.repeat(150000)] }],

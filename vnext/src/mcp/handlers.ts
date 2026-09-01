@@ -1611,6 +1611,44 @@ export class McpHandlers {
     };
   }
 
+  private validateAdditionalDatasetSources(sources?: any): string[] {
+    if (sources === undefined || sources === null) {
+      return [];
+    }
+    if (!Array.isArray(sources)) {
+      throw new Error('INVALID_ADDITIONAL_DATASET_SOURCE: additionalDatasetDataSources must be an array of dataset references');
+    }
+    if (sources.length > 8) {
+      throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Exceeded maximum allowed additionalDatasetDataSources (max 8, got ${sources.length})`);
+    }
+    const validated: string[] = [];
+    const seen = new Set<string>();
+
+    for (const item of sources) {
+      if (typeof item !== 'string' || !item.trim()) {
+        throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Dataset ref must be a non-empty string, got ${JSON.stringify(item)}`);
+      }
+      const trimmed = item.trim();
+      if (trimmed.includes('\\') || trimmed.startsWith('/') || trimmed.endsWith('/')) {
+        throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Invalid dataset reference "${trimmed}". Path format or backslash not allowed.`);
+      }
+      const parts = trimmed.split('/');
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Invalid dataset reference "${trimmed}". Must be in "owner/dataset-slug" format.`);
+      }
+      const [owner, slug] = parts;
+      if (!/^[a-zA-Z0-9_\-.]+$/.test(owner) || !/^[a-zA-Z0-9_\-.]+$/.test(slug) || owner === '.' || owner === '..' || slug === '.' || slug === '..') {
+        throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Invalid dataset reference "${trimmed}". Contains invalid characters or traversal.`);
+      }
+      const canonicalRef = `${owner}/${slug}`;
+      if (!seen.has(canonicalRef)) {
+        seen.add(canonicalRef);
+        validated.push(canonicalRef);
+      }
+    }
+    return validated;
+  }
+
   /**
    * Executes an existing canonical thin runner kernel without modifying its source code.
    * Pulls runner source before execution, verifies SHA-256 before & after observable submission, and mounts the workspace dataset.
@@ -1620,12 +1658,14 @@ export class McpHandlers {
     workspaceDatasetRef: string;
     expectedVersion: number;
     expectedFingerprint: string;
+    additionalDatasetDataSources?: string[];
     clientRequestId?: string;
     auth: McpCallerContext;
   }): Promise<{
     taskId: string;
     status: string;
     runnerKernelRef: string;
+    runnerDatasetSources: string[];
     runnerSourceShaBefore: string;
     runnerSourceShaAfter: string;
   }> {
@@ -1650,7 +1690,14 @@ export class McpHandlers {
     const existingDatasets: string[] = Array.isArray(runnerMetadata.datasetDataSources)
       ? runnerMetadata.datasetDataSources
       : [];
-    const mergedDatasets = Array.from(new Set([...existingDatasets, params.workspaceDatasetRef]));
+    const additionalDatasets: string[] = Array.isArray(params.additionalDatasetDataSources)
+      ? params.additionalDatasetDataSources
+      : [];
+    const mergedDatasets = Array.from(new Set([
+      ...existingDatasets,
+      params.workspaceDatasetRef,
+      ...additionalDatasets
+    ]));
 
     const runnerPayload: any = {
       kernelSlug: ref,
@@ -1713,6 +1760,7 @@ export class McpHandlers {
       taskId: taskResult.taskId,
       status: taskResult.status,
       runnerKernelRef: ref,
+      runnerDatasetSources: mergedDatasets,
       runnerSourceShaBefore,
       runnerSourceShaAfter
     };
@@ -1740,6 +1788,10 @@ export class McpHandlers {
     if (!args.expectedWorkspaceFingerprint) {
       throw new Error('INVALID_MUTATION: expectedWorkspaceFingerprint is required for optimistic concurrency protection');
     }
+
+    // Validate additionalDatasetDataSources BEFORE any workspace mutation
+    const rawAdditionalDatasets = args.additionalDatasetDataSources || args.additionalDatasets;
+    const validatedAdditionalDatasets = this.validateAdditionalDatasetSources(rawAdditionalDatasets);
 
     // 1. Load REAL current dataset revision N
     const ws = await this.loadWorkspaceRevision(owner, slug);
@@ -1926,6 +1978,7 @@ export class McpHandlers {
       workspaceDatasetRef: ref,
       expectedVersion: verifiedWs.version,
       expectedFingerprint: verifiedWs.workspaceFingerprint,
+      additionalDatasetDataSources: validatedAdditionalDatasets,
       clientRequestId: args.clientRequestId,
       auth
     });
@@ -1938,6 +1991,7 @@ export class McpHandlers {
       previousWorkspaceFingerprint: ws.workspaceFingerprint,
       newWorkspaceFingerprint: verifiedWs.workspaceFingerprint,
       runnerKernelRef,
+      runnerDatasetSources: runnerExecution.runnerDatasetSources,
       runnerSourceShaBefore: runnerExecution.runnerSourceShaBefore,
       runnerSourceShaAfter: runnerExecution.runnerSourceShaAfter,
       preWriteSnapshotId,

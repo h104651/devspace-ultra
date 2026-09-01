@@ -217,6 +217,14 @@ export const KAGGLE_WORKSPACE_CONTINUE_SCHEMA = {
     experimentEntrypoint: { type: 'string', description: 'Experiment entrypoint script or module to execute in runner' },
     runnerKernelRef: { type: 'string', description: 'Optional runner kernel ref' },
     reason: { type: 'string', description: 'Reason for workspace mutation' },
+    additionalDatasetDataSources: {
+      type: 'array',
+      maxItems: 8,
+      items: {
+        type: 'string'
+      },
+      description: 'Optional additional Kaggle Dataset refs to mount for this canonical runner execution'
+    },
     clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
   },
   required: ['project', 'expectedWorkspaceFingerprint', 'changes', 'reason'],
