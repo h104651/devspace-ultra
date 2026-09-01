@@ -191,7 +191,7 @@ export class GatewayDurableObject {
     try {
       this.taskStore.hydrate(await this.storage.listTasks());
       this.taskStore.recoverStaleTasks();
-      await this.kaggleBackend.reconcileDanglingTasks();
+      this.kaggleBackend.reconcileDanglingTasks().catch(err => console.warn('[DO] Background Kaggle reconciliation warning:', err));
     } catch (err) {
       console.error('Failed to hydrate durable task state:', err);
     }
