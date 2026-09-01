@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.McpHandlers = void 0;
 const crypto = __importStar(require("crypto"));
+const path = __importStar(require("path"));
 const redactor_1 = require("../security/redactor");
 const scope_checker_1 = require("../security/scope-checker");
 const project_manager_1 = require("../kaggle/project-manager");
@@ -752,7 +753,7 @@ class McpHandlers {
             };
         }
         // P1-2: Browser draft safety guard for real restore
-        if (!args.acknowledgeUnobservedBrowserDraft) {
+        if (args.acknowledgeUnobservedBrowserDraft !== true) {
             throw new Error(JSON.stringify({
                 error: 'KAGGLE_BROWSER_DRAFT_STATE_UNOBSERVABLE',
                 message: 'Kaggle browser Draft state is not observable via public API. Restoring will overwrite remote state. Set acknowledgeUnobservedBrowserDraft: true to proceed.',
@@ -1189,6 +1190,296 @@ class McpHandlers {
         };
     }
     /**
+     * Reads a specific file from a Kaggle Dataset version with server-side actual byte SHA256 integrity verification.
+     * Strictly READ ONLY.
+     */
+    async handleKaggleDatasetFile(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'kaggle:read', 'tasks:read', 'admin:*');
+        const client = this.gateway.kaggleBackend.getClient();
+        if (!client || typeof client.listDatasetFiles !== 'function' || typeof client.downloadDatasetFile !== 'function') {
+            throw new Error('KAGGLE_CLIENT_UNAVAILABLE: Kaggle dataset operations are not supported by backend client');
+        }
+        if (typeof args.datasetRef !== 'string' || !args.datasetRef.trim()) {
+            throw new Error('INVALID_KAGGLE_DATASET_REF: datasetRef is required');
+        }
+        const trimmedRef = args.datasetRef.trim();
+        const refParts = trimmedRef.split('/');
+        if (refParts.length !== 2 || !refParts[0] || !refParts[1] || !/^[a-zA-Z0-9_\-.]+$/.test(refParts[0]) || !/^[a-zA-Z0-9_\-.]+$/.test(refParts[1])) {
+            throw new Error(`INVALID_KAGGLE_DATASET_REF: Invalid dataset reference "${trimmedRef}". Must be in "owner/dataset-slug" format.`);
+        }
+        const owner = refParts[0];
+        const slug = refParts[1];
+        const canonicalRef = `${owner}/${slug}`;
+        if (typeof args.relativePath !== 'string' || !args.relativePath.trim()) {
+            throw new Error('INVALID_KAGGLE_DATASET_PATH: relativePath is required');
+        }
+        const rawPath = args.relativePath.trim();
+        if (rawPath.startsWith('/') || rawPath.startsWith('\\') || /^[a-zA-Z]:/.test(rawPath)) {
+            throw new Error(`INVALID_KAGGLE_DATASET_PATH: Absolute paths are forbidden: "${rawPath}"`);
+        }
+        if (rawPath.includes('\\')) {
+            throw new Error(`INVALID_KAGGLE_DATASET_PATH: Backslash path separators are forbidden: "${rawPath}"`);
+        }
+        const rawSegments = rawPath.split('/');
+        for (const segment of rawSegments) {
+            if (segment === '' || segment === '.' || segment === '..' || /^\.{2,}$/.test(segment)) {
+                throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path contains empty or traversal segments: "${rawPath}"`);
+            }
+        }
+        const normalized = path.posix.normalize(rawPath);
+        if (normalized !== rawPath) {
+            throw new Error(`INVALID_KAGGLE_DATASET_PATH: Path is not in canonical normalized form: "${rawPath}"`);
+        }
+        const validPath = normalized;
+        let expectedSha256 = undefined;
+        if (args.expectedSha256 !== undefined && args.expectedSha256 !== null) {
+            if (typeof args.expectedSha256 !== 'string' || !/^[a-fA-F0-9]{64}$/.test(args.expectedSha256.trim())) {
+                throw new Error(`INVALID_EXPECTED_SHA256: expectedSha256 must be a 64-character hexadecimal string`);
+            }
+            expectedSha256 = args.expectedSha256.trim();
+        }
+        let explicitVersion = undefined;
+        if (args.datasetVersion !== undefined && args.datasetVersion !== null) {
+            if (typeof args.datasetVersion !== 'number' || !Number.isInteger(args.datasetVersion) || args.datasetVersion < 1) {
+                throw new Error('INVALID_KAGGLE_DATASET_VERSION: datasetVersion must be a positive integer');
+            }
+            explicitVersion = args.datasetVersion;
+        }
+        let maxBytes = 262144; // 256 KiB default
+        if (args.maxBytes !== undefined && args.maxBytes !== null) {
+            if (typeof args.maxBytes !== 'number' || !Number.isInteger(args.maxBytes) || args.maxBytes < 1 || args.maxBytes > 1048576) {
+                throw new Error('INVALID_MAX_BYTES: maxBytes must be a positive integer between 1 and 1048576 bytes (1 MiB)');
+            }
+            maxBytes = args.maxBytes;
+        }
+        // 1. Resolve Dataset Version
+        let resolvedVersion;
+        let dsMeta;
+        try {
+            dsMeta = await client.getDataset(owner, slug);
+        }
+        catch (err) {
+            if (err.message?.includes('403') || err.message?.includes('401') || err.message?.includes('ACCESS_DENIED') || err.message?.includes('AUTH_') || err.message?.includes('Forbidden')) {
+                throw new Error(`KAGGLE_DATASET_ACCESS_DENIED: Access denied for dataset ${canonicalRef}: ${err.message}`);
+            }
+            if (err.message?.includes('404') || err.message?.includes('NOT_FOUND') || err.message?.includes('not found')) {
+                throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found: ${err.message}`);
+            }
+            throw new Error(`KAGGLE_DATASET_LOOKUP_FAILED: Failed to lookup dataset ${canonicalRef}: ${err.message}`);
+        }
+        if (!dsMeta || typeof dsMeta.currentVersionNumber !== 'number') {
+            throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found`);
+        }
+        if (explicitVersion !== undefined) {
+            if (explicitVersion > dsMeta.currentVersionNumber) {
+                throw new Error(`KAGGLE_DATASET_VERSION_NOT_FOUND: Version ${explicitVersion} not found for dataset ${canonicalRef} (current version: ${dsMeta.currentVersionNumber})`);
+            }
+            resolvedVersion = explicitVersion;
+        }
+        else {
+            resolvedVersion = dsMeta.currentVersionNumber;
+        }
+        // 2. File Existence & Safety Precheck via listDatasetFiles
+        let fileListResult;
+        try {
+            fileListResult = await client.listDatasetFiles(owner, slug, resolvedVersion);
+        }
+        catch (err) {
+            if (err.message?.includes('403') || err.message?.includes('401') || err.message?.includes('ACCESS_DENIED') || err.message?.includes('AUTH_') || err.message?.includes('Forbidden')) {
+                throw new Error(`KAGGLE_DATASET_ACCESS_DENIED: Access denied listing files for ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+            }
+            if (err.message?.includes('404') || err.message?.includes('NOT_FOUND') || err.message?.includes('Version') || err.message?.includes('not found')) {
+                if (explicitVersion !== undefined) {
+                    throw new Error(`KAGGLE_DATASET_VERSION_NOT_FOUND: Version ${resolvedVersion} of dataset ${canonicalRef} not found`);
+                }
+                throw new Error(`KAGGLE_DATASET_NOT_FOUND: Dataset ${canonicalRef} not found`);
+            }
+            throw new Error(`KAGGLE_DATASET_FILE_LIST_FAILED: Failed to list files for ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+        }
+        const exactFile = fileListResult.datasetFiles.find(f => f.name === validPath);
+        if (!exactFile) {
+            throw new Error(`KAGGLE_DATASET_FILE_NOT_FOUND: Exact file "${validPath}" not found in dataset ${canonicalRef} version ${resolvedVersion}`);
+        }
+        const MAX_FETCH_CEILING = 20971520; // 20 MiB safety ceiling
+        if (exactFile.totalBytes > MAX_FETCH_CEILING) {
+            throw new Error(`KAGGLE_DATASET_FILE_TOO_LARGE: File "${validPath}" size (${exactFile.totalBytes} bytes) exceeds maximum fetch ceiling of 20 MiB`);
+        }
+        // 3. Download File Content Pinned to Exact Version
+        let dl;
+        try {
+            dl = await client.downloadDatasetFile(owner, slug, validPath, resolvedVersion);
+        }
+        catch (err) {
+            if (err.message?.includes('403') || err.message?.includes('401') || err.message?.includes('ACCESS_DENIED') || err.message?.includes('AUTH_') || err.message?.includes('Forbidden')) {
+                throw new Error(`KAGGLE_DATASET_ACCESS_DENIED: Access denied when downloading "${validPath}" from ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+            }
+            throw new Error(`KAGGLE_DATASET_FILE_DOWNLOAD_FAILED: Failed to download "${validPath}" from ${canonicalRef} version ${resolvedVersion}: ${err.message}`);
+        }
+        // Post-download hard fetch ceiling check
+        const actualBytes = dl.content;
+        if (actualBytes.length > MAX_FETCH_CEILING) {
+            throw new Error(`KAGGLE_DATASET_FILE_TOO_LARGE: Downloaded file "${validPath}" size (${actualBytes.length} bytes) exceeds maximum fetch ceiling of 20 MiB`);
+        }
+        // 4. Authoritative Actual Byte SHA256 Calculation
+        const actualSha256 = crypto.createHash('sha256').update(actualBytes).digest('hex');
+        const actualSize = actualBytes.length;
+        let hashMatch = null;
+        if (expectedSha256) {
+            hashMatch = actualSha256.toLowerCase() === expectedSha256.toLowerCase();
+        }
+        // 5. Content-Type and Encoding Determination
+        const ext = path.posix.extname(validPath).toLowerCase();
+        const TEXT_MIME_TYPES = {
+            '.json': 'application/json',
+            '.txt': 'text/plain',
+            '.log': 'text/plain',
+            '.md': 'text/markdown',
+            '.csv': 'text/csv',
+            '.tsv': 'text/tab-separated-values',
+            '.yaml': 'application/yaml',
+            '.yml': 'application/yaml',
+            '.xml': 'application/xml',
+            '.html': 'text/html',
+            '.htm': 'text/html',
+            '.py': 'text/x-python',
+            '.ts': 'text/typescript',
+            '.js': 'text/javascript',
+            '.ipynb': 'application/x-ipynb+json'
+        };
+        const BINARY_MIME_TYPES = {
+            '.zip': 'application/zip',
+            '.tar': 'application/x-tar',
+            '.gz': 'application/gzip',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.parquet': 'application/x-parquet',
+            '.pt': 'application/octet-stream',
+            '.bin': 'application/octet-stream',
+            '.pkl': 'application/octet-stream'
+        };
+        let isText = false;
+        let contentType = 'application/octet-stream';
+        if (TEXT_MIME_TYPES[ext]) {
+            isText = true;
+            contentType = TEXT_MIME_TYPES[ext];
+        }
+        else if (BINARY_MIME_TYPES[ext]) {
+            isText = false;
+            contentType = BINARY_MIME_TYPES[ext];
+        }
+        else {
+            // Fail-closed: ANY unknown extension is classified as binary
+            isText = false;
+            contentType = 'application/octet-stream';
+        }
+        let encoding = null;
+        let content = null;
+        let isTruncated = false;
+        let returnedBytes = 0;
+        if (isText) {
+            encoding = 'utf-8';
+            if (actualBytes.length <= maxBytes) {
+                content = actualBytes.toString('utf-8');
+                isTruncated = false;
+                returnedBytes = actualBytes.length;
+            }
+            else {
+                isTruncated = true;
+                let end = maxBytes;
+                let i = end - 1;
+                let seqLen = 1;
+                while (i >= 0 && i >= end - 4) {
+                    const b = actualBytes[i];
+                    if ((b & 0x80) === 0) {
+                        seqLen = 1;
+                        break;
+                    }
+                    else if ((b & 0xe0) === 0xc0) {
+                        seqLen = 2;
+                        break;
+                    }
+                    else if ((b & 0xf0) === 0xe0) {
+                        seqLen = 3;
+                        break;
+                    }
+                    else if ((b & 0xf8) === 0xf0) {
+                        seqLen = 4;
+                        break;
+                    }
+                    i--;
+                }
+                if (seqLen > 1 && i >= 0) {
+                    const availableBytes = end - i;
+                    if (availableBytes < seqLen) {
+                        end = i;
+                    }
+                }
+                const sliceBuf = actualBytes.subarray(0, end);
+                content = new TextDecoder('utf-8').decode(sliceBuf);
+                returnedBytes = sliceBuf.length;
+            }
+        }
+        else {
+            encoding = null;
+            content = null;
+            isTruncated = false;
+            returnedBytes = 0;
+        }
+        return {
+            datasetRef: canonicalRef,
+            datasetVersion: resolvedVersion,
+            relativePath: validPath,
+            size: actualSize,
+            sha256: actualSha256,
+            hashMatch,
+            contentType,
+            encoding,
+            content,
+            expectedSha256,
+            isText,
+            isTruncated,
+            returnedBytes
+        };
+    }
+    validateAdditionalDatasetSources(sources) {
+        if (sources === undefined || sources === null) {
+            return [];
+        }
+        if (!Array.isArray(sources)) {
+            throw new Error('INVALID_ADDITIONAL_DATASET_SOURCE: additionalDatasetDataSources must be an array of dataset references');
+        }
+        if (sources.length > 8) {
+            throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Exceeded maximum allowed additionalDatasetDataSources (max 8, got ${sources.length})`);
+        }
+        const validated = [];
+        const seen = new Set();
+        for (const item of sources) {
+            if (typeof item !== 'string' || !item.trim()) {
+                throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Dataset ref must be a non-empty string, got ${JSON.stringify(item)}`);
+            }
+            const trimmed = item.trim();
+            if (trimmed.includes('\\') || trimmed.startsWith('/') || trimmed.endsWith('/')) {
+                throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Invalid dataset reference "${trimmed}". Path format or backslash not allowed.`);
+            }
+            const parts = trimmed.split('/');
+            if (parts.length !== 2 || !parts[0] || !parts[1]) {
+                throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Invalid dataset reference "${trimmed}". Must be in "owner/dataset-slug" format.`);
+            }
+            const [owner, slug] = parts;
+            if (!/^[a-zA-Z0-9_\-.]+$/.test(owner) || !/^[a-zA-Z0-9_\-.]+$/.test(slug) || owner === '.' || owner === '..' || slug === '.' || slug === '..') {
+                throw new Error(`INVALID_ADDITIONAL_DATASET_SOURCE: Invalid dataset reference "${trimmed}". Contains invalid characters or traversal.`);
+            }
+            const canonicalRef = `${owner}/${slug}`;
+            if (!seen.has(canonicalRef)) {
+                seen.add(canonicalRef);
+                validated.push(canonicalRef);
+            }
+        }
+        return validated;
+    }
+    /**
      * Executes an existing canonical thin runner kernel without modifying its source code.
      * Pulls runner source before execution, verifies SHA-256 before & after observable submission, and mounts the workspace dataset.
      */
@@ -1210,7 +1501,14 @@ class McpHandlers {
         const existingDatasets = Array.isArray(runnerMetadata.datasetDataSources)
             ? runnerMetadata.datasetDataSources
             : [];
-        const mergedDatasets = Array.from(new Set([...existingDatasets, params.workspaceDatasetRef]));
+        const additionalDatasets = Array.isArray(params.additionalDatasetDataSources)
+            ? params.additionalDatasetDataSources
+            : [];
+        const mergedDatasets = Array.from(new Set([
+            ...existingDatasets,
+            params.workspaceDatasetRef,
+            ...additionalDatasets
+        ]));
         const runnerPayload = {
             kernelSlug: ref,
             title: runnerMetadata.title || slug,
@@ -1263,6 +1561,7 @@ class McpHandlers {
             taskId: taskResult.taskId,
             status: taskResult.status,
             runnerKernelRef: ref,
+            runnerDatasetSources: mergedDatasets,
             runnerSourceShaBefore,
             runnerSourceShaAfter
         };
@@ -1287,6 +1586,9 @@ class McpHandlers {
         if (!args.expectedWorkspaceFingerprint) {
             throw new Error('INVALID_MUTATION: expectedWorkspaceFingerprint is required for optimistic concurrency protection');
         }
+        // Validate additionalDatasetDataSources BEFORE any workspace mutation
+        const rawAdditionalDatasets = args.additionalDatasetDataSources || args.additionalDatasets;
+        const validatedAdditionalDatasets = this.validateAdditionalDatasetSources(rawAdditionalDatasets);
         // 1. Load REAL current dataset revision N
         const ws = await this.loadWorkspaceRevision(owner, slug);
         // 2. Concurrency Conflict Guard: verify expected fingerprint before doing ANY write or upload
@@ -1431,6 +1733,7 @@ class McpHandlers {
             workspaceDatasetRef: ref,
             expectedVersion: verifiedWs.version,
             expectedFingerprint: verifiedWs.workspaceFingerprint,
+            additionalDatasetDataSources: validatedAdditionalDatasets,
             clientRequestId: args.clientRequestId,
             auth
         });
@@ -1442,6 +1745,7 @@ class McpHandlers {
             previousWorkspaceFingerprint: ws.workspaceFingerprint,
             newWorkspaceFingerprint: verifiedWs.workspaceFingerprint,
             runnerKernelRef,
+            runnerDatasetSources: runnerExecution.runnerDatasetSources,
             runnerSourceShaBefore: runnerExecution.runnerSourceShaBefore,
             runnerSourceShaAfter: runnerExecution.runnerSourceShaAfter,
             preWriteSnapshotId,

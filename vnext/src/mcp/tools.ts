@@ -155,6 +155,10 @@ export const KAGGLE_PROJECT_RESTORE_SCHEMA = {
     kernelDataSources: { type: 'array', items: { type: 'string' } },
     modelDataSources: { type: 'array', items: { type: 'string' } },
     settings: { type: 'object', description: 'Optional project settings dictionary' },
+    acknowledgeUnobservedBrowserDraft: {
+      type: 'boolean',
+      description: 'Explicit acknowledgement that a Kaggle browser draft may exist but is not observable through the available API. When true, the caller intentionally authorizes restore using the persisted/trusted source despite the unobserved browser-draft risk. This acknowledgement applies only to DevSpace Ultra safety checks and MUST NOT be forwarded to Kaggle.'
+    },
     reason: { type: 'string', description: 'Explicit reason for restore operation' },
     clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
   },

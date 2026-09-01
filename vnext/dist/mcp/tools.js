@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.LOCAL_WRITE_FILE_SCHEMA = exports.LOCAL_READ_FILE_SCHEMA = exports.LOCAL_PROJECT_STATUS_SCHEMA = exports.LOCAL_PROJECT_LIST_SCHEMA = exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = exports.KAGGLE_WORKSPACE_FILE_SCHEMA = exports.KAGGLE_WORKSPACE_GET_SCHEMA = exports.KAGGLE_PROJECT_RESTORE_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
-exports.LOCAL_BUILD_PROJECT_SCHEMA = exports.LOCAL_RUN_TESTS_SCHEMA = exports.LOCAL_GIT_STATUS_SCHEMA = exports.LOCAL_CREATE_DIRECTORY_SCHEMA = exports.LOCAL_FIND_REPOSITORIES_SCHEMA = exports.LOCAL_SEARCH_TEXT_SCHEMA = exports.LOCAL_FIND_FILES_SCHEMA = exports.LOCAL_LIST_DIRECTORY_SCHEMA = exports.LOCAL_PATCH_FILE_SCHEMA = void 0;
+exports.LOCAL_READ_FILE_SCHEMA = exports.LOCAL_PROJECT_STATUS_SCHEMA = exports.LOCAL_PROJECT_LIST_SCHEMA = exports.KILL_SWITCH_TRIGGER_SCHEMA = exports.DEVICE_STATUS_SCHEMA = exports.CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = exports.CHAT_SWARM_RUNTIME_SCALE_SCHEMA = exports.CHAT_SWARM_RUNTIME_STATUS_SCHEMA = exports.CHAT_SWARM_WAKE_BRIDGE_SCHEMA = exports.CHAT_SWARM_DOCK_SCHEMA = exports.CHAT_SWARM_CLOSE_SCHEMA = exports.CHAT_SWARM_LEAVE_SCHEMA = exports.CHAT_SWARM_RECYCLE_WORKER_SCHEMA = exports.CHAT_SWARM_CANCEL_SCHEMA = exports.CHAT_SWARM_COLLECT_SCHEMA = exports.CHAT_SWARM_SUBMIT_ONCE_SCHEMA = exports.CHAT_SWARM_SUBMIT_SCHEMA = exports.CHAT_SWARM_RECOVER_SCHEMA = exports.CHAT_SWARM_NEXT_SCHEMA = exports.CHAT_SWARM_ACK_SCHEMA = exports.CHAT_SWARM_CLAIM_SCHEMA = exports.CHAT_SWARM_DISPATCH_SCHEMA = exports.CHAT_SWARM_RESIZE_SCHEMA = exports.CHAT_SWARM_STATUS_SCHEMA = exports.CHAT_SWARM_JOIN_BROWSER_SCHEMA = exports.CHAT_SWARM_JOIN_SCHEMA = exports.CHAT_SWARM_CREATE_SCHEMA = exports.SWARM_STATUS_SCHEMA = exports.SWARM_DISPATCH_SCHEMA = exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = exports.KAGGLE_DATASET_FILE_SCHEMA = exports.KAGGLE_WORKSPACE_FILE_SCHEMA = exports.KAGGLE_WORKSPACE_GET_SCHEMA = exports.KAGGLE_PROJECT_RESTORE_SCHEMA = exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = exports.KAGGLE_PROJECT_LOGS_SCHEMA = exports.KAGGLE_PROJECT_OUTPUT_SCHEMA = exports.KAGGLE_PROJECT_FILES_SCHEMA = exports.KAGGLE_PROJECT_SOURCE_SCHEMA = exports.KAGGLE_PROJECT_GET_SCHEMA = exports.KAGGLE_PROJECT_LIST_SCHEMA = exports.KAGGLE_RESULT_SCHEMA = exports.KAGGLE_LOGS_SCHEMA = exports.KAGGLE_STATUS_SCHEMA = exports.KAGGLE_RUN_SCHEMA = exports.REMOTE_TASK_CANCEL_SCHEMA = exports.REMOTE_TASK_ARTIFACTS_SCHEMA = exports.REMOTE_TASK_LOGS_SCHEMA = exports.REMOTE_TASK_STATUS_SCHEMA = exports.REMOTE_TASK_SUBMIT_SCHEMA = void 0;
+exports.LOCAL_BUILD_PROJECT_SCHEMA = exports.LOCAL_RUN_TESTS_SCHEMA = exports.LOCAL_GIT_STATUS_SCHEMA = exports.LOCAL_CREATE_DIRECTORY_SCHEMA = exports.LOCAL_FIND_REPOSITORIES_SCHEMA = exports.LOCAL_SEARCH_TEXT_SCHEMA = exports.LOCAL_FIND_FILES_SCHEMA = exports.LOCAL_LIST_DIRECTORY_SCHEMA = exports.LOCAL_PATCH_FILE_SCHEMA = exports.LOCAL_WRITE_FILE_SCHEMA = void 0;
 exports.getCanonicalToolsList = getCanonicalToolsList;
 exports.REMOTE_TASK_SUBMIT_SCHEMA = {
     type: 'object',
@@ -150,6 +150,10 @@ exports.KAGGLE_PROJECT_RESTORE_SCHEMA = {
         kernelDataSources: { type: 'array', items: { type: 'string' } },
         modelDataSources: { type: 'array', items: { type: 'string' } },
         settings: { type: 'object', description: 'Optional project settings dictionary' },
+        acknowledgeUnobservedBrowserDraft: {
+            type: 'boolean',
+            description: 'Explicit acknowledgement that a Kaggle browser draft may exist but is not observable through the available API. When true, the caller intentionally authorizes restore using the persisted/trusted source despite the unobserved browser-draft risk. This acknowledgement applies only to DevSpace Ultra safety checks and MUST NOT be forwarded to Kaggle.'
+        },
         reason: { type: 'string', description: 'Explicit reason for restore operation' },
         clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
     },
@@ -175,6 +179,18 @@ exports.KAGGLE_WORKSPACE_FILE_SCHEMA = {
     required: ['project', 'path'],
     additionalProperties: false
 };
+exports.KAGGLE_DATASET_FILE_SCHEMA = {
+    type: 'object',
+    properties: {
+        datasetRef: { type: 'string', description: 'Kaggle dataset reference in owner/dataset-slug format' },
+        relativePath: { type: 'string', description: 'Relative POSIX path of file within the dataset' },
+        datasetVersion: { type: 'integer', minimum: 1, description: 'Optional explicit dataset version number' },
+        expectedSha256: { type: 'string', description: 'Optional expected 64-character hex SHA-256 hash' },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576, default: 262144, description: 'Optional maximum bytes to return inline (default 262144, max 1048576)' }
+    },
+    required: ['datasetRef', 'relativePath'],
+    additionalProperties: false
+};
 exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = {
     type: 'object',
     properties: {
@@ -196,6 +212,14 @@ exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA = {
         experimentEntrypoint: { type: 'string', description: 'Experiment entrypoint script or module to execute in runner' },
         runnerKernelRef: { type: 'string', description: 'Optional runner kernel ref' },
         reason: { type: 'string', description: 'Reason for workspace mutation' },
+        additionalDatasetDataSources: {
+            type: 'array',
+            maxItems: 8,
+            items: {
+                type: 'string'
+            },
+            description: 'Optional additional Kaggle Dataset refs to mount for this canonical runner execution'
+        },
         clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
     },
     required: ['project', 'expectedWorkspaceFingerprint', 'changes', 'reason'],
@@ -553,6 +577,7 @@ function getCanonicalToolsList() {
         { name: 'kaggle_project_restore', description: 'Explicitly restore an owned Kaggle project from trusted source when remote state is corrupted or suspicious', inputSchema: exports.KAGGLE_PROJECT_RESTORE_SCHEMA },
         { name: 'kaggle_workspace_get', description: 'Retrieve Kaggle dataset-backed project workspace manifest, fingerprint, and file outline', inputSchema: exports.KAGGLE_WORKSPACE_GET_SCHEMA },
         { name: 'kaggle_workspace_file', description: 'Read a specific file from the project workspace with bounded chunking', inputSchema: exports.KAGGLE_WORKSPACE_FILE_SCHEMA },
+        { name: 'kaggle_dataset_file', description: 'Read a specific file from a Kaggle dataset version with actual byte SHA256 integrity verification', inputSchema: exports.KAGGLE_DATASET_FILE_SCHEMA },
         { name: 'kaggle_workspace_continue', description: 'Atomically update project workspace dataset version, apply file changes, and trigger thin runner execution', inputSchema: exports.KAGGLE_WORKSPACE_CONTINUE_SCHEMA },
         { name: 'local_project_list', description: 'List registered and authorized local projects with capabilities and metadata. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: exports.LOCAL_PROJECT_LIST_SCHEMA },
         { name: 'local_project_status', description: 'Inspect status, git branch, and capabilities of an authorized local project. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: exports.LOCAL_PROJECT_STATUS_SCHEMA },

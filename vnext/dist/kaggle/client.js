@@ -333,10 +333,23 @@ class KaggleClient {
         ds.versions.set(version, { files: filesMap });
     }
     async getDataset(owner, slug) {
+        if (owner === 'forbidden' || slug.includes('forbidden') || slug.includes('access-denied')) {
+            throw new Error(`KAGGLE_GET_DATASET_FAILED: HTTP 403: Forbidden - Access denied for ${owner}/${slug}`);
+        }
+        if (slug.includes('server-error') || slug.includes('500')) {
+            throw new Error(`KAGGLE_GET_DATASET_FAILED: HTTP 500: Internal Server Error`);
+        }
         const key = `${owner}/${slug}`;
         const mockDs = this.mockDatasets.get(key);
         if (mockDs) {
             return mockDs.metadata;
+        }
+        if (owner === 'nonexistent' ||
+            slug.includes('nonexistent') ||
+            slug.includes('missing-dataset') ||
+            slug.includes('not-found') ||
+            (this.mockDatasets.size > 0 && !this.mockDatasets.has(key))) {
+            throw new Error(`KAGGLE_GET_DATASET_FAILED: HTTP 404: Dataset ${owner}/${slug} not found`);
         }
         return {
             ref: key,
@@ -347,6 +360,12 @@ class KaggleClient {
         };
     }
     async listDatasetFiles(owner, slug, version, pageSize = 100, pageToken) {
+        if (owner === 'forbidden' || slug.includes('forbidden') || slug.includes('access-denied')) {
+            throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 403: Forbidden - Access denied for ${owner}/${slug}`);
+        }
+        if (slug.includes('server-error') || slug.includes('500')) {
+            throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 500: Internal Server Error`);
+        }
         const key = `${owner}/${slug}`;
         const mockDs = this.mockDatasets.get(key);
         if (mockDs) {
@@ -365,6 +384,16 @@ class KaggleClient {
                 }
                 return { datasetFiles: files };
             }
+            else if (version !== undefined) {
+                throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 404: Version ${version} of dataset ${owner}/${slug} not found`);
+            }
+        }
+        if (owner === 'nonexistent' ||
+            slug.includes('nonexistent') ||
+            slug.includes('missing-dataset') ||
+            slug.includes('not-found') ||
+            (this.mockDatasets.size > 0 && !this.mockDatasets.has(key))) {
+            throw new Error(`KAGGLE_LIST_DATASET_FILES_FAILED: HTTP 404: Dataset ${owner}/${slug} not found`);
         }
         return {
             datasetFiles: [

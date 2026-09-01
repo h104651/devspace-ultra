@@ -176,7 +176,7 @@ class GatewayDurableObject {
         try {
             this.taskStore.hydrate(await this.storage.listTasks());
             this.taskStore.recoverStaleTasks();
-            await this.kaggleBackend.reconcileDanglingTasks();
+            this.kaggleBackend.reconcileDanglingTasks().catch(err => console.warn('[DO] Background Kaggle reconciliation warning:', err));
         }
         catch (err) {
             console.error('Failed to hydrate durable task state:', err);
@@ -1227,6 +1227,9 @@ class GatewayDurableObject {
                             break;
                         case 'kaggle_workspace_file':
                             result = await this.mcpHandlers.handleKaggleWorkspaceFile(args, caller);
+                            break;
+                        case 'kaggle_dataset_file':
+                            result = await this.mcpHandlers.handleKaggleDatasetFile(args, caller);
                             break;
                         case 'kaggle_workspace_continue':
                             result = await this.mcpHandlers.handleKaggleWorkspaceContinue(args, caller);
