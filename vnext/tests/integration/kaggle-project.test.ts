@@ -1450,25 +1450,285 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.deepStrictEqual(task?.payload?.modelDataSources, targetModels);
   });
 
-  // TEST 9 — canonical MCP schema exposure
-  await runTest('Restore Test 9: getCanonicalToolsList() exposes acknowledgeUnobservedBrowserDraft for kaggle_project_restore', () => {
+  // RESTORE CONTRACT TEST 1 & 2 — canonical schema exposes dryRun, allowKernelTypeChange, kernelTypeChangeReason
+  await runTest('Restore Contract Test 1 & 2: getCanonicalToolsList() exposes dryRun, allowKernelTypeChange, kernelTypeChangeReason', () => {
     const tools = getCanonicalToolsList();
     const restoreTool = tools.find(t => t.name === 'kaggle_project_restore');
     assert.ok(restoreTool, 'kaggle_project_restore tool must exist');
 
     const schema = restoreTool.inputSchema as any;
-    assert.ok(schema.properties.acknowledgeUnobservedBrowserDraft, 'acknowledgeUnobservedBrowserDraft property must exist in inputSchema');
+    assert.ok(schema.properties.acknowledgeUnobservedBrowserDraft, 'acknowledgeUnobservedBrowserDraft property must exist');
     assert.strictEqual(schema.properties.acknowledgeUnobservedBrowserDraft.type, 'boolean');
+
+    assert.ok(schema.properties.dryRun, 'dryRun property must exist');
+    assert.strictEqual(schema.properties.dryRun.type, 'boolean');
+
+    assert.ok(schema.properties.allowKernelTypeChange, 'allowKernelTypeChange property must exist');
+    assert.strictEqual(schema.properties.allowKernelTypeChange.type, 'boolean');
+
+    assert.ok(schema.properties.kernelTypeChangeReason, 'kernelTypeChangeReason property must exist');
+    assert.strictEqual(schema.properties.kernelTypeChangeReason.type, 'string');
+
     assert.strictEqual(schema.additionalProperties, false);
-    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'), 'acknowledgeUnobservedBrowserDraft must NOT be required');
+    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'));
+    assert.ok(!schema.required.includes('dryRun'));
+    assert.ok(!schema.required.includes('allowKernelTypeChange'));
+    assert.ok(!schema.required.includes('kernelTypeChangeReason'));
   });
 
-  // TEST 10 — KAGGLE_PROJECT_RESTORE_SCHEMA direct definition
-  await runTest('Restore Test 10: KAGGLE_PROJECT_RESTORE_SCHEMA defines optional acknowledgeUnobservedBrowserDraft', () => {
+  // RESTORE CONTRACT TEST 3 & 4 — dryRun works with fully valid MCP shape and does NOT require browser draft ACK
+  await runTest('Restore Contract Test 3 & 4: dryRun=true succeeds with valid MCP shape without browser draft ACK and 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    const dryRes = await tHandlers.handleKaggleProjectRestore({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedCurrentFingerprint: currentFp,
+      source: validRestoreNb,
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      dryRun: true,
+      reason: 'Valid dry run without draft ACK'
+    }, submitAuth);
+
+    assert.strictEqual(dryRes.dryRun, true);
+    assert.strictEqual(dryRes.writeAllowed, true);
+    assert.strictEqual(dryRes.sourceValidation, 'VALID');
+    assert.strictEqual(pushCount, 0, 'Zero Kaggle pushes on dryRun');
+  });
+
+  // RESTORE CONTRACT TEST 5 — kernel type change without authorization is rejected
+  await runTest('Restore Contract Test 5: Kernel type change without allowKernelTypeChange is rejected with 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedCurrentFingerprint: currentFp,
+        source: 'print("New script")',
+        sourceSha256: crypto.createHash('sha256').update('print("New script")').digest('hex'),
+        kernelType: 'script',
+        acknowledgeUnobservedBrowserDraft: true,
+        reason: 'Attempting kernel type change without authorization'
+      }, submitAuth),
+      /KAGGLE_KERNEL_TYPE_CHANGE_FORBIDDEN/
+    );
+    assert.strictEqual(pushCount, 0, 'Zero pushes on rejected kernel type change');
+  });
+
+  // RESTORE CONTRACT TEST 6 — kernel type change with true but missing reason rejected
+  await runTest('Restore Contract Test 6: Kernel type change with allowKernelTypeChange=true but missing reason is rejected', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedCurrentFingerprint: currentFp,
+        source: 'print("New script")',
+        sourceSha256: crypto.createHash('sha256').update('print("New script")').digest('hex'),
+        kernelType: 'script',
+        allowKernelTypeChange: true,
+        kernelTypeChangeReason: '   ',
+        acknowledgeUnobservedBrowserDraft: true,
+        reason: 'Attempting kernel type change with whitespace reason'
+      }, submitAuth),
+      /KAGGLE_KERNEL_TYPE_CHANGE_FORBIDDEN/
+    );
+    assert.strictEqual(pushCount, 0, 'Zero pushes on rejected kernel type change');
+  });
+
+  // RESTORE CONTRACT TEST 7 — explicitly authorized kernel type change succeeds
+  await runTest('Restore Contract Test 7: Explicitly authorized kernel type change with reason and ACK succeeds', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 2 }; }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    const res = await tHandlers.handleKaggleProjectRestore({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedCurrentFingerprint: currentFp,
+      source: 'print("New script")',
+      sourceSha256: crypto.createHash('sha256').update('print("New script")').digest('hex'),
+      kernelType: 'script',
+      allowKernelTypeChange: true,
+      kernelTypeChangeReason: 'Authorized architecture migration from notebook to script',
+      acknowledgeUnobservedBrowserDraft: true,
+      reason: 'Migrate to script execution'
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    assert.strictEqual(pushCount, 1, 'Exactly 1 push on authorized kernel type change');
+  });
+
+  // RESTORE CONTRACT TEST 8 — ACK cannot replace kernel type authorization
+  await runTest('Restore Contract Test 8: Browser draft ACK=true cannot replace allowKernelTypeChange=true', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedCurrentFingerprint: currentFp,
+        source: 'print("New script")',
+        sourceSha256: crypto.createHash('sha256').update('print("New script")').digest('hex'),
+        kernelType: 'script',
+        allowKernelTypeChange: false,
+        acknowledgeUnobservedBrowserDraft: true,
+        reason: 'Attempting to use draft ACK to bypass kernel type change guard'
+      }, submitAuth),
+      /KAGGLE_KERNEL_TYPE_CHANGE_FORBIDDEN/
+    );
+    assert.strictEqual(pushCount, 0);
+  });
+
+  // RESTORE CONTRACT TEST 9 — kernel authorization cannot replace browser ACK
+  await runTest('Restore Contract Test 9: allowKernelTypeChange=true cannot replace browser draft ACK', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectRestore({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedCurrentFingerprint: currentFp,
+        source: 'print("New script")',
+        sourceSha256: crypto.createHash('sha256').update('print("New script")').digest('hex'),
+        kernelType: 'script',
+        allowKernelTypeChange: true,
+        kernelTypeChangeReason: 'Authorized migration',
+        reason: 'Attempting real restore without draft ACK'
+      }, submitAuth),
+      /KAGGLE_BROWSER_DRAFT_STATE_UNOBSERVABLE/
+    );
+    assert.strictEqual(pushCount, 0);
+  });
+
+  // RESTORE CONTRACT TEST 10 — KAGGLE_PROJECT_RESTORE_SCHEMA direct definition
+  await runTest('Restore Contract Test 10: KAGGLE_PROJECT_RESTORE_SCHEMA defines optional dryRun, allowKernelTypeChange, kernelTypeChangeReason', () => {
     const schema = KAGGLE_PROJECT_RESTORE_SCHEMA as any;
     assert.strictEqual(schema.type, 'object');
-    assert.strictEqual(schema.properties.acknowledgeUnobservedBrowserDraft.type, 'boolean');
-    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'));
+    assert.strictEqual(schema.properties.dryRun.type, 'boolean');
+    assert.strictEqual(schema.properties.allowKernelTypeChange.type, 'boolean');
+    assert.strictEqual(schema.properties.kernelTypeChangeReason.type, 'string');
+    assert.ok(!schema.required.includes('dryRun'));
+    assert.ok(!schema.required.includes('allowKernelTypeChange'));
+    assert.ok(!schema.required.includes('kernelTypeChangeReason'));
     assert.strictEqual(schema.additionalProperties, false);
   });
 
@@ -1537,8 +1797,8 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(pushCount, 0, 'No Kaggle push occurred');
   });
 
-  // CONTINUE TEST 3 — ACK = true
-  await runTest('Continue Test 3: Explicit acknowledgeUnobservedBrowserDraft=true allows valid continue to proceed', async () => {
+  // CONTINUE TEST 3 — ACK = true with realistic expectedProjectFingerprint
+  await runTest('Continue Test 3: Explicit acknowledgeUnobservedBrowserDraft=true with realistic fingerprint allows valid continue to proceed', async () => {
     let pushCount = 0;
     const testKClient: any = {
       getUsername: () => 'testuser',
@@ -1560,12 +1820,22 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
     const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
 
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
     const res = await tHandlers.handleKaggleProjectContinue({
       kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: currentFp,
       acknowledgeUnobservedBrowserDraft: true,
       mutation: {
         type: 'append_notebook_cells',
-        cells: [{ cellType: 'code', source: 'print("Valid continuation with ack")' }]
+        cells: [{ cellType: 'code', source: 'print("Valid continuation with ack and realistic fingerprint")' }]
       }
     }, submitAuth);
 
@@ -1606,7 +1876,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(pushCount, 0, 'No Kaggle push occurred');
   });
 
-  // CONTINUE TEST 5 — ACK not forwarded in task payload
+  // CONTINUE TEST 5 — ACK not forwarded in task payload with realistic expectedProjectFingerprint
   await runTest('Continue Test 5: acknowledgeUnobservedBrowserDraft is NOT forwarded to Kaggle task payload on continue', async () => {
     let capturedPayload: any = null;
     const testKClient: any = {
@@ -1632,8 +1902,18 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
     const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
 
+    const currentFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
     const res = await tHandlers.handleKaggleProjectContinue({
       kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: currentFp,
       acknowledgeUnobservedBrowserDraft: true,
       mutation: {
         type: 'append_notebook_cells',

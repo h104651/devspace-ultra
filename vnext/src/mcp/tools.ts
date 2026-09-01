@@ -163,6 +163,19 @@ export const KAGGLE_PROJECT_RESTORE_SCHEMA = {
       type: 'boolean',
       description: 'Explicit acknowledgement that a Kaggle browser draft may exist but is not observable through the available API. When true, the caller intentionally authorizes restore using the persisted/trusted source despite the unobserved browser-draft risk. This acknowledgement applies only to DevSpace Ultra safety checks and MUST NOT be forwarded to Kaggle.'
     },
+    dryRun: {
+      type: 'boolean',
+      description: 'Validate the restore request, source integrity, project settings, kernel type compatibility, and optimistic concurrency state without submitting any Kaggle mutation.'
+    },
+    allowKernelTypeChange: {
+      type: 'boolean',
+      description: 'Explicitly authorize changing the Kaggle project kernel type during restore. This does not bypass any other restore safety checks.'
+    },
+    kernelTypeChangeReason: {
+      type: 'string',
+      minLength: 1,
+      description: 'Required non-empty justification when allowKernelTypeChange is true and the requested kernelType differs from the current Kaggle project kernel type.'
+    },
     reason: { type: 'string', description: 'Explicit reason for restore operation' },
     clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
   },
