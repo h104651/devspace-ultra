@@ -1927,7 +1927,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
   });
 
   // CONTINUE TEST 6 — canonical MCP schema exposure
-  await runTest('Continue Test 6: getCanonicalToolsList() exposes acknowledgeUnobservedBrowserDraft for kaggle_project_continue', () => {
+  await runTest('Continue Test 6: getCanonicalToolsList() exposes acknowledgeUnobservedBrowserDraft and structured settings for kaggle_project_continue', () => {
     const tools = getCanonicalToolsList();
     const continueTool = tools.find(t => t.name === 'kaggle_project_continue');
     assert.ok(continueTool, 'kaggle_project_continue tool must exist');
@@ -1935,20 +1935,269 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     const schema = continueTool.inputSchema as any;
     assert.ok(schema.properties.acknowledgeUnobservedBrowserDraft, 'acknowledgeUnobservedBrowserDraft property must exist in inputSchema');
     assert.strictEqual(schema.properties.acknowledgeUnobservedBrowserDraft.type, 'boolean');
+
+    assert.ok(schema.properties.settings, 'settings property must exist in inputSchema');
+    assert.strictEqual(schema.properties.settings.type, 'object');
+    assert.strictEqual(schema.properties.settings.additionalProperties, false);
+    assert.ok(schema.properties.settings.properties.kernelType, 'settings.kernelType must exist');
+    assert.ok(schema.properties.settings.properties.language, 'settings.language must exist');
+    assert.ok(schema.properties.settings.properties.isPrivate, 'settings.isPrivate must exist');
+    assert.ok(schema.properties.settings.properties.enableGpu, 'settings.enableGpu must exist');
+    assert.ok(schema.properties.settings.properties.enableInternet, 'settings.enableInternet must exist');
+
     assert.strictEqual(schema.additionalProperties, false);
-    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'), 'acknowledgeUnobservedBrowserDraft must NOT be required');
+    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'));
+    assert.ok(!schema.required.includes('settings'));
   });
 
   // CONTINUE TEST 7 — KAGGLE_PROJECT_CONTINUE_SCHEMA direct definition
-  await runTest('Continue Test 7: KAGGLE_PROJECT_CONTINUE_SCHEMA defines optional acknowledgeUnobservedBrowserDraft with additionalProperties: false', () => {
+  await runTest('Continue Test 7: KAGGLE_PROJECT_CONTINUE_SCHEMA defines optional settings with additionalProperties: false', () => {
     const schema = KAGGLE_PROJECT_CONTINUE_SCHEMA as any;
     assert.strictEqual(schema.type, 'object');
-    assert.strictEqual(schema.properties.acknowledgeUnobservedBrowserDraft.type, 'boolean');
-    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'));
+    assert.strictEqual(schema.properties.settings.type, 'object');
+    assert.strictEqual(schema.properties.settings.additionalProperties, false);
+    assert.ok(!schema.required.includes('settings'));
     assert.strictEqual(schema.additionalProperties, false);
+  });
+
+  // CONTINUE TEST 8 — Fail-closed rejection when metadata is missing and settings omitted
+  await runTest('Continue Test 8: Fail-closed with KAGGLE_PROJECT_SETTINGS_UNKNOWN when metadata missing and settings omitted', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true }, // missing enableGpu & enableInternet
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Missing settings")' }]
+        }
+      }, submitAuth),
+      /KAGGLE_PROJECT_SETTINGS_UNKNOWN/
+    );
+    assert.strictEqual(pushCount, 0, 'No push on missing settings');
+  });
+
+  // CONTINUE TEST 9 — Caller recovers missing metadata through structured settings
+  await runTest('Continue Test 9: Caller recovers missing metadata via settings with exact 1 push', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true }, // missing enableGpu & enableInternet
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 3 }; }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const resolvedFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: false,
+      enableInternet: true
+    });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: resolvedFp,
+      settings: {
+        enableGpu: false,
+        enableInternet: true
+      },
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Recovered via settings")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    assert.strictEqual(pushCount, 1, 'Exactly 1 push on recovered settings continue');
+  });
+
+  // CONTINUE TEST 10 — Partial settings fallback: only missing field provided
+  await runTest('Continue Test 10: Partial settings fallback succeeds while keeping current metadata for existing fields', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableInternet: true }, // only missing enableGpu
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 4 }; }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const resolvedFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true
+    });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: resolvedFp,
+      settings: {
+        enableGpu: true
+      },
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Partial settings fallback")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    assert.strictEqual(pushCount, 1);
+  });
+
+  // CONTINUE TEST 11 — Resolved settings participate in optimistic concurrency fingerprint
+  await runTest('Continue Test 11: Resolved settings participate in fingerprint and conflict check fails on mismatch', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableInternet: true }, // missing enableGpu
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    // Call with incorrect expected fingerprint (e.g. calculated with enableGpu: false when settings has enableGpu: true)
+    const wrongFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: false,
+      enableInternet: true
+    });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedProjectFingerprint: wrongFp,
+        settings: {
+          enableGpu: true
+        },
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Fingerprint mismatch")' }]
+        }
+      }, submitAuth),
+      /KAGGLE_PROJECT_CONFLICT/
+    );
+    assert.strictEqual(pushCount, 0);
+  });
+
+  // CONTINUE TEST 12 — Raw settings object is NOT forwarded to Kaggle task payload
+  await runTest('Continue Test 12: Raw settings object is NOT forwarded to task payload while resolved settings propagate', async () => {
+    let capturedPayload: any = null;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true }, // missing enableGpu, enableInternet
+        source: validRestoreNb
+      }),
+      pushKernel: async (payloadOrDir: any, maybePayload?: any) => {
+        capturedPayload = maybePayload || payloadOrDir;
+        return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 5 };
+      }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const resolvedFp = computeProjectFingerprint({
+      sourceSha256: validRestoreSha,
+      kernelType: 'notebook',
+      language: 'python',
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: false
+    });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: resolvedFp,
+      settings: {
+        enableGpu: true,
+        enableInternet: false
+      },
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Settings not forwarded raw")' }]
+      }
+    }, submitAuth);
+
+    const task = tStore.getTask(res.taskId);
+    assert.strictEqual(task?.payload?.settings, undefined, 'Task payload must not contain raw settings');
+    assert.strictEqual(task?.payload?.enableGpu, true, 'Task payload must contain resolved enableGpu');
+    assert.strictEqual(task?.payload?.enableInternet, false, 'Task payload must contain resolved enableInternet');
+    assert.strictEqual(capturedPayload?.settings, undefined, 'Kaggle submission payload must not contain raw settings');
+    assert.strictEqual(capturedPayload?.enableGpu, true, 'Kaggle submission payload must contain resolved enableGpu');
+    assert.strictEqual(capturedPayload?.enableInternet, false, 'Kaggle submission payload must contain resolved enableInternet');
   });
 
   return { passed, failed };
 }
+
 
 

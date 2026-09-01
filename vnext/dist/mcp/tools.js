@@ -128,6 +128,30 @@ exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = {
             required: ['type'],
             additionalProperties: false
         },
+        settings: {
+            type: 'object',
+            properties: {
+                kernelType: {
+                    type: 'string',
+                    enum: ['notebook', 'script']
+                },
+                language: {
+                    type: 'string',
+                    enum: ['python', 'r']
+                },
+                isPrivate: {
+                    type: 'boolean'
+                },
+                enableGpu: {
+                    type: 'boolean'
+                },
+                enableInternet: {
+                    type: 'boolean'
+                }
+            },
+            additionalProperties: false,
+            description: 'Explicit authoritative fallback settings used only when required Kaggle project metadata is unavailable or incomplete.'
+        },
         acknowledgeUnobservedBrowserDraft: {
             type: 'boolean',
             description: 'Explicit acknowledgement that a Kaggle browser draft may exist but is not observable through the available API. When true, the caller intentionally authorizes continuation using the persisted project source despite the unobserved browser-draft risk. This acknowledgement applies only to DevSpace Ultra safety checks and MUST NOT be forwarded to Kaggle.'
