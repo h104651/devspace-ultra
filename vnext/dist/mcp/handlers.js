@@ -241,21 +241,44 @@ class McpHandlers {
             kernelSources: metadata.kernelDataSources,
             modelSources: metadata.modelDataSources
         });
+        const kernelTypeKnown = typeof metadata.kernelType === 'string' && metadata.kernelType.length > 0;
+        const languageKnown = typeof metadata.language === 'string' && metadata.language.length > 0;
+        const privacyKnown = typeof metadata.isPrivate === 'boolean';
+        const enableGpuKnown = typeof metadata.enableGpu === 'boolean';
+        const enableInternetKnown = typeof metadata.enableInternet === 'boolean';
+        const unknownSettings = [];
+        if (!kernelTypeKnown)
+            unknownSettings.push('kernelType');
+        if (!languageKnown)
+            unknownSettings.push('language');
+        if (!privacyKnown)
+            unknownSettings.push('isPrivate');
+        if (!enableGpuKnown)
+            unknownSettings.push('enableGpu');
+        if (!enableInternetKnown)
+            unknownSettings.push('enableInternet');
+        const settingsKnown = unknownSettings.length === 0;
         return {
             kernelRef: ref,
             title: metadata.title || slug,
             owner,
             slug,
             kernelType: metadata.kernelType || 'script',
+            kernelTypeKnown,
             language: metadata.language || 'python',
+            languageKnown,
             isPrivate: typeof metadata.isPrivate === 'boolean' ? metadata.isPrivate : 'unknown',
-            privacyKnown: typeof metadata.isPrivate === 'boolean',
+            privacyKnown,
             privacySource: metadata.isPrivate !== undefined ? 'kaggle_metadata' : 'unknown',
             persistedSourceVisibility: 'AVAILABLE',
             browserDraftVisibility: 'UNAVAILABLE',
             externalDraftConflictRisk: true,
             enableGpu: !!metadata.enableGpu,
+            enableGpuKnown,
             enableInternet: metadata.enableInternet !== false,
+            enableInternetKnown,
+            settingsKnown,
+            unknownSettings,
             machineShape: metadata.machineShape,
             datasetSources: metadata.datasetDataSources || [],
             competitionSources: metadata.competitionDataSources || [],
@@ -578,26 +601,26 @@ class McpHandlers {
                 unknownSettings
             }));
         }
-        const currentFingerprint = (0, project_manager_1.computeProjectFingerprint)({
+        const observedCurrentFingerprint = (0, project_manager_1.computeProjectFingerprint)({
             sourceSha256: currentSourceSha256,
-            kernelType: currentKernelType,
-            language: currentLanguage,
-            isPrivate: currentIsPrivate,
-            enableGpu: currentEnableGpu,
-            enableInternet: currentEnableInternet,
+            kernelType: current.metadata.kernelType,
+            language: current.metadata.language,
+            isPrivate: current.metadata.isPrivate,
+            enableGpu: current.metadata.enableGpu,
+            enableInternet: current.metadata.enableInternet,
             machineShape: current.metadata.machineShape,
             datasetSources: current.metadata.datasetDataSources,
             competitionSources: current.metadata.competitionDataSources,
             kernelSources: current.metadata.kernelDataSources,
             modelSources: current.metadata.modelDataSources
         });
-        // Conflict check (optimistic concurrency guard)
-        if (args.expectedProjectFingerprint && args.expectedProjectFingerprint !== currentFingerprint) {
+        // Conflict check (optimistic concurrency guard against observed remote state)
+        if (args.expectedProjectFingerprint && args.expectedProjectFingerprint !== observedCurrentFingerprint) {
             throw new Error(JSON.stringify({
                 error: 'KAGGLE_PROJECT_CONFLICT',
                 message: 'Project source or settings have changed since last inspection',
                 expectedFingerprint: args.expectedProjectFingerprint,
-                currentFingerprint
+                currentFingerprint: observedCurrentFingerprint
             }));
         }
         // Fail-Safe Suspicious State Guard: reject if state is inconsistent or corrupted
@@ -694,7 +717,7 @@ class McpHandlers {
             status: result.status,
             createsNewKaggleVersion: true,
             createdVersionNumber: result.versionNumber || task?.externalRun?.versionNumber || 'unknown',
-            previousProjectFingerprint: currentFingerprint,
+            previousProjectFingerprint: observedCurrentFingerprint,
             submittedSourceSha256: crypto.createHash('sha256').update(newSource).digest('hex'),
             preWriteSnapshotId,
             postWriteSnapshotId,

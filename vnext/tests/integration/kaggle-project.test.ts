@@ -1997,13 +1997,13 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(pushCount, 0, 'No push on missing settings');
   });
 
-  // CONTINUE TEST 9 — Caller recovers missing metadata through structured settings
-  await runTest('Continue Test 9: Caller recovers missing metadata via settings with exact 1 push', async () => {
+  // CONTINUE TEST 9 — Real GET -> CONTINUE workflow with missing metadata recovery using exact get.projectFingerprint
+  await runTest('Continue Test 9: Caller uses exact get.projectFingerprint directly with settings recovery and succeeds with 1 push', async () => {
     let pushCount = 0;
     const testKClient: any = {
       getUsername: () => 'testuser',
       pullProject: async () => ({
-        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true }, // missing enableGpu & enableInternet
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableInternet: true }, // enableGpu is MISSING
         source: validRestoreNb
       }),
       pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 3 }; }
@@ -2020,40 +2020,38 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
     const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
 
-    const resolvedFp = computeProjectFingerprint({
-      sourceSha256: validRestoreSha,
-      kernelType: 'notebook',
-      language: 'python',
-      isPrivate: true,
-      enableGpu: false,
-      enableInternet: true
-    });
+    // Step 1: kaggle_project_get returns observed fingerprint
+    const getRes = await tHandlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, submitAuth);
+    assert.strictEqual(getRes.enableGpuKnown, false);
+    assert.strictEqual(getRes.settingsKnown, false);
+    assert.deepStrictEqual(getRes.unknownSettings, ['enableGpu']);
 
+    // Step 2: kaggle_project_continue uses exact get.projectFingerprint
     const res = await tHandlers.handleKaggleProjectContinue({
       kernelRef: 'testuser/astor-tuneup',
-      expectedProjectFingerprint: resolvedFp,
+      expectedProjectFingerprint: getRes.projectFingerprint,
       settings: {
-        enableGpu: false,
-        enableInternet: true
+        enableGpu: true
       },
       acknowledgeUnobservedBrowserDraft: true,
       mutation: {
         type: 'append_notebook_cells',
-        cells: [{ cellType: 'code', source: 'print("Recovered via settings")' }]
+        cells: [{ cellType: 'code', source: 'print("Recovered via get fingerprint")' }]
       }
     }, submitAuth);
 
     assert.strictEqual(res.status, 'running');
+    assert.strictEqual(res.previousProjectFingerprint, getRes.projectFingerprint, 'previousProjectFingerprint must match get projectFingerprint');
     assert.strictEqual(pushCount, 1, 'Exactly 1 push on recovered settings continue');
   });
 
-  // CONTINUE TEST 10 — Partial settings fallback: only missing field provided
-  await runTest('Continue Test 10: Partial settings fallback succeeds while keeping current metadata for existing fields', async () => {
+  // CONTINUE TEST 10 — Multiple missing settings recovery using exact GET fingerprint
+  await runTest('Continue Test 10: Multiple missing settings recovery uses exact GET projectFingerprint and succeeds', async () => {
     let pushCount = 0;
     const testKClient: any = {
       getUsername: () => 'testuser',
       pullProject: async () => ({
-        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableInternet: true }, // only missing enableGpu
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true }, // missing enableGpu & enableInternet
         source: validRestoreNb
       }),
       pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 4 }; }
@@ -2070,72 +2068,65 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
     const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
 
-    const resolvedFp = computeProjectFingerprint({
-      sourceSha256: validRestoreSha,
-      kernelType: 'notebook',
-      language: 'python',
-      isPrivate: true,
-      enableGpu: true,
-      enableInternet: true
-    });
+    const getRes = await tHandlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, submitAuth);
 
     const res = await tHandlers.handleKaggleProjectContinue({
       kernelRef: 'testuser/astor-tuneup',
-      expectedProjectFingerprint: resolvedFp,
+      expectedProjectFingerprint: getRes.projectFingerprint,
       settings: {
-        enableGpu: true
+        enableGpu: true,
+        enableInternet: false
       },
       acknowledgeUnobservedBrowserDraft: true,
       mutation: {
         type: 'append_notebook_cells',
-        cells: [{ cellType: 'code', source: 'print("Partial settings fallback")' }]
+        cells: [{ cellType: 'code', source: 'print("Multiple missing recovery")' }]
       }
     }, submitAuth);
 
     assert.strictEqual(res.status, 'running');
+    assert.strictEqual(res.previousProjectFingerprint, getRes.projectFingerprint);
     assert.strictEqual(pushCount, 1);
   });
 
-  // CONTINUE TEST 11 — Resolved settings participate in optimistic concurrency fingerprint
-  await runTest('Continue Test 11: Resolved settings participate in fingerprint and conflict check fails on mismatch', async () => {
+  // CONTINUE TEST 11 — Stale GET fingerprint is rejected with KAGGLE_PROJECT_CONFLICT
+  await runTest('Continue Test 11: Stale GET fingerprint after remote state change is rejected with KAGGLE_PROJECT_CONFLICT', async () => {
     let pushCount = 0;
+    let remoteSource = validRestoreNb;
     const testKClient: any = {
       getUsername: () => 'testuser',
       pullProject: async () => ({
-        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableInternet: true }, // missing enableGpu
-        source: validRestoreNb
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableInternet: true },
+        source: remoteSource
       }),
       pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
     };
     const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
     const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
 
-    // Call with incorrect expected fingerprint (e.g. calculated with enableGpu: false when settings has enableGpu: true)
-    const wrongFp = computeProjectFingerprint({
-      sourceSha256: validRestoreSha,
-      kernelType: 'notebook',
-      language: 'python',
-      isPrivate: true,
-      enableGpu: false,
-      enableInternet: true
-    });
+    // Step 1: GET state A
+    const getRes = await tHandlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, submitAuth);
 
+    // Step 2: Remote changes to state B (e.g. new source)
+    remoteSource = '{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":2}';
+
+    // Step 3: Continue with old GET fingerprint
     await assert.rejects(
       async () => tHandlers.handleKaggleProjectContinue({
         kernelRef: 'testuser/astor-tuneup',
-        expectedProjectFingerprint: wrongFp,
+        expectedProjectFingerprint: getRes.projectFingerprint,
         settings: {
           enableGpu: true
         },
         acknowledgeUnobservedBrowserDraft: true,
         mutation: {
           type: 'append_notebook_cells',
-          cells: [{ cellType: 'code', source: 'print("Fingerprint mismatch")' }]
+          cells: [{ cellType: 'code', source: 'print("Conflict test")' }]
         }
       }, submitAuth),
       /KAGGLE_PROJECT_CONFLICT/
     );
-    assert.strictEqual(pushCount, 0);
+    assert.strictEqual(pushCount, 0, 'No push on stale GET fingerprint');
   });
 
   // CONTINUE TEST 12 — Raw settings object is NOT forwarded to Kaggle task payload
@@ -2164,18 +2155,11 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     );
     const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
 
-    const resolvedFp = computeProjectFingerprint({
-      sourceSha256: validRestoreSha,
-      kernelType: 'notebook',
-      language: 'python',
-      isPrivate: true,
-      enableGpu: true,
-      enableInternet: false
-    });
+    const getRes = await tHandlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, submitAuth);
 
     const res = await tHandlers.handleKaggleProjectContinue({
       kernelRef: 'testuser/astor-tuneup',
-      expectedProjectFingerprint: resolvedFp,
+      expectedProjectFingerprint: getRes.projectFingerprint,
       settings: {
         enableGpu: true,
         enableInternet: false
@@ -2678,6 +2662,66 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       /KAGGLE_PROJECT_SETTINGS_UNSUPPORTED/
     );
     assert.strictEqual(pushCount, 0);
+  });
+
+  // CONTINUE TEST 26 — kaggle_project_get returns explicit knownness observability fields
+  await runTest('Continue Test 26: kaggle_project_get returns explicit knownness observability fields', async () => {
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true }, // enableGpu & enableInternet missing
+        source: validRestoreNb
+      })
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    const getRes = await tHandlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, submitAuth);
+    assert.strictEqual(getRes.kernelTypeKnown, true);
+    assert.strictEqual(getRes.languageKnown, true);
+    assert.strictEqual(getRes.privacyKnown, true);
+    assert.strictEqual(getRes.enableGpuKnown, false);
+    assert.strictEqual(getRes.enableInternetKnown, false);
+    assert.strictEqual(getRes.settingsKnown, false);
+    assert.deepStrictEqual(getRes.unknownSettings, ['enableGpu', 'enableInternet']);
+  });
+
+  // CONTINUE TEST 27 — previousProjectFingerprint equals get.projectFingerprint across complete roundtrip
+  await runTest('Continue Test 27: previousProjectFingerprint in continue result matches get.projectFingerprint exactly', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: false, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 10 }; }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const getRes = await tHandlers.handleKaggleProjectGet({ kernelRef: 'testuser/astor-tuneup' }, submitAuth);
+    const continueRes = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      expectedProjectFingerprint: getRes.projectFingerprint,
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Roundtrip fingerprint check")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(continueRes.previousProjectFingerprint, getRes.projectFingerprint);
+    assert.strictEqual(pushCount, 1);
   });
 
   return { passed, failed };
