@@ -14,7 +14,7 @@ import { KaggleBackend } from '../../src/kaggle/backend';
 import { TaskRouter } from '../../src/gateway/task-router';
 import { McpHandlers } from '../../src/mcp/handlers';
 import { KillSwitch } from '../../src/security/kill-switch';
-import { getCanonicalToolsList, KAGGLE_PROJECT_RESTORE_SCHEMA } from '../../src/mcp/tools';
+import { getCanonicalToolsList, KAGGLE_PROJECT_RESTORE_SCHEMA, KAGGLE_PROJECT_CONTINUE_SCHEMA } from '../../src/mcp/tools';
 
 export async function runKaggleProjectTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0;
@@ -1391,7 +1391,7 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
   });
 
   // TEST 8 — metadata preservation with ACK
-  await runTest('Restore Test 8: Metadata (machineShape, GPU, Internet, datasets) properly propagates with ACK', async () => {
+  await runTest('Restore Test 8: Metadata (machineShape, GPU, Internet, datasets, competitions, kernels, models) properly propagates with ACK', async () => {
     let capturedPayload: any = null;
     const testKClient: any = {
       getUsername: () => 'testuser',
@@ -1420,6 +1420,10 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       'astorhsu/astor-tuneup-project',
       'astorhsu/astor-gate2c-9a-miningpool-kaggle-package'
     ];
+    const targetCompetitions = ['titanic', 'house-prices'];
+    const targetKernels = ['owner/helper-kernel-1'];
+    const targetModels = ['owner/transformer-model-v1'];
+
     const res = await tHandlers.handleKaggleProjectRestore({
       kernelRef: 'testuser/astor-tuneup',
       source: validRestoreNb,
@@ -1429,8 +1433,11 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
       enableGpu: true,
       enableInternet: true,
       datasetDataSources: targetDatasets,
+      competitionDataSources: targetCompetitions,
+      kernelDataSources: targetKernels,
+      modelDataSources: targetModels,
       acknowledgeUnobservedBrowserDraft: true,
-      reason: 'Update hardware and datasets'
+      reason: 'Update hardware and all data sources'
     }, submitAuth);
 
     const task = tStore.getTask(res.taskId);
@@ -1438,6 +1445,9 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(task?.payload?.enableGpu, true);
     assert.strictEqual(task?.payload?.enableInternet, true);
     assert.deepStrictEqual(task?.payload?.datasetDataSources, targetDatasets);
+    assert.deepStrictEqual(task?.payload?.competitionDataSources, targetCompetitions);
+    assert.deepStrictEqual(task?.payload?.kernelDataSources, targetKernels);
+    assert.deepStrictEqual(task?.payload?.modelDataSources, targetModels);
   });
 
   // TEST 9 — canonical MCP schema exposure
@@ -1462,6 +1472,203 @@ export async function runKaggleProjectTests(): Promise<{ passed: number; failed:
     assert.strictEqual(schema.additionalProperties, false);
   });
 
+  // ==========================================
+  // KAGGLE_PROJECT_CONTINUE ACKNOWLEDGEMENT & SAFETY SUITE
+  // ==========================================
+
+  // CONTINUE TEST 1 — omitted ACK
+  await runTest('Continue Test 1: Omitted acknowledgeUnobservedBrowserDraft is rejected with 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("No ack")' }]
+        }
+      }, submitAuth),
+      (err: any) => {
+        const str = err.message || '';
+        return str.includes('KAGGLE_BROWSER_DRAFT_STATE_UNOBSERVABLE');
+      }
+    );
+    assert.strictEqual(pushCount, 0, 'No Kaggle push occurred');
+  });
+
+  // CONTINUE TEST 2 — ACK = false
+  await runTest('Continue Test 2: Explicit acknowledgeUnobservedBrowserDraft=false is rejected with 0 pushes', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        acknowledgeUnobservedBrowserDraft: false,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("False ack")' }]
+        }
+      }, submitAuth),
+      (err: any) => {
+        const str = err.message || '';
+        return str.includes('KAGGLE_BROWSER_DRAFT_STATE_UNOBSERVABLE');
+      }
+    );
+    assert.strictEqual(pushCount, 0, 'No Kaggle push occurred');
+  });
+
+  // CONTINUE TEST 3 — ACK = true
+  await runTest('Continue Test 3: Explicit acknowledgeUnobservedBrowserDraft=true allows valid continue to proceed', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 2 }; }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Valid continuation with ack")' }]
+      }
+    }, submitAuth);
+
+    assert.strictEqual(res.status, 'running');
+    assert.strictEqual(res.createsNewKaggleVersion, true);
+    assert.strictEqual(pushCount, 1, 'Exactly 1 Kaggle push occurred');
+  });
+
+  // CONTINUE TEST 4 — ACK cannot bypass fingerprint
+  await runTest('Continue Test 4: ACK=true cannot bypass stale expectedProjectFingerprint', async () => {
+    let pushCount = 0;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async () => { pushCount++; return { success: true, kernelSlug: 'testuser/astor-tuneup' }; }
+    };
+    const tBackend = new KaggleBackend(taskStore, artifactStore, testKClient);
+    const tHandlers = new McpHandlers({ ...gatewayFacade, kaggleBackend: tBackend });
+
+    await assert.rejects(
+      async () => tHandlers.handleKaggleProjectContinue({
+        kernelRef: 'testuser/astor-tuneup',
+        expectedProjectFingerprint: 'invalid-stale-fingerprint-99999',
+        acknowledgeUnobservedBrowserDraft: true,
+        mutation: {
+          type: 'append_notebook_cells',
+          cells: [{ cellType: 'code', source: 'print("Conflict bypass attempt")' }]
+        }
+      }, submitAuth),
+      (err: any) => {
+        const str = err.message || '';
+        return str.includes('KAGGLE_PROJECT_CONFLICT');
+      }
+    );
+    assert.strictEqual(pushCount, 0, 'No Kaggle push occurred');
+  });
+
+  // CONTINUE TEST 5 — ACK not forwarded in task payload
+  await runTest('Continue Test 5: acknowledgeUnobservedBrowserDraft is NOT forwarded to Kaggle task payload on continue', async () => {
+    let capturedPayload: any = null;
+    const testKClient: any = {
+      getUsername: () => 'testuser',
+      pullProject: async () => ({
+        metadata: { kernelType: 'notebook', language: 'python', isPrivate: true, enableGpu: true, enableInternet: true },
+        source: validRestoreNb
+      }),
+      pushKernel: async (payloadOrDir: any, maybePayload?: any) => {
+        capturedPayload = maybePayload || payloadOrDir;
+        return { success: true, kernelSlug: 'testuser/astor-tuneup', versionNumber: 1 };
+      }
+    };
+    const tStore = new TaskStore();
+    const tBackend = new KaggleBackend(tStore, artifactStore, testKClient);
+    const tRouter = new TaskRouter(
+      tStore,
+      idempotencyStore,
+      tBackend,
+      { dispatchTask: () => ({ taskId: 's1' }), listWorkers: () => [] } as any,
+      killSwitch,
+      auditLogger
+    );
+    const tHandlers = new McpHandlers({ ...gatewayFacade, taskRouter: tRouter, taskStore: tStore, kaggleBackend: tBackend });
+
+    const res = await tHandlers.handleKaggleProjectContinue({
+      kernelRef: 'testuser/astor-tuneup',
+      acknowledgeUnobservedBrowserDraft: true,
+      mutation: {
+        type: 'append_notebook_cells',
+        cells: [{ cellType: 'code', source: 'print("Strip test continue")' }]
+      }
+    }, submitAuth);
+
+    const task = tStore.getTask(res.taskId);
+    assert.strictEqual(task?.payload?.acknowledgeUnobservedBrowserDraft, undefined, 'Task payload must not have ack field');
+    assert.strictEqual(capturedPayload?.acknowledgeUnobservedBrowserDraft, undefined, 'Kaggle outgoing payload must not have ack field');
+  });
+
+  // CONTINUE TEST 6 — canonical MCP schema exposure
+  await runTest('Continue Test 6: getCanonicalToolsList() exposes acknowledgeUnobservedBrowserDraft for kaggle_project_continue', () => {
+    const tools = getCanonicalToolsList();
+    const continueTool = tools.find(t => t.name === 'kaggle_project_continue');
+    assert.ok(continueTool, 'kaggle_project_continue tool must exist');
+
+    const schema = continueTool.inputSchema as any;
+    assert.ok(schema.properties.acknowledgeUnobservedBrowserDraft, 'acknowledgeUnobservedBrowserDraft property must exist in inputSchema');
+    assert.strictEqual(schema.properties.acknowledgeUnobservedBrowserDraft.type, 'boolean');
+    assert.strictEqual(schema.additionalProperties, false);
+    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'), 'acknowledgeUnobservedBrowserDraft must NOT be required');
+  });
+
+  // CONTINUE TEST 7 — KAGGLE_PROJECT_CONTINUE_SCHEMA direct definition
+  await runTest('Continue Test 7: KAGGLE_PROJECT_CONTINUE_SCHEMA defines optional acknowledgeUnobservedBrowserDraft with additionalProperties: false', () => {
+    const schema = KAGGLE_PROJECT_CONTINUE_SCHEMA as any;
+    assert.strictEqual(schema.type, 'object');
+    assert.strictEqual(schema.properties.acknowledgeUnobservedBrowserDraft.type, 'boolean');
+    assert.ok(!schema.required.includes('acknowledgeUnobservedBrowserDraft'));
+    assert.strictEqual(schema.additionalProperties, false);
+  });
+
   return { passed, failed };
 }
+
 

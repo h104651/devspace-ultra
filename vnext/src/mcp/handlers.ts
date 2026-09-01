@@ -503,7 +503,7 @@ export class McpHandlers {
     }
 
     // P1-2: Browser draft safety guard
-    if (!args.acknowledgeUnobservedBrowserDraft) {
+    if (args.acknowledgeUnobservedBrowserDraft !== true) {
       throw new Error(
         JSON.stringify({
           error: 'KAGGLE_BROWSER_DRAFT_STATE_UNOBSERVABLE',

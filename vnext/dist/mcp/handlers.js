@@ -469,7 +469,7 @@ class McpHandlers {
             throw new Error(`KAGGLE_PROJECT_WRITE_FORBIDDEN: Cannot modify kernel owned by '${owner}' (authenticated user is '${client.getUsername()}')`);
         }
         // P1-2: Browser draft safety guard
-        if (!args.acknowledgeUnobservedBrowserDraft) {
+        if (args.acknowledgeUnobservedBrowserDraft !== true) {
             throw new Error(JSON.stringify({
                 error: 'KAGGLE_BROWSER_DRAFT_STATE_UNOBSERVABLE',
                 message: 'Kaggle browser Draft state is not observable via public API. Continuing will overwrite remote state with persisted source. Set acknowledgeUnobservedBrowserDraft: true to proceed.',

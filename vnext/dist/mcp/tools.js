@@ -128,6 +128,10 @@ exports.KAGGLE_PROJECT_CONTINUE_SCHEMA = {
             required: ['type'],
             additionalProperties: false
         },
+        acknowledgeUnobservedBrowserDraft: {
+            type: 'boolean',
+            description: 'Explicit acknowledgement that a Kaggle browser draft may exist but is not observable through the available API. When true, the caller intentionally authorizes continuation using the persisted project source despite the unobserved browser-draft risk. This acknowledgement applies only to DevSpace Ultra safety checks and MUST NOT be forwarded to Kaggle.'
+        },
         clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
     },
     required: ['kernelRef', 'expectedProjectFingerprint', 'mutation'],
