@@ -30,7 +30,7 @@ function createContext() {
   };
 }
 
-function modernToolCallRequest(baseUrl: string, token: string): Request {
+function modernToolCallRequest(baseUrl: string, token: string, argumentsValue: any): Request {
   return new Request(`${baseUrl}/mcp`, {
     method: 'POST',
     headers: {
@@ -46,11 +46,7 @@ function modernToolCallRequest(baseUrl: string, token: string): Request {
       method: 'tools/call',
       params: {
         name: 'local_write_file',
-        arguments: {
-          projectId: 'sandbox',
-          relativePath: 'chatgpt-local-write-validation.txt',
-          content: 'local write validation PASS'
-        },
+        arguments: argumentsValue,
         _meta: {
           'io.modelcontextprotocol/protocolVersion': MCP_2026_VERSION,
           'io.modelcontextprotocol/clientCapabilities': { tools: {} }
@@ -63,11 +59,21 @@ function modernToolCallRequest(baseUrl: string, token: string): Request {
 export async function runMcpInsufficientScopeTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0;
   let failed = 0;
+  const baseUrl = 'https://gateway.example.test';
+  const masterSecret = 'mcp-insufficient-scope-test-master-secret-123456';
+  const authManager = new AuthManager(masterSecret);
 
-  try {
-    const baseUrl = 'https://gateway.example.test';
-    const masterSecret = 'mcp-insufficient-scope-test-master-secret-123456';
-    const authManager = new AuthManager(masterSecret);
+  const run = async (name: string, fn: () => Promise<void>) => {
+    try {
+      await fn();
+      passed++;
+    } catch (err: any) {
+      failed++;
+      console.error(`MCP insufficient-scope step-up test failed (${name}):`, err);
+    }
+  };
+
+  await run('missing local:write emits HTTP 403 Bearer insufficient_scope challenge', async () => {
     const token = authManager.generateToken(
       'chatgpt-existing-client',
       'client',
@@ -82,7 +88,11 @@ export async function runMcpInsufficientScopeTests(): Promise<{ passed: number; 
       PUBLIC_BASE_URL: baseUrl
     });
 
-    const response = await gateway.fetch(modernToolCallRequest(baseUrl, token));
+    const response = await gateway.fetch(modernToolCallRequest(baseUrl, token, {
+      projectId: 'sandbox',
+      relativePath: 'chatgpt-local-write-validation.txt',
+      content: 'local write validation PASS'
+    }));
     assert.strictEqual(response.status, 403, 'missing local:write must be an HTTP 403 OAuth scope challenge');
 
     const challenge = response.headers.get('WWW-Authenticate') || '';
@@ -93,12 +103,29 @@ export async function runMcpInsufficientScopeTests(): Promise<{ passed: number; 
       challenge.includes(`resource_metadata="${baseUrl}/.well-known/oauth-protected-resource/mcp"`),
       `challenge must advertise protected-resource metadata: ${challenge}`
     );
+  });
 
-    passed++;
-  } catch (err: any) {
-    failed++;
-    console.error('MCP insufficient-scope step-up test failed:', err);
-  }
+  await run('ordinary non-auth tool failures remain HTTP 200 MCP isError results', async () => {
+    const token = authManager.generateToken(
+      'chatgpt-write-client',
+      'client',
+      ['mcp:access', 'tasks:submit', 'tasks:read', 'local:read', 'local:write', 'local:test'],
+      60 * 60 * 1000,
+      { purpose: 'access_token', resource: `${baseUrl}/mcp`, clientId: 'chatgpt-write-client' }
+    ).token;
+
+    const gateway = new GatewayDurableObject(createContext(), {
+      GATEWAY_DO: {},
+      MASTER_SECRET: masterSecret,
+      PUBLIC_BASE_URL: baseUrl
+    });
+
+    const response = await gateway.fetch(modernToolCallRequest(baseUrl, token, {}));
+    assert.strictEqual(response.status, 200, 'non-auth tool validation errors must remain MCP tool results');
+    assert.strictEqual(response.headers.get('WWW-Authenticate'), null);
+    const body = await response.json() as any;
+    assert.strictEqual(body?.result?.isError, true);
+  });
 
   return { passed, failed };
 }
