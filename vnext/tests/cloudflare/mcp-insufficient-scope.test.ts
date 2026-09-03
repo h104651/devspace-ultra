@@ -157,15 +157,15 @@ export async function runMcpInsufficientScopeTests(): Promise<{ passed: number; 
     for (const name of ['local_write_file', 'local_patch_file', 'local_create_directory']) {
       assert.deepStrictEqual(
         byName(name)?.securitySchemes,
-        [{ type: 'oauth2', scopes: ['tasks:submit', 'local:write'] }],
-        `${name} must advertise tasks:submit + local:write`
+        [{ type: 'oauth2', scopes: ['mcp:access', 'tasks:submit', 'local:write'] }],
+        `${name} must advertise mcp:access + tasks:submit + local:write`
       );
     }
 
     assert.deepStrictEqual(
       byName('local_read_file')?.securitySchemes,
-      [{ type: 'oauth2', scopes: ['tasks:submit', 'local:read'] }],
-      'local_read_file must advertise tasks:submit + local:read'
+      [{ type: 'oauth2', scopes: ['mcp:access', 'tasks:submit', 'local:read'] }],
+      'local_read_file must advertise mcp:access + tasks:submit + local:read'
     );
   });
 
