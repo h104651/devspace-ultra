@@ -1,17 +1,17 @@
 import { GatewayDurableObject as BaseGatewayDurableObject, Env } from './gateway-durable-object';
 
 const LOCAL_TOOL_SECURITY_SCOPES: Record<string, string[]> = {
-  local_project_list: ['tasks:submit', 'local:read'],
-  local_project_status: ['tasks:submit', 'local:read'],
-  local_read_file: ['tasks:submit', 'local:read'],
-  local_list_directory: ['tasks:submit', 'local:read'],
-  local_find_files: ['tasks:submit', 'local:read'],
-  local_search_text: ['tasks:submit', 'local:read'],
-  local_find_repositories: ['tasks:submit', 'local:read'],
-  local_git_status: ['tasks:submit', 'local:read'],
-  local_write_file: ['tasks:submit', 'local:write'],
-  local_patch_file: ['tasks:submit', 'local:write'],
-  local_create_directory: ['tasks:submit', 'local:write']
+  local_project_list: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_project_status: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_read_file: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_list_directory: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_find_files: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_search_text: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_find_repositories: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_git_status: ['mcp:access', 'tasks:submit', 'local:read'],
+  local_write_file: ['mcp:access', 'tasks:submit', 'local:write'],
+  local_patch_file: ['mcp:access', 'tasks:submit', 'local:write'],
+  local_create_directory: ['mcp:access', 'tasks:submit', 'local:write']
 };
 
 function extractMissingScopes(message: string): string[] {
@@ -75,7 +75,7 @@ async function applyMcpOAuthMetadata(request: Request, response: Response): Prom
   }
 
   const headers = new Headers(response.headers);
-  let changed = addToolSecuritySchemes(body);
+  const changed = addToolSecuritySchemes(body);
 
   if (response.status === 200) {
     const message = getMcpToolErrorMessage(body);
