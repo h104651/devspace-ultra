@@ -11,6 +11,7 @@ export class ArtifactStore {
   private baseDir?: string;
   private metadataFile?: string;
   private artifacts: Map<string, ArtifactMetadata> = new Map();
+  private hydratedTaskIds: Set<string> = new Set();
   private maxSizeBytes: number;
   private storageAdapter?: IStorageAdapter;
   private payloadSink?: ArtifactPayloadSink;
@@ -146,10 +147,21 @@ export class ArtifactStore {
 
   public getArtifactMetadata(artifact: string | { id: string }): ArtifactMetadata | undefined {
     const artifactId = typeof artifact === 'string' ? artifact : artifact?.id;
-    return artifactId ? this.artifacts.get(artifactId) : undefined;
+    if (!artifactId) return undefined;
+    const cached = this.artifacts.get(artifactId);
+    if (cached) return cached;
+    const durable = this.storageAdapter?.getArtifactMetadataSync?.(artifactId);
+    if (durable) this.artifacts.set(durable.id, durable);
+    return durable;
   }
 
   public getTaskArtifacts(taskId: string): ArtifactMetadata[] {
+    if (!this.hydratedTaskIds.has(taskId) && this.storageAdapter?.listTaskArtifactsSync) {
+      const durable = this.storageAdapter.listTaskArtifactsSync(taskId);
+      for (const meta of durable) this.artifacts.set(meta.id, meta);
+      this.hydratedTaskIds.add(taskId);
+    }
+
     const list: ArtifactMetadata[] = [];
     for (const art of this.artifacts.values()) {
       if (art.taskId === taskId) list.push(art);
