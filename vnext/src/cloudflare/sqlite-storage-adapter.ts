@@ -54,7 +54,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       );
       CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
       CREATE TABLE IF NOT EXISTS oauth_clients (
-        clientId TEXT PRIMARY KEY, clientSecret TEXT, clientName TEXT, redirectUrisJson TEXT NOT NULL,
+        clientId TEXT PRIMARY KEY, clientSecret TEXT, clientName TEXT NOT NULL, redirectUrisJson TEXT NOT NULL,
         grantTypesJson TEXT NOT NULL, responseTypesJson TEXT NOT NULL, tokenAuthMethod TEXT NOT NULL,
         applicationType TEXT NOT NULL DEFAULT 'web', createdAt INTEGER NOT NULL
       );
@@ -128,13 +128,17 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
   }
 
   async listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number }): Promise<DurableTask[]> {
+    // The no-filter call is the Durable Object cold-start working-set hydration path.
+    // Historical terminal rows are loaded lazily by primary key instead of on every eviction/restart.
+    if (!filter) return this.listActiveTasks();
+
     let query = 'SELECT * FROM tasks WHERE 1=1';
     const params: any[] = [];
-    if (filter?.status) { query += ' AND status = ?'; params.push(filter.status); }
-    if (filter?.backend) { query += ' AND backend = ?'; params.push(filter.backend); }
-    if (filter?.capability) { query += ' AND capability = ?'; params.push(filter.capability); }
+    if (filter.status) { query += ' AND status = ?'; params.push(filter.status); }
+    if (filter.backend) { query += ' AND backend = ?'; params.push(filter.backend); }
+    if (filter.capability) { query += ' AND capability = ?'; params.push(filter.capability); }
     query += ' ORDER BY priority DESC, createdAt DESC';
-    if (filter?.limit) { query += ' LIMIT ?'; params.push(filter.limit); }
+    if (filter.limit) { query += ' LIMIT ?'; params.push(filter.limit); }
     return this.sql.exec(query, ...params).toArray().map(r => this.rowToTask(r));
   }
 
@@ -206,7 +210,11 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     return this.sql.exec('SELECT * FROM artifacts WHERE taskId = ? ORDER BY createdAt ASC', taskId).toArray().map(r => this.rowToArtifact(r));
   }
   async listTaskArtifacts(taskId: string): Promise<ArtifactMetadata[]> { return this.listTaskArtifactsSync(taskId); }
-  async listArtifacts(): Promise<ArtifactMetadata[]> { return this.sql.exec('SELECT * FROM artifacts ORDER BY createdAt DESC').toArray().map(r => this.rowToArtifact(r)); }
+  async listArtifacts(): Promise<ArtifactMetadata[]> {
+    // Cold-start metadata hydration is intentionally lazy. ArtifactStore performs
+    // indexed id/taskId lookups on demand, avoiding a full historical scan here.
+    return [];
+  }
   private rowToArtifact(row: any): ArtifactMetadata {
     return { id: row.id, taskId: row.taskId, name: row.name, type: row.type, sizeBytes: row.sizeBytes, sha256: row.sha256, mimeType: row.mimeType || undefined, preview: row.preview || undefined, createdAt: row.createdAt };
   }
