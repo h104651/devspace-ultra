@@ -107,7 +107,15 @@ export class TaskStore {
   }
 
   public getTask(taskId: string): DurableTask | undefined {
-    return this.tasks.get(taskId);
+    const cached = this.tasks.get(taskId);
+    if (cached) return cached;
+
+    // Cloudflare Durable Object SQLite is synchronously queryable even though the
+    // general adapter contract is async. Use that optional fast path only for a
+    // cache miss so terminal history can stay out of cold-start hydration.
+    const durable = this.storageAdapter?.getTaskSync?.(taskId);
+    if (durable) this.tasks.set(taskId, durable);
+    return durable;
   }
 
   public findByIdempotencyKey(key: string): DurableTask | undefined {
