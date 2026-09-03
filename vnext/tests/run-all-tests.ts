@@ -23,6 +23,7 @@ import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
 import { runChatSwarmBrowserE2ETests } from './cloudflare/chat-swarm-browser-e2e.test';
 import { runChatSwarmStorageEfficiencyTests } from './cloudflare/chat-swarm-storage-efficiency.test';
 import { runColdStartStorageEfficiencyTests } from './cloudflare/cold-start-storage-efficiency.test';
+import { runMcpInsufficientScopeTests } from './cloudflare/mcp-insufficient-scope.test';
 import { runR2CostGuardTests } from './cloudflare/r2-cost-guard.test';
 import { runOAuthTests } from './oauth/oauth.test';
 import { runMcp2026Tests } from './mcp/mcp-2026.test';
@@ -66,6 +67,7 @@ async function main() {
     { name: 'Cloudflare: Browser Swarm E2E & DO Restart', runner: runChatSwarmBrowserE2ETests },
     { name: 'Cloudflare: Chat Swarm Durable Storage Efficiency', runner: runChatSwarmStorageEfficiencyTests },
     { name: 'Cloudflare: Cold-Start Storage Efficiency & Lazy History', runner: runColdStartStorageEfficiencyTests },
+    { name: 'Cloudflare: MCP OAuth Insufficient-Scope Step-Up', runner: runMcpInsufficientScopeTests },
     { name: 'Cloudflare: OAuth 2.1 & Protected Resource Metadata', runner: runOAuthTests },
     { name: 'Security: Zero Trust, Injections, Shell & Rate Limits', runner: runSecurityTests },
     { name: 'Security: Bootstrap Token Security & Redaction', runner: runBootstrapTokenSecurityTests }
