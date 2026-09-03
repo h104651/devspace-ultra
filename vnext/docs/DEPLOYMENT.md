@@ -54,9 +54,32 @@ npx wrangler secret put KAGGLE_API_TOKEN
 
 The Worker has a safe default public base URL for the current deployment. If a different production hostname is used, configure `PUBLIC_BASE_URL` to the exact HTTPS origin and verify all OAuth metadata/resources use the same origin.
 
-## Build, test, dry-run, deploy
+GitHub Actions also requires the repository secret `CLOUDFLARE_API_TOKEN`. The workflow checks that the token exists and that `wrangler whoami` succeeds before any production deployment. The secret value must never be printed.
 
-Run from the `vnext` directory:
+## CI and automatic production deployment
+
+`feature/vnext-remote-gateway` is the current vNext production branch.
+
+A push that changes `vnext/**` or `.github/workflows/vnext-ci.yml` runs the following gated workflow:
+
+1. `npm install --ignore-scripts --no-audit --no-fund`
+2. `npm run build`
+3. `npm test`
+4. `npx wrangler deploy --dry-run`
+5. only if every verification step passes, authenticate to Cloudflare and run `npx wrangler deploy`
+6. run production smoke checks against `https://devspace-ultra-gateway.abdul-hsu.workers.dev`
+
+Pull requests run verification and dry-run only. They never deploy production.
+
+Production deployment must target the existing `devspace-ultra-gateway` configured by `vnext/wrangler.toml`. Routine CI deployment must not create a second Worker, recreate the Durable Object, recreate the R2 bucket, or modify production secrets.
+
+A vNext production-affecting change is **not complete** merely because the source was pushed or CI tests passed. It is complete only after the production deploy job and its smoke checks are green.
+
+The production deployment job is serialized with GitHub Actions concurrency so two vNext deploys cannot race each other.
+
+## Manual build / recovery deployment
+
+Use manual deployment only for recovery, investigation, or when GitHub Actions is unavailable. Run from the `vnext` directory:
 
 ```powershell
 npm install
@@ -66,9 +89,9 @@ npx wrangler deploy --dry-run
 npx wrangler deploy
 ```
 
-Deployment must not proceed if TypeScript or tests fail.
+Deployment must not proceed if TypeScript, tests, or the Wrangler dry-run fail.
 
-The repository CI on `feature/vnext-remote-gateway` must also be green before deployment.
+After a manual deployment, run the same production endpoint checks described below. Do not report the rollout as complete until those checks pass.
 
 ## Production endpoint checks
 
@@ -98,7 +121,11 @@ OAuth discovery must return HTTP 200:
 /.well-known/oauth-protected-resource/mcp
 ```
 
+The protected-resource metadata must advertise the scopes required by the live connector, including `local:read` and `local:write` while local write tools remain supported.
+
 The MCP resource itself must reject an unauthenticated request with HTTP 401 and a `WWW-Authenticate` header pointing at the protected-resource metadata. Do not weaken `/mcp` to anonymous access for smoke testing.
+
+The automatic production workflow verifies all of the checks above after every successful deployment.
 
 ## ChatGPT OAuth connector
 
@@ -120,6 +147,8 @@ After authorization, ChatGPT must successfully discover the tool catalog and cal
 - `kaggle_run`, `kaggle_status`, `kaggle_logs`, `kaggle_result`
 - `remote_task_submit`, `remote_task_status`
 - core `chat_swarm_*` tools
+
+If production OAuth scopes change, an already-connected ChatGPT connector may need OAuth reauthorization before it receives the new scopes.
 
 ## Windows Local Agent
 

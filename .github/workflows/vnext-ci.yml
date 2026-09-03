@@ -1,4 +1,4 @@
-name: vNext CI
+name: vNext CI & Production Deploy
 
 on:
   push:
@@ -12,6 +12,12 @@ on:
       - 'vnext/**'
       - '.github/workflows/vnext-ci.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_ORIGIN: https://devspace-ultra-gateway.abdul-hsu.workers.dev
 
 jobs:
   verify-vnext:
@@ -32,3 +38,98 @@ jobs:
         run: npm test
       - name: Cloudflare deploy dry-run
         run: npx --yes wrangler deploy --dry-run
+
+  deploy-production:
+    name: Deploy Cloudflare production
+    needs: verify-vnext
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/feature/vnext-remote-gateway'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: devspace-ultra-vnext-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: vnext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Install
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Verify Cloudflare credential
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo '::error::CLOUDFLARE_API_TOKEN is not configured in GitHub Actions.'
+            exit 1
+          fi
+          npx --yes wrangler whoami >/dev/null
+      - name: Deploy existing production Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler deploy
+      - name: Production smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          health="$(curl --fail --silent --show-error "$PRODUCTION_ORIGIN/health")"
+          if [ "$health" != '{"ok":true}' ]; then
+            echo "::error::Unexpected /health response: $health"
+            exit 1
+          fi
+
+          for path in \
+            '/.well-known/oauth-authorization-server' \
+            '/.well-known/oauth-protected-resource' \
+            '/.well-known/oauth-protected-resource/mcp'
+          do
+            status="$(curl --silent --show-error --output /tmp/discovery.json --write-out '%{http_code}' "$PRODUCTION_ORIGIN$path")"
+            if [ "$status" != '200' ]; then
+              echo "::error::$path returned HTTP $status"
+              cat /tmp/discovery.json || true
+              exit 1
+            fi
+          done
+
+          curl --fail --silent --show-error \
+            "$PRODUCTION_ORIGIN/.well-known/oauth-protected-resource/mcp" \
+            --output /tmp/protected-resource.json
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const metadata = JSON.parse(fs.readFileSync('/tmp/protected-resource.json', 'utf8'));
+          const scopes = metadata.scopes_supported || [];
+          for (const required of ['local:read', 'local:write']) {
+            if (!scopes.includes(required)) {
+              console.error(`Missing required production OAuth scope: ${required}`);
+              process.exit(1);
+            }
+          }
+          NODE
+
+          headers="$(mktemp)"
+          body="$(mktemp)"
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --dump-header "$headers" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+            "$PRODUCTION_ORIGIN/mcp")"
+
+          if [ "$status" != '401' ]; then
+            echo "::error::Unauthenticated POST /mcp returned HTTP $status instead of 401"
+            cat "$body" || true
+            exit 1
+          fi
+
+          if ! grep -qi '^www-authenticate:.*oauth-protected-resource/mcp' "$headers"; then
+            echo '::error::Unauthenticated POST /mcp is missing the expected WWW-Authenticate resource metadata challenge.'
+            cat "$headers" || true
+            exit 1
+          fi
