@@ -47,14 +47,13 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       );
       CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(taskId);
       CREATE INDEX IF NOT EXISTS idx_artifacts_task_created ON artifacts(taskId, createdAt ASC);
-      CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(createdAt DESC);
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, actor TEXT NOT NULL, actorType TEXT NOT NULL,
         action TEXT NOT NULL, resource TEXT, taskId TEXT, scopeUsed TEXT, result TEXT NOT NULL, detailsJson TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
       CREATE TABLE IF NOT EXISTS oauth_clients (
-        clientId TEXT PRIMARY KEY, clientSecret TEXT, clientName TEXT NOT NULL, redirectUrisJson TEXT NOT NULL,
+        clientId TEXT PRIMARY KEY, clientSecret TEXT, clientName TEXT, redirectUrisJson TEXT NOT NULL,
         grantTypesJson TEXT NOT NULL, responseTypesJson TEXT NOT NULL, tokenAuthMethod TEXT NOT NULL,
         applicationType TEXT NOT NULL DEFAULT 'web', createdAt INTEGER NOT NULL
       );
@@ -211,8 +210,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
   }
   async listTaskArtifacts(taskId: string): Promise<ArtifactMetadata[]> { return this.listTaskArtifactsSync(taskId); }
   async listArtifacts(): Promise<ArtifactMetadata[]> {
-    // Cold-start metadata hydration is intentionally lazy. ArtifactStore performs
-    // indexed id/taskId lookups on demand, avoiding a full historical scan here.
+    // Gateway startup intentionally requests a lazy hydration snapshot here.
+    // Full historical metadata remains authoritative in SQLite and is fetched by id/taskId on demand.
     return [];
   }
   private rowToArtifact(row: any): ArtifactMetadata {
