@@ -1,5 +1,19 @@
 import { GatewayDurableObject as BaseGatewayDurableObject, Env } from './gateway-durable-object';
 
+const LOCAL_TOOL_SECURITY_SCOPES: Record<string, string[]> = {
+  local_project_list: ['tasks:submit', 'local:read'],
+  local_project_status: ['tasks:submit', 'local:read'],
+  local_read_file: ['tasks:submit', 'local:read'],
+  local_list_directory: ['tasks:submit', 'local:read'],
+  local_find_files: ['tasks:submit', 'local:read'],
+  local_search_text: ['tasks:submit', 'local:read'],
+  local_find_repositories: ['tasks:submit', 'local:read'],
+  local_git_status: ['tasks:submit', 'local:read'],
+  local_write_file: ['tasks:submit', 'local:write'],
+  local_patch_file: ['tasks:submit', 'local:write'],
+  local_create_directory: ['tasks:submit', 'local:write']
+};
+
 function extractMissingScopes(message: string): string[] {
   if (!message.startsWith('AUTH_FORBIDDEN')) return [];
   const missing = message.match(/\bMissing:\s*(.+)$/)?.[1];
@@ -32,8 +46,25 @@ function isMcpPost(request: Request): boolean {
   return pathname === '/mcp' || pathname === '/api/mcp/v1';
 }
 
-async function applyInsufficientScopeChallenge(request: Request, response: Response): Promise<Response> {
-  if (!isMcpPost(request) || response.status !== 200) return response;
+function addToolSecuritySchemes(body: any): boolean {
+  if (!Array.isArray(body?.result?.tools)) return false;
+  let changed = false;
+
+  body.result.tools = body.result.tools.map((tool: any) => {
+    const scopes = LOCAL_TOOL_SECURITY_SCOPES[tool?.name];
+    if (!scopes) return tool;
+    changed = true;
+    return {
+      ...tool,
+      securitySchemes: [{ type: 'oauth2', scopes: [...scopes] }]
+    };
+  });
+
+  return changed;
+}
+
+async function applyMcpOAuthMetadata(request: Request, response: Response): Promise<Response> {
+  if (!isMcpPost(request)) return response;
   if (!(response.headers.get('Content-Type') || '').includes('application/json')) return response;
 
   let body: any;
@@ -43,43 +74,39 @@ async function applyInsufficientScopeChallenge(request: Request, response: Respo
     return response;
   }
 
-  const message = getMcpToolErrorMessage(body);
-  if (!message) return response;
-
-  const missingScopes = extractMissingScopes(message);
-  if (missingScopes.length === 0) return response;
-
-  const resourceMetadata = `${new URL(request.url).origin}/.well-known/oauth-protected-resource/mcp`;
   const headers = new Headers(response.headers);
-  headers.set(
-    'WWW-Authenticate',
-    `Bearer error="insufficient_scope", scope="${missingScopes.join(' ')}", resource_metadata="${resourceMetadata}"`
-  );
-  headers.set('Cache-Control', 'no-store');
+  let changed = addToolSecuritySchemes(body);
 
-  return Response.json(
-    {
-      jsonrpc: body?.jsonrpc || '2.0',
-      id: body?.id ?? null,
-      error: {
-        code: -32003,
-        message: 'Insufficient OAuth scope',
-        data: {
-          error: 'insufficient_scope',
-          requiredScopes: missingScopes
+  if (response.status === 200) {
+    const message = getMcpToolErrorMessage(body);
+    const missingScopes = message ? extractMissingScopes(message) : [];
+
+    if (missingScopes.length > 0) {
+      const resourceMetadata = `${new URL(request.url).origin}/.well-known/oauth-protected-resource/mcp`;
+      const challenge = `Bearer error="insufficient_scope", scope="${missingScopes.join(' ')}", resource_metadata="${resourceMetadata}"`;
+      headers.set('WWW-Authenticate', challenge);
+      headers.set('Cache-Control', 'no-store');
+      body.result = {
+        ...body.result,
+        _meta: {
+          ...(body.result?._meta || {}),
+          'mcp/www_authenticate': [challenge]
         }
-      }
-    },
-    { status: 403, headers }
-  );
+      };
+      return Response.json(body, { status: 403, headers });
+    }
+  }
+
+  if (!changed) return response;
+  return Response.json(body, { status: response.status, headers });
 }
 
 // Keep the Durable Object export name stable for the existing Cloudflare migration,
-// while adapting authorization failures at the public HTTP transport boundary.
+// while adapting ChatGPT-facing OAuth metadata at the public HTTP transport boundary.
 export class GatewayDurableObject extends BaseGatewayDurableObject {
   async fetch(request: Request): Promise<Response> {
     const response = await super.fetch(request);
-    return applyInsufficientScopeChallenge(request, response);
+    return applyMcpOAuthMetadata(request, response);
   }
 }
 
