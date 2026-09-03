@@ -35,7 +35,8 @@ export async function runOAuthTests(): Promise<{ passed: number; failed: number 
     assert.deepStrictEqual(authMeta.scopes_supported, CHATGPT_LEAST_PRIVILEGE_SCOPES);
     assert.strictEqual(authMeta.scopes_supported.includes('admin'), false);
     assert.strictEqual(authMeta.scopes_supported.includes('admin:kill-switch'), false);
-    assert.strictEqual(authMeta.scopes_supported.includes('local:write'), false);
+    assert.strictEqual(authMeta.scopes_supported.includes('local:write'), true);
+    assert.strictEqual(authMeta.scopes_supported.includes('raw_shell:run'), false);
     assert.strictEqual(authMeta.scopes_supported.includes('tasks:cancel'), false);
     passed++;
 
@@ -43,6 +44,7 @@ export async function runOAuthTests(): Promise<{ passed: number; failed: number 
     assert.strictEqual(resourceMeta.resource, resource);
     assert.deepStrictEqual(resourceMeta.scopes_supported, CHATGPT_LEAST_PRIVILEGE_SCOPES);
     assert.ok(resourceMeta.scopes_supported.includes('mcp:access'));
+    assert.ok(resourceMeta.scopes_supported.includes('local:write'));
     passed++;
 
     // 2. Client registration
@@ -65,57 +67,62 @@ export async function runOAuthTests(): Promise<{ passed: number; failed: number 
     const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
 
     // 3. Strict Privilege Boundary Rejection Tests
-    // (a) public OAuth requesting admin -> INVALID_SCOPE
     await assert.rejects(
       () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'admin', resource }),
       /INVALID_SCOPE.*not permitted/
     );
     passed++;
 
-    // (b) public OAuth requesting admin:kill-switch -> INVALID_SCOPE
     await assert.rejects(
       () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'admin:kill-switch', resource }),
       /INVALID_SCOPE.*not permitted/
     );
     passed++;
 
-    // (c) public OAuth requesting local:write -> INVALID_SCOPE
+    // local:write is an intended public connector capability for authorized project edits.
+    const localWriteCode = await oauthManager.createAuthorizationCode({
+      clientId: reg.client_id,
+      redirectUri,
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+      scope: 'offline_access mcp:access tasks:submit local:read local:write',
+      resource
+    });
+    assert.ok(localWriteCode.startsWith('dsu_code_'));
+    passed++;
+
     await assert.rejects(
-      () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'local:write', resource }),
+      () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'raw_shell:run', resource }),
       /INVALID_SCOPE.*not permitted/
     );
     passed++;
 
-    // (d) public OAuth requesting tasks:cancel -> INVALID_SCOPE
     await assert.rejects(
       () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'tasks:cancel', resource }),
       /INVALID_SCOPE.*not permitted/
     );
     passed++;
 
-    // (e) public OAuth requesting local:git_status -> INVALID_SCOPE
     await assert.rejects(
       () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'local:git_status', resource }),
       /INVALID_SCOPE.*not permitted/
     );
     passed++;
 
-    // (f) mixed scope escalation attempt ("mcp:access admin") - must fail closed, NO partial grant
     await assert.rejects(
       () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'mcp:access admin', resource }),
       /INVALID_SCOPE.*not permitted/
     );
     passed++;
 
-    // (g) mixed scope escalation attempt ("offline_access mcp:access local:write")
     await assert.rejects(
-      () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'offline_access mcp:access local:write', resource }),
+      () => oauthManager.createAuthorizationCode({ clientId: reg.client_id, redirectUri, codeChallenge: challenge, codeChallengeMethod: 'S256', scope: 'offline_access mcp:access local:write raw_shell:run', resource }),
       /INVALID_SCOPE.*not permitted/
     );
     passed++;
 
     // 4. Normal Least Privilege Authorization
-    const validScope = 'offline_access mcp:access tasks:submit tasks:read artifacts:read kaggle:submit kaggle:read local:read local:test swarm:dispatch';
+    const validScope = 'offline_access mcp:access tasks:submit tasks:read artifacts:read kaggle:submit kaggle:read local:read local:write local:test swarm:dispatch';
     const code = await oauthManager.createAuthorizationCode({
       clientId: reg.client_id,
       redirectUri,
@@ -137,13 +144,13 @@ export async function runOAuthTests(): Promise<{ passed: number; failed: number 
     const tokens = await oauthManager.exchangeCodeForTokens({ code, clientId: reg.client_id, redirectUri, codeVerifier: verifier, resource });
     assert.ok(tokens.access_token && tokens.refresh_token);
     assert.strictEqual(tokens.scope.includes('admin'), false);
-    assert.strictEqual(tokens.scope.includes('local:write'), false);
+    assert.strictEqual(tokens.scope.includes('local:write'), true);
+    assert.strictEqual(tokens.scope.includes('raw_shell:run'), false);
     assert.strictEqual(tokens.scope.includes('tasks:cancel'), false);
     assert.strictEqual(authManager.validateToken(tokens.access_token).payload?.metadata?.purpose, 'access_token');
     assert.strictEqual(authManager.validateToken(tokens.refresh_token).payload?.metadata?.purpose, 'refresh_token');
     passed++;
 
-    // Cannot replay used authorization code
     await assert.rejects(() => oauthManager.exchangeCodeForTokens({ code, clientId: reg.client_id, redirectUri, codeVerifier: verifier, resource }), /Authorization code not found or expired/);
     passed++;
 
@@ -151,12 +158,12 @@ export async function runOAuthTests(): Promise<{ passed: number; failed: number 
     const refreshed = await oauthManager.refreshAccessToken(tokens.refresh_token, resource);
     assert.notStrictEqual(refreshed.refresh_token, tokens.refresh_token);
     assert.strictEqual(refreshed.scope.includes('admin'), false);
-    assert.strictEqual(refreshed.scope.includes('local:write'), false);
+    assert.strictEqual(refreshed.scope.includes('local:write'), true);
+    assert.strictEqual(refreshed.scope.includes('raw_shell:run'), false);
     await assert.rejects(() => oauthManager.refreshAccessToken(tokens.refresh_token, resource), /(TOKEN_REVOKED|Refresh token revoked)/);
     passed++;
 
-    // Malicious or historically overprivileged refresh token rejection test
-    const fakeOverprivilegedRefresh = authManager.generateToken(reg.client_id, 'client', ['mcp:access', 'admin', 'local:write'], 3600000, {
+    const fakeOverprivilegedRefresh = authManager.generateToken(reg.client_id, 'client', ['mcp:access', 'admin', 'local:write', 'raw_shell:run'], 3600000, {
       purpose: 'refresh_token', resource, clientId: reg.client_id
     });
     await assert.rejects(
@@ -175,6 +182,7 @@ export async function runOAuthTests(): Promise<{ passed: number; failed: number 
     const html = oauthManager.renderAuthorizationPage({ clientId: reg.client_id, redirectUri, state: 'state-1', codeChallenge: challenge, codeChallengeMethod: 'S256', resource });
     assert.ok(html.includes('Authorize DevSpace Ultra vNext'));
     assert.ok(html.includes('mcp:access'));
+    assert.ok(html.includes('local:write'));
     passed++;
   } catch (err: any) {
     console.error('OAuth test failed:', err);
