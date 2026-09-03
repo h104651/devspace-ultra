@@ -26,6 +26,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_tasks_idemp ON tasks(idempotencyKey);
       CREATE INDEX IF NOT EXISTS idx_tasks_client_req ON tasks(clientRequestId);
+      CREATE INDEX IF NOT EXISTS idx_tasks_priority_created ON tasks(priority DESC, createdAt DESC);
 
       CREATE TABLE IF NOT EXISTS idempotency (
         key TEXT PRIMARY KEY, taskId TEXT NOT NULL, taskJson TEXT NOT NULL, expiresAt INTEGER NOT NULL
@@ -45,10 +46,13 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
         sizeBytes INTEGER NOT NULL, sha256 TEXT NOT NULL, mimeType TEXT, preview TEXT, createdAt INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(taskId);
+      CREATE INDEX IF NOT EXISTS idx_artifacts_task_created ON artifacts(taskId, createdAt ASC);
+      CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(createdAt DESC);
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, actor TEXT NOT NULL, actorType TEXT NOT NULL,
         action TEXT NOT NULL, resource TEXT, taskId TEXT, scopeUsed TEXT, result TEXT NOT NULL, detailsJson TEXT
       );
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
       CREATE TABLE IF NOT EXISTS oauth_clients (
         clientId TEXT PRIMARY KEY, clientSecret TEXT, clientName TEXT, redirectUrisJson TEXT NOT NULL,
         grantTypesJson TEXT NOT NULL, responseTypesJson TEXT NOT NULL, tokenAuthMethod TEXT NOT NULL,
@@ -86,9 +90,13 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     try { return Array.from(cursor)[0]; } catch { return undefined; }
   }
 
-  async getTask(taskId: string): Promise<DurableTask | undefined> {
+  getTaskSync(taskId: string): DurableTask | undefined {
     const row = this.getFirstRow('SELECT * FROM tasks WHERE taskId = ?', taskId);
     return row ? this.rowToTask(row) : undefined;
+  }
+
+  async getTask(taskId: string): Promise<DurableTask | undefined> {
+    return this.getTaskSync(taskId);
   }
 
   async saveTask(task: DurableTask): Promise<void> {
@@ -108,6 +116,15 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       task.metadata ? JSON.stringify(task.metadata) : null, task.startedAt || null, task.completedAt || null,
       task.createdAt, task.updatedAt
     );
+  }
+
+  async listActiveTasks(): Promise<DurableTask[]> {
+    const activeStatuses: TaskStatus[] = ['queued', 'claimed', 'acknowledged', 'running', 'retrying'];
+    const placeholders = activeStatuses.map(() => '?').join(', ');
+    return this.sql.exec(
+      `SELECT * FROM tasks WHERE status IN (${placeholders})`,
+      ...activeStatuses
+    ).toArray().map(r => this.rowToTask(r));
   }
 
   async listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number }): Promise<DurableTask[]> {
@@ -178,11 +195,17 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
   async saveArtifactMetadata(meta: ArtifactMetadata): Promise<void> {
     this.sql.exec('INSERT OR REPLACE INTO artifacts (id, taskId, name, type, sizeBytes, sha256, mimeType, preview, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', meta.id, meta.taskId, meta.name, meta.type, meta.sizeBytes, meta.sha256, meta.mimeType || null, meta.preview || null, meta.createdAt);
   }
-  async getArtifactMetadata(id: string): Promise<ArtifactMetadata | undefined> {
+  getArtifactMetadataSync(id: string): ArtifactMetadata | undefined {
     const row = this.getFirstRow('SELECT * FROM artifacts WHERE id = ?', id);
     return row ? this.rowToArtifact(row) : undefined;
   }
-  async listTaskArtifacts(taskId: string): Promise<ArtifactMetadata[]> { return this.sql.exec('SELECT * FROM artifacts WHERE taskId = ? ORDER BY createdAt ASC', taskId).toArray().map(r => this.rowToArtifact(r)); }
+  async getArtifactMetadata(id: string): Promise<ArtifactMetadata | undefined> {
+    return this.getArtifactMetadataSync(id);
+  }
+  listTaskArtifactsSync(taskId: string): ArtifactMetadata[] {
+    return this.sql.exec('SELECT * FROM artifacts WHERE taskId = ? ORDER BY createdAt ASC', taskId).toArray().map(r => this.rowToArtifact(r));
+  }
+  async listTaskArtifacts(taskId: string): Promise<ArtifactMetadata[]> { return this.listTaskArtifactsSync(taskId); }
   async listArtifacts(): Promise<ArtifactMetadata[]> { return this.sql.exec('SELECT * FROM artifacts ORDER BY createdAt DESC').toArray().map(r => this.rowToArtifact(r)); }
   private rowToArtifact(row: any): ArtifactMetadata {
     return { id: row.id, taskId: row.taskId, name: row.name, type: row.type, sizeBytes: row.sizeBytes, sha256: row.sha256, mimeType: row.mimeType || undefined, preview: row.preview || undefined, createdAt: row.createdAt };
