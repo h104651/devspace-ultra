@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { GatewayDurableObject } from '../../src/cloudflare/gateway-durable-object';
+import { GatewayDurableObject } from '../../src/cloudflare/worker';
 import { AuthManager } from '../../src/security/auth-manager';
 import { MCP_2026_VERSION } from '../../src/mcp/protocol';
 import { SqlStorage } from '../../src/cloudflare/sqlite-storage-adapter';
