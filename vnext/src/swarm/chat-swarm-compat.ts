@@ -123,42 +123,81 @@ function taskCounts(swarm: CompatSwarm): Record<CompatTaskStatus, number> {
 
 export class DurableChatSwarmCompat {
   private mutationQueue: Promise<any> = Promise.resolve();
+  private cachedState?: CompatState;
+  private loadPromise?: Promise<CompatState>;
 
   constructor(private storage: CompatStorage) {}
 
-  private async load(): Promise<CompatState> {
-    const stored = await this.storage.get(STATE_KEY);
-    if (!stored) return emptyState();
-    if (typeof stored === 'string') {
-      try {
-        const parsed = JSON.parse(stored);
-        return parsed?.version === 1 && parsed?.swarms ? parsed : emptyState();
-      } catch {
-        return emptyState();
+  private normalizeState(state: CompatState): CompatState {
+    for (const swarm of Object.values(state.swarms)) {
+      swarm.taskKeys ||= {};
+      for (const worker of Object.values(swarm.workers || {})) {
+        worker.slot ||= Number(worker.id?.match(/worker-(\d{2})/)?.[1] || 0);
       }
     }
-    return stored?.version === 1 && stored?.swarms ? stored as CompatState : emptyState();
+    return state;
+  }
+
+  private async load(): Promise<CompatState> {
+    if (this.cachedState) return this.cachedState;
+    if (!this.loadPromise) {
+      this.loadPromise = (async () => {
+        const stored = await this.storage.get(STATE_KEY);
+        let state: CompatState;
+        if (!stored) {
+          state = emptyState();
+        } else if (typeof stored === 'string') {
+          try {
+            const parsed = JSON.parse(stored);
+            state = parsed?.version === 1 && parsed?.swarms ? parsed : emptyState();
+          } catch {
+            state = emptyState();
+          }
+        } else {
+          state = stored?.version === 1 && stored?.swarms ? stored as CompatState : emptyState();
+        }
+        this.cachedState = this.normalizeState(state);
+        return this.cachedState;
+      })().catch(err => {
+        this.loadPromise = undefined;
+        throw err;
+      });
+    }
+    return this.loadPromise;
   }
 
   private async save(state: CompatState): Promise<void> {
+    this.cachedState = state;
     await this.storage.put(STATE_KEY, state);
   }
 
-  private mutate<T>(operation: (state: CompatState) => Promise<T>): Promise<T> {
+  private revisionSignature(state: CompatState): string {
+    return Object.entries(state.swarms)
+      .map(([id, swarm]) => `${id}:${Number(swarm.revision || 0)}`)
+      .sort()
+      .join('|');
+  }
+
+  private enqueue<T>(operation: (state: CompatState) => Promise<T>, persist: 'always' | 'if-touched'): Promise<T> {
     const run = this.mutationQueue.then(async () => {
       const state = await this.load();
-      for (const swarm of Object.values(state.swarms)) {
-        swarm.taskKeys ||= {};
-        for (const worker of Object.values(swarm.workers || {})) {
-          worker.slot ||= Number(worker.id?.match(/worker-(\d{2})/)?.[1] || 0);
-        }
-      }
+      const beforeRevision = persist === 'if-touched' ? this.revisionSignature(state) : '';
       const result = await operation(state);
-      await this.save(state);
+      if (persist === 'always' || this.revisionSignature(state) !== beforeRevision) {
+        await this.save(state);
+      }
       return result;
     });
     this.mutationQueue = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  private mutate<T>(operation: (state: CompatState) => Promise<T>): Promise<T> {
+    return this.enqueue(operation, 'always');
+  }
+
+  private mutateIfTouched<T>(operation: (state: CompatState) => Promise<T>): Promise<T> {
+    return this.enqueue(operation, 'if-touched');
   }
 
   private touch(swarm: CompatSwarm): void {
@@ -437,7 +476,7 @@ export class DurableChatSwarmCompat {
   }
 
   async workerEvent(workerToken: string): Promise<any> {
-    return this.mutate(async state => {
+    return this.mutateIfTouched(async state => {
       const { swarm, worker } = await this.findWorker(state, workerToken);
       worker.dockOnline = true;
       worker.dockLastSeenAt = nowIso();
@@ -567,7 +606,7 @@ export class DurableChatSwarmCompat {
     const waitMs = Math.max(0, Math.min(MAX_WAIT_MS, Math.trunc(input.waitMs ?? 0)));
     const deadline = Date.now() + waitMs;
     while (true) {
-      const result = await this.mutate(async state => {
+      const result = await this.mutateIfTouched(async state => {
         const { swarm, worker } = await this.findWorker(state, input.workerToken);
         if (swarm.state !== 'active') return { state: 'closed', swarmId: swarm.id, workerId: worker.id };
         const claimed = this.claimForWorker(swarm, worker);
@@ -913,7 +952,7 @@ export class DurableChatSwarmCompat {
   }
 
   async browserEvent(browserWakeToken: string): Promise<any> {
-    return this.mutate(async state => {
+    return this.mutateIfTouched(async state => {
       const { swarm, worker } = await this.findBrowserWorker(state, browserWakeToken);
       worker.browserOnline = true;
       worker.browserLastSeenAt = nowIso();
