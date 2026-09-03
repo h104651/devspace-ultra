@@ -6,6 +6,7 @@ import { AuditEvent } from '../types/audit';
 export interface IStorageAdapter {
   // Tasks
   getTask(taskId: string): Promise<DurableTask | undefined>;
+  getTaskSync?(taskId: string): DurableTask | undefined;
   saveTask(task: DurableTask): Promise<void>;
   listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number }): Promise<DurableTask[]>;
   deleteTask(taskId: string): Promise<boolean>;
@@ -29,7 +30,9 @@ export interface IStorageAdapter {
   // Artifacts
   saveArtifactMetadata(meta: ArtifactMetadata): Promise<void>;
   getArtifactMetadata(id: string): Promise<ArtifactMetadata | undefined>;
+  getArtifactMetadataSync?(id: string): ArtifactMetadata | undefined;
   listTaskArtifacts(taskId: string): Promise<ArtifactMetadata[]>;
+  listTaskArtifactsSync?(taskId: string): ArtifactMetadata[];
   listArtifacts(): Promise<ArtifactMetadata[]>;
 
   // Audit
