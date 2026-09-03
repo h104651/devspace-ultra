@@ -41,7 +41,7 @@ Do not recreate or delete an existing production bucket during routine deploymen
 
 ## Required production secrets
 
-Set secrets with Wrangler; never commit them to GitHub, `wrangler.toml`, logs, screenshots, or chat messages.
+Set Worker runtime secrets with Wrangler; never commit them to GitHub, `wrangler.toml`, logs, screenshots, or chat messages.
 
 ```powershell
 npx wrangler secret put MASTER_SECRET
@@ -54,7 +54,12 @@ npx wrangler secret put KAGGLE_API_TOKEN
 
 The Worker has a safe default public base URL for the current deployment. If a different production hostname is used, configure `PUBLIC_BASE_URL` to the exact HTTPS origin and verify all OAuth metadata/resources use the same origin.
 
-GitHub Actions also requires the repository secret `CLOUDFLARE_API_TOKEN`. The workflow checks that the token exists and that `wrangler whoami` succeeds before any production deployment. The secret value must never be printed.
+GitHub Actions requires two repository secrets for non-interactive Wrangler authentication:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Create the Cloudflare API token with only the permissions required to deploy this Worker and its configured bindings. The workflow checks that both values exist and that `wrangler whoami` succeeds before any production deployment. Secret values must never be printed or committed.
 
 ## CI and automatic production deployment
 
