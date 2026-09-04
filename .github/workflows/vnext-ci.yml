@@ -83,6 +83,22 @@ jobs:
             exit 1
           fi
 
+          CLEAN_TOKEN="$clean_token" node <<'NODE'
+          const value = process.env.CLEAN_TOKEN ?? '';
+          const details = {
+            length: value.length,
+            startsBearer: value.startsWith('Bearer '),
+            startsDoubleQuote: value.startsWith('"'),
+            endsDoubleQuote: value.endsWith('"'),
+            startsSingleQuote: value.startsWith("'"),
+            endsSingleQuote: value.endsWith("'"),
+            cfatIndex: value.indexOf('cfat_'),
+            cfutIndex: value.indexOf('cfut_'),
+            whitespaceCount: (value.match(/\s/g) || []).length,
+          };
+          console.log(`Cloudflare token structure: ${JSON.stringify(details)}`);
+          NODE
+
           if [ "$clean_token" != "$RAW_CLOUDFLARE_API_TOKEN" ]; then
             echo 'Cloudflare API token contained embedded line break(s); normalized them for the HTTP Authorization header.'
           fi
