@@ -59,13 +59,13 @@ GitHub Actions requires two repository secrets for non-interactive Wrangler auth
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-Create an account-owned Cloudflare API token using the `Edit Cloudflare Workers` policy and scope it only to the account/resources required by this Worker. The workflow normalizes embedded CR/LF characters before placing the token in an HTTP Authorization header, verifies the token against `GET /accounts/{account_id}/tokens/verify`, and only then proceeds to deployment. Do not use `wrangler whoami` as the account-token preflight because that command may use user-token identity endpoints. Secret values must never be printed or committed.
+Create an account-owned Cloudflare API token using the `Edit Cloudflare Workers` policy and scope it only to the account/resources required by this Worker. The workflow extracts exactly one canonical `cfat_` account token from the secret input, validates the 32-character account ID, checks account access, verifies the token against `GET /accounts/{account_id}/tokens/verify`, and only then proceeds to deployment. Do not use `wrangler whoami` as the account-token preflight because that command may use user-token identity endpoints. Secret values must never be printed or committed.
 
 ## CI and automatic production deployment
 
-`feature/vnext-remote-gateway` is the current vNext production branch.
+`main` is the canonical repository SSOT and the only branch allowed to deploy vNext production. The vNext implementation remains isolated under `vnext/**` inside the same repository.
 
-A push that changes `vnext/**` or `.github/workflows/vnext-ci.yml` runs the following gated workflow:
+A push to `main` that changes `vnext/**` or `.github/workflows/vnext-ci.yml` runs the following gated workflow:
 
 1. `npm install --ignore-scripts --no-audit --no-fund`
 2. `npm run build`
