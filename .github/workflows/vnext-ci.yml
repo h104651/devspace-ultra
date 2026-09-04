@@ -3,7 +3,7 @@ name: vNext CI & Production Deploy
 on:
   push:
     branches:
-      - feature/vnext-remote-gateway
+      - main
     paths:
       - 'vnext/**'
       - '.github/workflows/vnext-ci.yml'
@@ -42,7 +42,7 @@ jobs:
   deploy-production:
     name: Deploy Cloudflare production
     needs: verify-vnext
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/feature/vnext-remote-gateway'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
       group: devspace-ultra-vnext-production
