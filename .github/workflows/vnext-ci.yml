@@ -80,6 +80,10 @@ jobs:
             echo '::error::CLOUDFLARE_ACCOUNT_ID must be a single line.'
             exit 1
           fi
+          if ! [[ "$RAW_CLOUDFLARE_ACCOUNT_ID" =~ ^[A-Fa-f0-9]{32}$ ]]; then
+            echo '::error::CLOUDFLARE_ACCOUNT_ID must be a 32-character hexadecimal account identifier.'
+            exit 1
+          fi
 
           token_file="$(mktemp)"
           TOKEN_FILE="$token_file" node <<'NODE'
@@ -102,8 +106,31 @@ jobs:
 
           echo "::add-mask::$clean_token"
           echo 'Cloudflare account token extracted in canonical cfat_ format (53 characters).'
+          echo 'Cloudflare account ID has valid 32-character hexadecimal shape.'
           printf 'CLOUDFLARE_API_TOKEN=%s\n' "$clean_token" >> "$GITHUB_ENV"
           printf 'CLOUDFLARE_ACCOUNT_ID=%s\n' "$RAW_CLOUDFLARE_ACCOUNT_ID" >> "$GITHUB_ENV"
+      - name: Diagnose Cloudflare account-token pairing
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID")"
+          ACCOUNT_PROBE_BODY="$body" ACCOUNT_PROBE_STATUS="$status" node <<'NODE'
+          const fs = require('node:fs');
+          const status = process.env.ACCOUNT_PROBE_STATUS;
+          let payload = {};
+          try { payload = JSON.parse(fs.readFileSync(process.env.ACCOUNT_PROBE_BODY, 'utf8')); } catch {}
+          const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
+          if (status === '200' && payload.success === true) {
+            console.log('Cloudflare account-details probe: HTTP 200 (token can access configured account).');
+          } else {
+            console.log(`Cloudflare account-details probe: HTTP ${status}; errorCode=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
+          }
+          NODE
       - name: Verify Cloudflare account API token
         shell: bash
         run: |
@@ -117,7 +144,13 @@ jobs:
 
           if [ "$status" != '200' ]; then
             echo "::error::Cloudflare account token verification returned HTTP $status"
-            cat "$body" || true
+            TOKEN_VERIFY_BODY="$body" node <<'NODE'
+            const fs = require('node:fs');
+            let payload = {};
+            try { payload = JSON.parse(fs.readFileSync(process.env.TOKEN_VERIFY_BODY, 'utf8')); } catch {}
+            const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
+            console.error(`Cloudflare verify error: code=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
+            NODE
             exit 1
           fi
 
