@@ -57,18 +57,18 @@ jobs:
           node-version: '22.x'
       - name: Install
         run: npm install --ignore-scripts --no-audit --no-fund
-      - name: Verify Cloudflare CI credentials
+      - name: Prepare Cloudflare CI credentials
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RAW_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RAW_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           missing=0
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+          if [ -z "$RAW_CLOUDFLARE_API_TOKEN" ]; then
             echo '::error::CLOUDFLARE_API_TOKEN is not configured in GitHub Actions.'
             missing=1
           fi
-          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+          if [ -z "$RAW_CLOUDFLARE_ACCOUNT_ID" ]; then
             echo '::error::CLOUDFLARE_ACCOUNT_ID is not configured in GitHub Actions.'
             missing=1
           fi
@@ -76,25 +76,28 @@ jobs:
             exit 1
           fi
 
-          node <<'NODE'
-          for (const name of ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']) {
-            const value = process.env[name] ?? '';
-            const hasCR = value.includes('\r');
-            const hasLF = value.includes('\n');
-            const leadingWhitespace = /^\s/.test(value);
-            const trailingWhitespace = /\s$/.test(value);
-            const lineCount = value.length === 0 ? 0 : value.split(/\r\n|\r|\n/).length;
-            console.log(
-              `${name} format: length=${value.length}, lines=${lineCount}, hasCR=${hasCR}, hasLF=${hasLF}, leadingWhitespace=${leadingWhitespace}, trailingWhitespace=${trailingWhitespace}`,
-            );
-          }
-          NODE
+          clean_token="${RAW_CLOUDFLARE_API_TOKEN//$'\r'/}"
+          clean_token="${clean_token//$'\n'/}"
+          if [ -z "$clean_token" ]; then
+            echo '::error::CLOUDFLARE_API_TOKEN is empty after line-break normalization.'
+            exit 1
+          fi
 
-          npx --yes wrangler whoami >/dev/null
+          if [ "$clean_token" != "$RAW_CLOUDFLARE_API_TOKEN" ]; then
+            echo 'Cloudflare API token contained embedded line break(s); normalized them for the HTTP Authorization header.'
+          fi
+
+          if [[ "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\r'* || "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\n'* ]]; then
+            echo '::error::CLOUDFLARE_ACCOUNT_ID must be a single line.'
+            exit 1
+          fi
+
+          echo "::add-mask::$clean_token"
+          printf 'CLOUDFLARE_API_TOKEN=%s\n' "$clean_token" >> "$GITHUB_ENV"
+          printf 'CLOUDFLARE_ACCOUNT_ID=%s\n' "$RAW_CLOUDFLARE_ACCOUNT_ID" >> "$GITHUB_ENV"
+      - name: Verify Cloudflare CI credentials
+        run: npx --yes wrangler whoami >/dev/null
       - name: Deploy existing production Worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx --yes wrangler deploy
       - name: Production smoke test
         shell: bash
