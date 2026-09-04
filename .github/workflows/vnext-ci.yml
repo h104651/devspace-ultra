@@ -75,6 +75,21 @@ jobs:
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
+
+          node <<'NODE'
+          for (const name of ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']) {
+            const value = process.env[name] ?? '';
+            const hasCR = value.includes('\r');
+            const hasLF = value.includes('\n');
+            const leadingWhitespace = /^\s/.test(value);
+            const trailingWhitespace = /\s$/.test(value);
+            const lineCount = value.length === 0 ? 0 : value.split(/\r\n|\r|\n/).length;
+            console.log(
+              `${name} format: length=${value.length}, lines=${lineCount}, hasCR=${hasCR}, hasLF=${hasLF}, leadingWhitespace=${leadingWhitespace}, trailingWhitespace=${trailingWhitespace}`,
+            );
+          }
+          NODE
+
           npx --yes wrangler whoami >/dev/null
       - name: Deploy existing production Worker
         env:
