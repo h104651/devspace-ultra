@@ -142,23 +142,18 @@ jobs:
             --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify")"
 
-          if [ "$status" != '200' ]; then
-            echo "::error::Cloudflare account token verification returned HTTP $status"
-            TOKEN_VERIFY_BODY="$body" node <<'NODE'
-            const fs = require('node:fs');
-            let payload = {};
-            try { payload = JSON.parse(fs.readFileSync(process.env.TOKEN_VERIFY_BODY, 'utf8')); } catch {}
-            const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
-            console.error(`Cloudflare verify error: code=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
-            NODE
-            exit 1
-          fi
-
-          TOKEN_VERIFY_BODY="$body" node <<'NODE'
+          TOKEN_VERIFY_BODY="$body" TOKEN_VERIFY_STATUS="$status" node <<'NODE'
           const fs = require('node:fs');
-          const payload = JSON.parse(fs.readFileSync(process.env.TOKEN_VERIFY_BODY, 'utf8'));
+          const status = process.env.TOKEN_VERIFY_STATUS;
+          let payload = {};
+          try { payload = JSON.parse(fs.readFileSync(process.env.TOKEN_VERIFY_BODY, 'utf8')); } catch {}
+          if (status !== '200') {
+            const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
+            console.error(`Cloudflare account token verification failed: HTTP ${status}; code=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
+            process.exit(1);
+          }
           if (payload.success !== true || payload.result?.status !== 'active') {
-            console.error('Cloudflare account token is not active.');
+            console.error(`Cloudflare account token is not active (status=${payload.result?.status ?? 'unknown'}).`);
             process.exit(1);
           }
           console.log('Cloudflare account API token verification: active');
