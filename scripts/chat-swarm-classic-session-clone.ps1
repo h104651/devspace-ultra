@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(1, 32)]
+    [ValidateRange(0, 32)]
     [int]$SourceWorker = 1,
 
     [ValidateRange(1, 32)]
@@ -11,38 +11,52 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "chat-swarm-desktop-resolver.ps1")
+
 function Get-WorkerRuntime {
     param([Parameter(Mandatory)][int]$Worker)
 
-    $suffix = "Worker{0:D2}" -f $Worker
-    $packageName = "OpenAI.ChatGPT-Desktop.$suffix"
-    $package = Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
+    if ($Worker -eq 0) {
+        $primary = Resolve-ChatGPTDesktopPackage -RequireInstalled
+        return [pscustomobject]@{
+            Worker            = 0
+            WorkerId          = "primary"
+            PackageName       = $primary.PackageName
+            PackageFamilyName = $primary.PackageFamilyName
+            InstallLocation   = $primary.InstallLocation
+            ExecutablePath    = $primary.ExecutablePath
+            AliasPath         = $null
+            ProfilePath       = $primary.ProfilePath
+            ProcessName       = $primary.ProcessName
+        }
+    }
 
-    if (-not $package) {
+    $workerInfo = Resolve-ChatGPTDesktopPackage -WorkerNumber $Worker
+    if (-not $workerInfo.Registered) {
         throw "worker-{0:D2} runtime clone is not registered." -f $Worker
     }
 
     [pscustomobject]@{
-        Worker = $Worker
-        WorkerId = "worker-{0:D2}" -f $Worker
-        PackageName = $packageName
-        PackageFamilyName = $package.PackageFamilyName
-        InstallLocation = $package.InstallLocation
-        ExecutablePath = Join-Path $package.InstallLocation "app\ChatGPT Classic.exe"
-        AliasPath = Join-Path $env:LOCALAPPDATA ("Microsoft\WindowsApps\chatgpt-classic-worker{0:D2}.exe" -f $Worker)
-        ProfilePath = Join-Path $env:LOCALAPPDATA ("Packages\{0}\LocalCache\Roaming\ChatGPT" -f $package.PackageFamilyName)
+        Worker            = $Worker
+        WorkerId          = $workerInfo.WorkerId
+        PackageName       = $workerInfo.PackageName
+        PackageFamilyName = $workerInfo.PackageFamilyName
+        InstallLocation   = $workerInfo.InstallLocation
+        ExecutablePath    = $workerInfo.ExecutablePath
+        AliasPath         = $workerInfo.AliasPath
+        ProfilePath       = $workerInfo.ProfilePath
+        ProcessName       = $workerInfo.ProcessName
     }
 }
 
 function Stop-WorkerRuntime {
     param([Parameter(Mandatory)]$Runtime)
+    if ($Runtime.Worker -eq 0) { return } # Never stop primary app automatically
 
     $processes = @(
         Get-CimInstance Win32_Process |
             Where-Object {
-                $_.Name -eq "ChatGPT Classic.exe" -and
+                $_.Name -eq $Runtime.ProcessName -and
                 $_.ExecutablePath -eq $Runtime.ExecutablePath
             }
     )
@@ -137,17 +151,18 @@ foreach ($target in $targets) {
     }
 
     $results += [pscustomobject]@{
-        WorkerId = $target.WorkerId
+        WorkerId    = $target.WorkerId
         ProfilePath = $target.ProfilePath
-        IndexedDB = Test-Path -LiteralPath (Join-Path $target.ProfilePath "IndexedDB")
-        Cookies = Test-Path -LiteralPath (Join-Path $target.ProfilePath "Network\Cookies")
-        BackupPath = $targetBackup
-        Launched = $false
+        IndexedDB   = Test-Path -LiteralPath (Join-Path $target.ProfilePath "IndexedDB")
+        Cookies     = Test-Path -LiteralPath (Join-Path $target.ProfilePath "Network\Cookies")
+        BackupPath  = $targetBackup
+        Launched    = $false
     }
 }
 
 if ($Launch) {
     foreach ($target in @($source) + $targets) {
+        if ($target.Worker -eq 0 -or -not $target.AliasPath) { continue }
         if (-not (Test-Path -LiteralPath $target.AliasPath)) {
             throw "Execution alias is missing for $($target.WorkerId): $($target.AliasPath)"
         }

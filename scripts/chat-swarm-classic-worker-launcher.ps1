@@ -11,30 +11,33 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "chat-swarm-desktop-resolver.ps1")
+
 $results = @()
 
 for ($offset = 0; $offset -lt $Count; $offset++) {
     $number = $FirstWorker + $offset
-    $workerId = "worker-{0:D2}" -f $number
-    $packageName = "OpenAI.ChatGPT-Desktop.Worker{0:D2}" -f $number
-    $aliasName = "chatgpt-classic-worker{0:D2}.exe" -f $number
-    $aliasPath = Join-Path $env:LOCALAPPDATA ("Microsoft\WindowsApps\" + $aliasName)
+    $workerInfo = Resolve-ChatGPTDesktopPackage -WorkerNumber $number
+    $workerId = $workerInfo.WorkerId
+    $packageName = $workerInfo.PackageName
+    $aliasName = $workerInfo.AliasName
+    $aliasPath = $workerInfo.AliasPath
 
-    $package = Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
-    if (-not $package) {
+    if (-not $workerInfo.Registered) {
         throw "$workerId runtime clone is not registered. Run chat-swarm-classic-runtime-clone.ps1 for this worker first."
     }
     if (-not (Test-Path -LiteralPath $aliasPath)) {
         throw "$workerId execution alias is missing: $aliasPath"
     }
 
-    $runtimeExe = Join-Path $package.InstallLocation "app\ChatGPT Classic.exe"
+    $runtimeExe = $workerInfo.ExecutablePath
+    $processName = $workerInfo.ProcessName
+
     $before = @(
         Get-CimInstance Win32_Process |
             Where-Object {
-                $_.Name -eq "ChatGPT Classic.exe" -and
+                $_.Name -eq $processName -and
                 $_.ExecutablePath -eq $runtimeExe -and
                 $_.CommandLine -notlike "*--type=*"
             } |
@@ -43,10 +46,10 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
 
     if ($before.Count -gt 0) {
         $results += [pscustomobject]@{
-            WorkerId = $workerId
+            WorkerId    = $workerId
             PackageName = $packageName
-            State = "already-running"
-            RootPid = ($before -join ",")
+            State       = "already-running"
+            RootPid     = ($before -join ",")
             WindowTitle = ((Get-Process -Id $before[0] -ErrorAction SilentlyContinue).MainWindowTitle)
         }
         continue
@@ -60,7 +63,7 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
         $root = @(
             Get-CimInstance Win32_Process |
                 Where-Object {
-                    $_.Name -eq "ChatGPT Classic.exe" -and
+                    $_.Name -eq $processName -and
                     $_.ExecutablePath -eq $runtimeExe -and
                     $_.CommandLine -notlike "*--type=*"
                 }
@@ -68,16 +71,16 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
     } while ($root.Count -eq 0 -and (Get-Date) -lt $deadline)
 
     if ($root.Count -eq 0) {
-        throw "$workerId was launched but no independent ChatGPT Classic root process appeared before timeout."
+        throw "$workerId was launched but no independent $processName root process appeared before timeout."
     }
 
     $rootPid = $root[0].ProcessId
     $process = Get-Process -Id $rootPid -ErrorAction SilentlyContinue
     $results += [pscustomobject]@{
-        WorkerId = $workerId
+        WorkerId    = $workerId
         PackageName = $packageName
-        State = "running"
-        RootPid = $rootPid
+        State       = "running"
+        RootPid     = $rootPid
         WindowTitle = $process.MainWindowTitle
     }
 }

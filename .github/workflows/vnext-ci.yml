@@ -1,0 +1,224 @@
+name: vNext CI & Production Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'vnext/**'
+      - '.github/workflows/vnext-ci.yml'
+  pull_request:
+    paths:
+      - 'vnext/**'
+      - '.github/workflows/vnext-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_ORIGIN: https://devspace-ultra-gateway.abdul-hsu.workers.dev
+
+jobs:
+  verify-vnext:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vnext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Install
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: TypeScript build
+        run: npm run build
+      - name: Unit, integration, protocol and security tests
+        run: npm test
+      - name: Cloudflare deploy dry-run
+        run: npx --yes wrangler deploy --dry-run
+
+  deploy-production:
+    name: Deploy Cloudflare production
+    needs: verify-vnext
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: devspace-ultra-vnext-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: vnext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Install
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Prepare Cloudflare CI credentials
+        env:
+          RAW_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RAW_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "$RAW_CLOUDFLARE_API_TOKEN" ]; then
+            echo '::error::CLOUDFLARE_API_TOKEN is not configured in GitHub Actions.'
+            missing=1
+          fi
+          if [ -z "$RAW_CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo '::error::CLOUDFLARE_ACCOUNT_ID is not configured in GitHub Actions.'
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          if [[ "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\r'* || "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\n'* ]]; then
+            echo '::error::CLOUDFLARE_ACCOUNT_ID must be a single line.'
+            exit 1
+          fi
+          if ! [[ "$RAW_CLOUDFLARE_ACCOUNT_ID" =~ ^[A-Fa-f0-9]{32}$ ]]; then
+            echo '::error::CLOUDFLARE_ACCOUNT_ID must be a 32-character hexadecimal account identifier.'
+            exit 1
+          fi
+
+          token_file="$(mktemp)"
+          TOKEN_FILE="$token_file" node <<'NODE'
+          const fs = require('node:fs');
+          const raw = process.env.RAW_CLOUDFLARE_API_TOKEN ?? '';
+          const matches = raw.match(/cfat_[A-Za-z0-9]{40}[A-Fa-f0-9]{8}/g) || [];
+          if (matches.length !== 1) {
+            console.error(`Expected exactly one canonical cfat_ account token in CLOUDFLARE_API_TOKEN; found ${matches.length}.`);
+            process.exit(1);
+          }
+          fs.writeFileSync(process.env.TOKEN_FILE, matches[0], { encoding: 'utf8', mode: 0o600 });
+          NODE
+
+          clean_token="$(cat "$token_file")"
+          rm -f "$token_file"
+          if [ "${#clean_token}" -ne 53 ]; then
+            echo '::error::Extracted Cloudflare account token has an unexpected length.'
+            exit 1
+          fi
+
+          echo "::add-mask::$clean_token"
+          echo 'Cloudflare account token extracted in canonical cfat_ format (53 characters).'
+          echo 'Cloudflare account ID has valid 32-character hexadecimal shape.'
+          printf 'CLOUDFLARE_API_TOKEN=%s\n' "$clean_token" >> "$GITHUB_ENV"
+          printf 'CLOUDFLARE_ACCOUNT_ID=%s\n' "$RAW_CLOUDFLARE_ACCOUNT_ID" >> "$GITHUB_ENV"
+      - name: Diagnose Cloudflare account-token pairing
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID")"
+          ACCOUNT_PROBE_BODY="$body" ACCOUNT_PROBE_STATUS="$status" node <<'NODE'
+          const fs = require('node:fs');
+          const status = process.env.ACCOUNT_PROBE_STATUS;
+          let payload = {};
+          try { payload = JSON.parse(fs.readFileSync(process.env.ACCOUNT_PROBE_BODY, 'utf8')); } catch {}
+          const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
+          if (status === '200' && payload.success === true) {
+            console.log('Cloudflare account-details probe: HTTP 200 (token can access configured account).');
+          } else {
+            console.log(`Cloudflare account-details probe: HTTP ${status}; errorCode=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
+          }
+          NODE
+      - name: Verify Cloudflare account API token
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify")"
+
+          TOKEN_VERIFY_BODY="$body" TOKEN_VERIFY_STATUS="$status" node <<'NODE'
+          const fs = require('node:fs');
+          const status = process.env.TOKEN_VERIFY_STATUS;
+          let payload = {};
+          try { payload = JSON.parse(fs.readFileSync(process.env.TOKEN_VERIFY_BODY, 'utf8')); } catch {}
+          if (status !== '200') {
+            const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
+            console.error(`Cloudflare account token verification failed: HTTP ${status}; code=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
+            process.exit(1);
+          }
+          if (payload.success !== true || payload.result?.status !== 'active') {
+            console.error(`Cloudflare account token is not active (status=${payload.result?.status ?? 'unknown'}).`);
+            process.exit(1);
+          }
+          console.log('Cloudflare account API token verification: active');
+          NODE
+      - name: Deploy existing production Worker
+        run: npx --yes wrangler deploy
+      - name: Production smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          health="$(curl --fail --silent --show-error "$PRODUCTION_ORIGIN/health")"
+          if [ "$health" != '{"ok":true}' ]; then
+            echo "::error::Unexpected /health response: $health"
+            exit 1
+          fi
+
+          for path in \
+            '/.well-known/oauth-authorization-server' \
+            '/.well-known/oauth-protected-resource' \
+            '/.well-known/oauth-protected-resource/mcp'
+          do
+            status="$(curl --silent --show-error --output /tmp/discovery.json --write-out '%{http_code}' "$PRODUCTION_ORIGIN$path")"
+            if [ "$status" != '200' ]; then
+              echo "::error::$path returned HTTP $status"
+              cat /tmp/discovery.json || true
+              exit 1
+            fi
+          done
+
+          curl --fail --silent --show-error \
+            "$PRODUCTION_ORIGIN/.well-known/oauth-protected-resource/mcp" \
+            --output /tmp/protected-resource.json
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const metadata = JSON.parse(fs.readFileSync('/tmp/protected-resource.json', 'utf8'));
+          const scopes = metadata.scopes_supported || [];
+          for (const required of ['local:read', 'local:write']) {
+            if (!scopes.includes(required)) {
+              console.error(`Missing required production OAuth scope: ${required}`);
+              process.exit(1);
+            }
+          }
+          NODE
+
+          headers="$(mktemp)"
+          body="$(mktemp)"
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --dump-header "$headers" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+            "$PRODUCTION_ORIGIN/mcp")"
+
+          if [ "$status" != '401' ]; then
+            echo "::error::Unauthenticated POST /mcp returned HTTP $status instead of 401"
+            cat "$body" || true
+            exit 1
+          fi
+
+          if ! grep -qi '^www-authenticate:.*oauth-protected-resource/mcp' "$headers"; then
+            echo '::error::Unauthenticated POST /mcp is missing the expected WWW-Authenticate resource metadata challenge.'
+            cat "$headers" || true
+            exit 1
+          fi

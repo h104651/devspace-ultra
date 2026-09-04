@@ -16,13 +16,14 @@ const minimalPrompt = process.argv.includes("--minimal");
 const resumeWorker = process.argv.includes("--resume");
 const conversationUrl = String(arg("conversation-url", "")).trim();
 const projectUrl = String(arg("project-url", "")).trim();
+const customPrompt = String(arg("custom-prompt", "")).trim();
 
 if (!Number.isInteger(port) || port <= 0) {
   console.error("A valid --port is required.");
   process.exit(2);
 }
-if (!probeOnly && !dismissOnly && !interruptOnly && !resumeWorker && !invite) {
-  console.error("--invite is required unless --probe, --dismiss-only, --interrupt-only, or --resume is used.");
+if (!probeOnly && !dismissOnly && !interruptOnly && !resumeWorker && !invite && !customPrompt) {
+  console.error("--invite or --custom-prompt is required unless --probe, --dismiss-only, --interrupt-only, or --resume is used.");
   process.exit(2);
 }
 
@@ -39,10 +40,30 @@ async function findPage(deadlineMs = 30_000) {
   const deadline = Date.now() + deadlineMs;
   let last = [];
   while (Date.now() < deadline) {
-    last = await json("/json/list");
-    const pages = last.filter((entry) => entry.type === "page" && entry.webSocketDebuggerUrl);
-    const preferred = pages.find((entry) => /chatgpt\.com/i.test(entry.url || "")) || pages[0];
-    if (preferred) return preferred;
+    try {
+      last = await json("/json/list");
+      let targets = (Array.isArray(last) ? last : []).filter(
+        (entry) =>
+          (entry.type === "page" || entry.type === "webview" || entry.type === "iframe") &&
+          entry.webSocketDebuggerUrl
+      );
+      if (targets.length === 0) {
+        try {
+          const res = await fetch(`${base}/json/new?https://chatgpt.com/`, { method: "PUT" });
+          if (res.ok) {
+            const created = await res.json();
+            if (created && created.webSocketDebuggerUrl) {
+              targets = [created];
+            }
+          }
+        } catch {}
+      }
+      const preferred =
+        targets.find((entry) => /chatgpt\.com/i.test(entry.url || "")) ||
+        targets.find((entry) => entry.type === "page") ||
+        targets[0];
+      if (preferred) return preferred;
+    } catch {}
     await sleep(500);
   }
   throw new Error(`No inspectable page found on CDP port ${port}. Targets: ${JSON.stringify(last.map((x) => ({ type: x.type, url: x.url })))}`);
@@ -221,22 +242,18 @@ function expressionForInsert(prompt) {
     if (!composer) return { ok: false, reason: 'composer-not-found', href: location.href };
     if (composer.disabled || composer.getAttribute('aria-disabled') === 'true') return { ok: false, reason: 'composer-disabled' };
     composer.focus();
-    if ('value' in composer) {
+    if ('value' in composer && (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement)) {
       const proto = composer instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
       if (setter) setter.call(composer, text); else composer.value = text;
       composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
       composer.dispatchEvent(new Event('change', { bubbles: true }));
     } else {
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(composer);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      let inserted = false;
-      try { inserted = document.execCommand('insertText', false, text); } catch {}
-      if (!inserted) {
-        composer.replaceChildren(document.createTextNode(text));
+      composer.focus();
+      document.execCommand('selectAll', false, null);
+      const ok = document.execCommand('insertText', false, text);
+      if (!ok) {
+        composer.innerHTML = '<p>' + text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>') + '</p>';
         composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
       }
     }
@@ -259,11 +276,20 @@ function expressionForSendClick() {
   return String.raw`(() => {
     const send = document.querySelector('button[data-testid="send-button"]') ||
       document.querySelector('button[aria-label="Send prompt"]') ||
+      document.querySelector('button[data-testid="fruitjuice-send-button"]') ||
       [...document.querySelectorAll('button')].find((el) => /send|傳送|发送/i.test(el.getAttribute('aria-label') || ''));
-    if (!send) return { ok: false, reason: 'send-button-not-found' };
-    if (send.disabled) return { ok: false, reason: 'send-button-disabled' };
-    send.click();
-    return { ok: true };
+    if (send) {
+      send.removeAttribute('disabled');
+      send.disabled = false;
+      send.click();
+      return { ok: true, clicked: true };
+    }
+    const composer = document.querySelector('#prompt-textarea') || document.querySelector('[data-testid="composer-input"]');
+    if (composer) {
+      composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      return { ok: true, via: 'enter' };
+    }
+    return { ok: false, reason: 'send-button-not-found' };
   })()`;
 }
 
@@ -306,17 +332,26 @@ try {
       throw new Error(`Unsafe --conversation-url: ${conversationUrl}`);
     }
     await client.call("Page.navigate", { url: target.toString() });
-    await sleep(1400);
+    await sleep(2500);
+    try { await client.call("Runtime.enable"); } catch {}
   } else if (projectUrl) {
     const target = new URL(projectUrl);
     if (target.protocol !== "https:" || target.hostname !== "chatgpt.com" || !/^\/g\/g-p-[^/]+\/project\/?$/.test(target.pathname)) {
       throw new Error(`Unsafe --project-url: ${projectUrl}`);
     }
     await client.call("Page.navigate", { url: target.toString() });
-    await sleep(1600);
+    await sleep(2500);
+    try { await client.call("Runtime.enable"); } catch {}
   }
 
-  const probe = await evaluate(client, expressionForProbe());
+  let probe = await evaluate(client, expressionForProbe());
+  if (probe?.loginVisible) {
+    for (let i = 0; i < 8; i++) {
+      await sleep(1000);
+      probe = await evaluate(client, expressionForProbe());
+      if (!probe?.loginVisible && probe?.composer) break;
+    }
+  }
   if (probeOnly) {
     console.log(JSON.stringify({ ok: true, port, page: compactOutput ? { url: page.url } : { url: page.url, title: page.title }, probe: compactProbe(probe) }));
     return;
@@ -350,12 +385,21 @@ try {
   }
 
   if (newChat) {
-    await evaluate(client, expressionForNewChat());
-    await sleep(1200);
+    const currentHref = String(probe?.href || page.url || "");
+    if (currentHref.includes("#pricing") || currentHref.includes("source=codex") || !currentHref.includes("/c/")) {
+      await client.call("Page.navigate", { url: "https://chatgpt.com/" });
+      await sleep(2200);
+      try { await client.call("Runtime.enable"); } catch {}
+    } else {
+      await evaluate(client, expressionForNewChat());
+      await sleep(1200);
+    }
   }
   await waitForComposer(client);
 
-  const prompt = resumeWorker
+  const prompt = customPrompt
+    ? customPrompt
+    : resumeWorker
     ? `@DevSpace Tailscale 繼續現有 Chat Swarm worker loop。使用呢個對話已保存嘅 workerToken，立即呼叫 chat_swarm_next 一次。收到 lease checkpoint 時不要向用家回覆，立即再呼叫 chat_swarm_next 一次；收到真實 task 就先呼叫 chat_swarm_status 一次，再完成並用 chat_swarm_submit 提交。`
     : minimalPrompt
       ? `@DevSpace Tailscale 加入 Chat Swarm，invite code：${invite}。label 用 ${label}。請呼叫 chat_swarm_join 加入，成功後立即使用返回嘅 workerToken 呼叫 chat_swarm_next 等候工作。`
@@ -365,11 +409,25 @@ try {
 
   await sleep(350);
   const clicked = await evaluate(client, expressionForSendClick());
-  if (!clicked?.ok) {
-    await client.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
-    await client.call("Input.dispatchKeyEvent", { type: "char", text: "\r", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
-    await client.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
-  }
+  // Dispatch native CDP Enter key to guarantee submission
+  try {
+    await client.call("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      text: "\r",
+      unmodifiedText: "\r",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13
+    });
+    await client.call("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13
+    });
+  } catch {}
 
   let after;
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -400,4 +458,7 @@ try {
 }
 }
 
-await run();
+run().catch((err) => {
+  console.error(JSON.stringify({ ok: false, error: err.message || String(err) }));
+  process.exit(1);
+});

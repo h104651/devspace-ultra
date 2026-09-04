@@ -1,0 +1,13 @@
+{
+  "name": "Astor TuneUp",
+  "slug": "astor-tuneup-project",
+  "owner": "astorhsu",
+  "runnerKernelRef": "astorhsu/astor-tuneup-runner",
+  "activeLineage": "Gate2C-9A",
+  "runtime": {
+    "language": "python",
+    "pythonVersion": "3.10+",
+    "framework": "ultralytics>=8.3.0",
+    "accelerator": "GPU T4"
+  }
+}
