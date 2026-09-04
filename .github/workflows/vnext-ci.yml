@@ -95,8 +95,32 @@ jobs:
           echo "::add-mask::$clean_token"
           printf 'CLOUDFLARE_API_TOKEN=%s\n' "$clean_token" >> "$GITHUB_ENV"
           printf 'CLOUDFLARE_ACCOUNT_ID=%s\n' "$RAW_CLOUDFLARE_ACCOUNT_ID" >> "$GITHUB_ENV"
-      - name: Verify Cloudflare CI credentials
-        run: npx --yes wrangler whoami >/dev/null
+      - name: Verify Cloudflare account API token
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify")"
+
+          if [ "$status" != '200' ]; then
+            echo "::error::Cloudflare account token verification returned HTTP $status"
+            cat "$body" || true
+            exit 1
+          fi
+
+          TOKEN_VERIFY_BODY="$body" node <<'NODE'
+          const fs = require('node:fs');
+          const payload = JSON.parse(fs.readFileSync(process.env.TOKEN_VERIFY_BODY, 'utf8'));
+          if (payload.success !== true || payload.result?.status !== 'active') {
+            console.error('Cloudflare account token is not active.');
+            process.exit(1);
+          }
+          console.log('Cloudflare account API token verification: active');
+          NODE
       - name: Deploy existing production Worker
         run: npx --yes wrangler deploy
       - name: Production smoke test

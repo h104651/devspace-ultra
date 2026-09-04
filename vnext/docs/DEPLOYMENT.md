@@ -59,7 +59,7 @@ GitHub Actions requires two repository secrets for non-interactive Wrangler auth
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-Create the Cloudflare API token with only the permissions required to deploy this Worker and its configured bindings. The workflow checks that both values exist and that `wrangler whoami` succeeds before any production deployment. Secret values must never be printed or committed.
+Create an account-owned Cloudflare API token using the `Edit Cloudflare Workers` policy and scope it only to the account/resources required by this Worker. The workflow normalizes embedded CR/LF characters before placing the token in an HTTP Authorization header, verifies the token against `GET /accounts/{account_id}/tokens/verify`, and only then proceeds to deployment. Do not use `wrangler whoami` as the account-token preflight because that command may use user-token identity endpoints. Secret values must never be printed or committed.
 
 ## CI and automatic production deployment
 
