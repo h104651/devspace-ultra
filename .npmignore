@@ -5,11 +5,13 @@ docs/DEVSPACE-ULTRA-HANDOFF-2026-08-18.md
 *.tgz
 *.bak*
 *.backup
+NUL
 .env
 .env.*
 .local/
 .devspace/
 chat-swarm-state.json
+browser-control-state.json
 controller-state.json
 update-backups/
 auth-seed/

@@ -220,6 +220,10 @@ async function runDoctor() {
         console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
         console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
         console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+        console.log(`Capability plugins: ${config.pluginsEnabled ? "enabled" : "disabled"}`);
+        console.log(`Capability plugin directory: ${config.pluginsDir}`);
+        console.log(`Capability registry: ${config.capabilityRegistryPath}`);
+        console.log(`External capability roots: ${config.pluginPaths.length ? config.pluginPaths.join(", ") : "none"}`);
     }
     catch (error) {
         console.log(`Config status: ${error instanceof Error ? error.message : String(error)}`);

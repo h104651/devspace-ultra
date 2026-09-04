@@ -166,6 +166,29 @@ DEVSPACE_SKILL_PATHS="$HOME/.claude/skills,$HOME/company/skills" \
 npx @waishnav/devspace serve
 ```
 
+## Unified Agent Capability Plugins
+
+DevSpace Ultra v0.3 adds a shared capability/plugin runtime. One installation is visible to the orchestrator and every worker MCP session connected to the same DevSpace backend.
+
+Default storage:
+
+```text
+~/.devspace/plugins/
+  registry.json
+  packages/
+```
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVSPACE_PLUGINS` | `1` | Set to `0` to hide/disable the capability runtime. |
+| `DEVSPACE_PLUGINS_DIR` | `~/.devspace/plugins` | Managed plugin package directory. |
+| `DEVSPACE_CAPABILITY_REGISTRY` | `~/.devspace/plugins/registry.json` | Metadata-only registry file. |
+| `DEVSPACE_PLUGIN_PATHS` | empty | Comma-separated operator-managed plugin roots. These paths are treated as explicitly trusted configuration and are never deleted by DevSpace. |
+
+Persisted equivalents in `~/.devspace/config.json` are `pluginsEnabled`, `pluginsDir`, `capabilityRegistryPath`, and `pluginPaths`.
+
+Managed downloads are separate from execution trust: `capability_install` defaults to disabled/untrusted, while `capability_enable(... trust=true)` explicitly permits executable MCP/command surfaces. Enabled + trusted plugin `SKILL.md` files join normal workspace skill discovery automatically. Shared MCP services are backend-pooled; stateful stdio MCPs can use `capability_instance` for separate exclusive instances with ephemeral per-project environment values such as a Blender bridge port. See [Unified Agent Capability Runtime](capability-runtime.md).
+
 ## Logging
 
 | Variable | Default |

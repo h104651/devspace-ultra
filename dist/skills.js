@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSkills, } from "@earendil-works/pi-coding-agent";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
+import { installedCapabilitySkillPaths } from "./capability-runtime.js";
 const SUBAGENT_DELEGATION_NAME = "subagent-delegation";
 const SUBAGENT_DELEGATION_SKILL = join(SUBAGENT_DELEGATION_NAME, "SKILL.md");
 function bundledSkillsDir() {
@@ -19,6 +20,7 @@ export function effectiveSkillPaths(config, cwd) {
         resolve(cwd, ".agents", "skills"),
         config.devspaceSkillsDir,
         join(config.agentDir, "skills"),
+        ...installedCapabilitySkillPaths(config),
         config.subagents && !hasSubagentDelegationSkill(config.devspaceSkillsDir)
             ? bundledSkills
             : undefined,

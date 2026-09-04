@@ -11,6 +11,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "chat-swarm-desktop-resolver.ps1")
+
 function Save-Utf8Xml {
     param(
         [Parameter(Mandatory)] [xml]$Document,
@@ -26,19 +28,20 @@ function Save-Utf8Xml {
     finally { $writer.Dispose() }
 }
 
-$suffix = "Worker{0:D2}" -f $Worker
-$workerId = "worker-{0:D2}" -f $Worker
-$workerPackageName = "OpenAI.ChatGPT-Desktop.$suffix"
-$aliasName = "chatgpt-classic-worker{0:D2}.exe" -f $Worker
+$sourceInfo = Resolve-ChatGPTDesktopPackage -RequireInstalled
+$workerInfo = Resolve-ChatGPTDesktopPackage -WorkerNumber $Worker
+$workerId = $workerInfo.WorkerId
+$workerPackageName = $workerInfo.PackageName
+$aliasName = $workerInfo.AliasName
 
-$sourcePackage = Get-AppxPackage -Name "OpenAI.ChatGPT-Desktop" |
+$sourcePackage = Get-AppxPackage -Name $sourceInfo.PackageName |
     Sort-Object Version -Descending |
     Select-Object -First 1
 $workerPackage = Get-AppxPackage -Name $workerPackageName |
     Sort-Object Version -Descending |
     Select-Object -First 1
 
-if (-not $sourcePackage) { throw "Primary ChatGPT Classic package is not installed." }
+if (-not $sourcePackage) { throw "Primary ChatGPT package ($($sourceInfo.PackageName)) is not installed." }
 if (-not $workerPackage) { throw "$workerId runtime clone is not registered." }
 
 $sourceManifestPath = Join-Path $sourcePackage.InstallLocation "AppxManifest.xml"
@@ -75,10 +78,10 @@ else {
 }
 
 # Stop only this clone. The primary ChatGPT process has a different executable path.
-$workerExe = Join-Path $workerPackage.InstallLocation "app\ChatGPT Classic.exe"
+$workerExe = $workerInfo.ExecutablePath
 $workerProcesses = @(
     Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -eq "ChatGPT Classic.exe" -and $_.ExecutablePath -eq $workerExe }
+        Where-Object { $_.Name -eq $workerInfo.ProcessName -and $_.ExecutablePath -eq $workerExe }
 )
 foreach ($process in $workerProcesses) {
     Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
@@ -125,10 +128,10 @@ if ($Launch) {
 }
 
 [pscustomobject]@{
-    WorkerId = $workerId
-    Mode = $Mode
+    WorkerId           = $workerId
+    Mode               = $Mode
     ProtocolRegistered = $protocolPresent
-    PackageFullName = $registered.PackageFullName
-    ProfilePath = Join-Path $env:LOCALAPPDATA ("Packages\" + $registered.PackageFamilyName + "\LocalCache\Roaming\ChatGPT")
-    Launched = [bool]$Launch
+    PackageFullName    = $registered.PackageFullName
+    ProfilePath        = $workerInfo.ProfilePath
+    Launched           = [bool]$Launch
 } | Format-List

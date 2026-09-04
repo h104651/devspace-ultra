@@ -40,6 +40,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "chat-swarm-desktop-resolver.ps1")
+
 $runtimeCloneScript = Join-Path $PSScriptRoot "chat-swarm-classic-runtime-clone.ps1"
 $bootstrapScript = Join-Path $PSScriptRoot "chat-swarm-classic-cdp-bootstrap.mjs"
 $stateRoot = Join-Path $env:LOCALAPPDATA "DevSpace\ChatSwarmClassic"
@@ -49,7 +51,9 @@ $authSeedProfile = Join-Path $authSeedRoot "profile"
 $authStateItems = @(
     "Local State",
     "Preferences",
+    "Secure Preferences",
     "config.json",
+    "Default",
     "Network",
     "Local Storage",
     "IndexedDB",
@@ -111,53 +115,47 @@ function Get-ProductionWorkerNumbers {
 function Get-WorkerRuntime {
     param([Parameter(Mandatory)][int]$Number)
 
-    $suffix = "Worker{0:D2}" -f $Number
-    $packageName = "OpenAI.ChatGPT-Desktop.$suffix"
-    $package = Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
-
-    $aliasName = "chatgpt-classic-worker{0:D2}.exe" -f $Number
-    $aliasPath = Join-Path $env:LOCALAPPDATA ("Microsoft\WindowsApps\" + $aliasName)
-
-    if (-not $package) {
+    $workerInfo = Resolve-ChatGPTDesktopPackage -WorkerNumber $Number
+    if (-not $workerInfo.Registered) {
         return [pscustomobject]@{
-            Number = $Number
-            WorkerId = "worker-{0:D2}" -f $Number
-            Label = "Runtime-{0:D2}" -f $Number
-            PackageName = $packageName
+            Number            = $Number
+            WorkerId          = $workerInfo.WorkerId
+            Label             = $workerInfo.Label
+            PackageName       = $workerInfo.PackageName
             PackageFamilyName = $null
-            InstallLocation = $null
-            ExecutablePath = $null
-            AliasPath = $aliasPath
-            ProfilePath = $null
-            DebugPort = $DebugBasePort + $Number
-            Registered = $false
+            InstallLocation   = $null
+            ExecutablePath    = $null
+            AliasPath         = $workerInfo.AliasPath
+            ProfilePath       = $null
+            DebugPort         = $DebugBasePort + $Number
+            Registered        = $false
+            ProcessName       = $workerInfo.ProcessName
         }
     }
 
     [pscustomobject]@{
-        Number = $Number
-        WorkerId = "worker-{0:D2}" -f $Number
-        Label = "Runtime-{0:D2}" -f $Number
-        PackageName = $packageName
-        PackageFamilyName = $package.PackageFamilyName
-        InstallLocation = $package.InstallLocation
-        ExecutablePath = Join-Path $package.InstallLocation "app\ChatGPT Classic.exe"
-        AliasPath = $aliasPath
-        ProfilePath = Join-Path $env:LOCALAPPDATA ("Packages\{0}\LocalCache\Roaming\ChatGPT" -f $package.PackageFamilyName)
-        DebugPort = $DebugBasePort + $Number
-        Registered = $true
+        Number            = $Number
+        WorkerId          = $workerInfo.WorkerId
+        Label             = $workerInfo.Label
+        PackageName       = $workerInfo.PackageName
+        PackageFamilyName = $workerInfo.PackageFamilyName
+        InstallLocation   = $workerInfo.InstallLocation
+        ExecutablePath    = $workerInfo.ExecutablePath
+        AliasPath         = $workerInfo.AliasPath
+        ProfilePath       = $workerInfo.ProfilePath
+        DebugPort         = $DebugBasePort + $Number
+        Registered        = $true
+        ProcessName       = $workerInfo.ProcessName
     }
 }
 
 function Get-WorkerRootProcess {
     param([Parameter(Mandatory)]$Runtime)
-    if (-not $Runtime.Registered) { return $null }
+    if (-not $Runtime.Registered -or -not $Runtime.ExecutablePath) { return $null }
 
     Get-CimInstance Win32_Process |
         Where-Object {
-            $_.Name -eq "ChatGPT Classic.exe" -and
+            $_.Name -eq $Runtime.ProcessName -and
             $_.ExecutablePath -eq $Runtime.ExecutablePath -and
             $_.CommandLine -notlike "*--type=*"
         } |
@@ -188,8 +186,6 @@ function Save-ControllerState {
     param([Parameter(Mandatory)][object[]]$Runtimes)
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
 
-    # Merge instead of replacing so starting/recovering one worker does not
-    # erase mappings for the rest of the production pool.
     $byNumber = @{}
     $existing = Read-ControllerState
     if ($existing) {
@@ -199,47 +195,55 @@ function Save-ControllerState {
                 number = [int]$item.number
                 workerId = [string]$item.workerId
                 label = [string]$item.label
-                packageName = [string]$item.packageName
-                packageFamilyName = [string]$item.packageFamilyName
-                profilePath = [string]$item.profilePath
                 debugPort = [int]$item.debugPort
-                conversationUrl = if ($item.PSObject.Properties.Name -contains "conversationUrl") { [string]$item.conversationUrl } else { $null }
+                conversationUrl = [string]$item.conversationUrl
+                projectUrl = [string]$item.projectUrl
+                updatedAt = [string]$item.updatedAt
             }
         }
     }
 
+    $timestamp = (Get-Date).ToUniversalTime().ToString("o")
     foreach ($runtime in $Runtimes) {
-        $prior = $byNumber[[int]$runtime.Number]
-        $conversationUrl = if ($prior) { $prior.conversationUrl } else { $null }
-        $byNumber[[int]$runtime.Number] = [ordered]@{
-            number = $runtime.Number
-            workerId = $runtime.WorkerId
-            label = $runtime.Label
-            packageName = $runtime.PackageName
-            packageFamilyName = $runtime.PackageFamilyName
-            profilePath = $runtime.ProfilePath
-            debugPort = $runtime.DebugPort
-            conversationUrl = $conversationUrl
+        $current = if ($byNumber.ContainsKey($runtime.Number)) { $byNumber[$runtime.Number] } else { $null }
+        $byNumber[$runtime.Number] = [ordered]@{
+            number = [int]$runtime.Number
+            workerId = [string]$runtime.WorkerId
+            label = [string]$runtime.Label
+            debugPort = [int]$runtime.DebugPort
+            conversationUrl = if ($current) { [string]$current.conversationUrl } else { "" }
+            projectUrl = if ($current) { [string]$current.projectUrl } else { "" }
+            updatedAt = $timestamp
         }
     }
 
-    $existingProjectUrl = if ($existing -and $existing.PSObject.Properties.Name -contains "projectUrl") { [string]$existing.projectUrl } else { $null }
-    $effectiveProjectUrl = if (-not [string]::IsNullOrWhiteSpace($ProjectUrl)) { $ProjectUrl.Trim() } else { $existingProjectUrl }
-    if (-not [string]::IsNullOrWhiteSpace($effectiveProjectUrl) -and $effectiveProjectUrl -notmatch '^https://chatgpt\.com/g/g-p-[^/]+/project/?$') {
-        throw "ProjectUrl must be a ChatGPT project URL like https://chatgpt.com/g/g-p-.../project"
+    $workerList = @($byNumber.Values | Sort-Object { [int]$_.number })
+    $payload = [ordered]@{
+        version = 1
+        updatedAt = $timestamp
+        productionDesired = if ($existing -and $null -ne $existing.productionDesired) { [int]$existing.productionDesired } else { $null }
+        reservedWorkerNumbers = if ($existing -and $null -ne $existing.reservedWorkerNumbers) { @($existing.reservedWorkerNumbers) } else { @(Get-ReservedWorkerNumbers) }
+        workers = $workerList
     }
 
-    $existingDesired = if ($existing -and $existing.PSObject.Properties.Name -contains "productionDesired") { [int]$existing.productionDesired } else { 4 }
+    $json = $payload | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($statePath, $json, [System.Text.Encoding]::UTF8)
+}
+
+function Set-ProductionDesired {
+    param([Parameter(Mandatory)][int]$Desired)
+    New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+    $existing = Read-ControllerState
+    $timestamp = (Get-Date).ToUniversalTime().ToString("o")
     $payload = [ordered]@{
-        version = 4
-        updatedAt = (Get-Date).ToString("o")
-        debugBasePort = $DebugBasePort
-        projectUrl = $effectiveProjectUrl
-        reservedWorkers = @(Get-ReservedWorkerNumbers)
-        productionDesired = $existingDesired
-        workers = @($byNumber.Keys | Sort-Object | ForEach-Object { $byNumber[$_] })
+        version = 1
+        updatedAt = $timestamp
+        productionDesired = $Desired
+        reservedWorkerNumbers = @(Get-ReservedWorkerNumbers)
+        workers = if ($existing -and $existing.workers) { @($existing.workers) } else { @() }
     }
-    $payload | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    $json = $payload | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($statePath, $json, [System.Text.Encoding]::UTF8)
 }
 
 function Set-WorkerConversationUrl {
@@ -247,43 +251,35 @@ function Set-WorkerConversationUrl {
         [Parameter(Mandatory)]$Runtime,
         [Parameter(Mandatory)][string]$Url
     )
-    if ($Url -notmatch '^https://chatgpt\.com/(?:c/|g/g-p-[^/]+/c/)') {
-        throw "Refusing to store non-conversation URL for $($Runtime.WorkerId): $Url"
+    Save-ControllerState -Runtimes @($Runtime)
+    $state = Read-ControllerState
+    if (-not $state) { return }
+    $found = $false
+    foreach ($item in @($state.workers)) {
+        if ([int]$item.number -eq [int]$Runtime.Number) {
+            $item.conversationUrl = $Url
+            $item.updatedAt = (Get-Date).ToUniversalTime().ToString("o")
+            $found = $true
+            break
+        }
     }
-    $state = Read-ControllerState
-    if (-not $state) { throw "Controller state is missing; run start/status setup first." }
-    $entry = @($state.workers | Where-Object { [int]$_.number -eq [int]$Runtime.Number } | Select-Object -First 1)
-    if ($entry.Count -eq 0) { throw "No controller state entry for $($Runtime.WorkerId)." }
-    $worker = $entry[0]
-    $worker | Add-Member -NotePropertyName conversationUrl -NotePropertyValue $Url -Force
-    $state.updatedAt = (Get-Date).ToString("o")
-    $state.version = 4
-    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statePath -Encoding UTF8
-}
-
-function Set-ProductionDesired {
-    param([Parameter(Mandatory)][int]$Desired)
-    $state = Read-ControllerState
-    if (-not $state) { throw "Controller state is missing." }
-    $state | Add-Member -NotePropertyName productionDesired -NotePropertyValue $Desired -Force
-    $state | Add-Member -NotePropertyName reservedWorkers -NotePropertyValue @(Get-ReservedWorkerNumbers) -Force
-    $state.updatedAt = (Get-Date).ToString("o")
-    $state.version = 4
-    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    if ($found) {
+        $json = $state | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText($statePath, $json, [System.Text.Encoding]::UTF8)
+    }
 }
 
 function Get-ConfiguredProjectUrl {
-    if (-not [string]::IsNullOrWhiteSpace($ProjectUrl)) {
-        $candidate = $ProjectUrl.Trim()
-        if ($candidate -notmatch '^https://chatgpt\.com/g/g-p-[^/]+/project/?$') {
-            throw "ProjectUrl must be a ChatGPT project URL like https://chatgpt.com/g/g-p-.../project"
-        }
-        return $candidate.TrimEnd('/')
-    }
-    $state = Read-ControllerState
-    if ($state -and $state.PSObject.Properties.Name -contains "projectUrl") {
-        $saved = [string]$state.projectUrl
-        if (-not [string]::IsNullOrWhiteSpace($saved)) { return $saved.TrimEnd('/') }
+    param([string]$ExplicitUrl)
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitUrl)) { return $ExplicitUrl.Trim() }
+    if ($env:DEVSPACE_CHATGPT_PROJECT_URL) { return $env:DEVSPACE_CHATGPT_PROJECT_URL.Trim() }
+
+    $configPath = Join-Path $env:USERPROFILE ".devspace\config.json"
+    if (Test-Path -LiteralPath $configPath) {
+        try {
+            $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            if ($config.chatSwarm.projectUrl) { return ([string]$config.chatSwarm.projectUrl).Trim() }
+        } catch {}
     }
     return $null
 }
@@ -292,11 +288,12 @@ function Get-WorkerConversationUrl {
     param([Parameter(Mandatory)]$Runtime)
     $state = Read-ControllerState
     if (-not $state) { return $null }
-    $entry = @($state.workers | Where-Object { [int]$_.number -eq [int]$Runtime.Number } | Select-Object -First 1)
-    if ($entry.Count -eq 0) { return $null }
-    $url = [string]$entry[0].conversationUrl
-    if ([string]::IsNullOrWhiteSpace($url)) { return $null }
-    return $url
+    foreach ($item in @($state.workers)) {
+        if ([int]$item.number -eq [int]$Runtime.Number -and -not [string]::IsNullOrWhiteSpace($item.conversationUrl)) {
+            return [string]$item.conversationUrl
+        }
+    }
+    return $null
 }
 
 function Start-WorkerRuntime {
@@ -356,24 +353,24 @@ function Start-WorkerRuntime {
 
     $process = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
     [pscustomobject]@{
-        WorkerId = $Runtime.WorkerId
-        Pid = $root.ProcessId
-        Responding = [bool]$process.Responding
-        DebugPort = $Runtime.DebugPort
-        Automation = (Test-TcpPort -Port $Runtime.DebugPort)
+        WorkerId     = $Runtime.WorkerId
+        Pid          = $root.ProcessId
+        Responding   = [bool]$process.Responding
+        DebugPort    = $Runtime.DebugPort
+        Automation   = (Test-TcpPort -Port $Runtime.DebugPort)
         WindowHandle = [long]$process.MainWindowHandle
-        WindowTitle = $process.MainWindowTitle
+        WindowTitle  = $process.MainWindowTitle
     }
 }
 
 function Stop-WorkerRuntime {
     param([Parameter(Mandatory)]$Runtime)
-    if (-not $Runtime.Registered) { return }
+    if (-not $Runtime.Registered -or -not $Runtime.ExecutablePath) { return }
 
     $processes = @(
         Get-CimInstance Win32_Process |
             Where-Object {
-                $_.Name -eq "ChatGPT Classic.exe" -and
+                $_.Name -eq $Runtime.ProcessName -and
                 $_.ExecutablePath -eq $Runtime.ExecutablePath
             }
     )
@@ -385,7 +382,8 @@ function Stop-WorkerRuntime {
 function Set-WorkerWindowState {
     param(
         [Parameter(Mandatory)]$Runtime,
-        [ValidateSet("minimize", "restore")][string]$Mode
+        [ValidateSet("minimize", "restore")]
+        [string]$Mode = "minimize"
     )
     $root = Get-WorkerRootProcess -Runtime $Runtime
     if (-not $root) { return $false }
@@ -395,7 +393,6 @@ function Set-WorkerWindowState {
     if ($Mode -eq "minimize") {
         return [ChatSwarmWindowApi]::ShowWindow([IntPtr]$process.MainWindowHandle, 6)
     }
-
     [void][ChatSwarmWindowApi]::ShowWindow([IntPtr]$process.MainWindowHandle, 9)
     [void][ChatSwarmWindowApi]::SetForegroundWindow([IntPtr]$process.MainWindowHandle)
     return $true
@@ -405,18 +402,22 @@ function Get-WorkerStatusRow {
     param([Parameter(Mandatory)]$Runtime)
     $root = Get-WorkerRootProcess -Runtime $Runtime
     $process = if ($root) { Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue } else { $null }
-    $profile = $Runtime.ProfilePath
+    $loggedIn = if ($Runtime.Registered -and $Runtime.ProfilePath) {
+        Test-AuthProfile -ProfilePath $Runtime.ProfilePath
+    } else { $false }
 
     [pscustomobject]@{
-        Worker = $Runtime.WorkerId
-        Registered = $Runtime.Registered
-        Running = [bool]$root
-        Pid = if ($root) { $root.ProcessId } else { $null }
-        Responding = if ($process) { [bool]$process.Responding } else { $false }
-        LoggedInState = if ($profile) { Test-Path -LiteralPath (Join-Path $profile "IndexedDB") } else { $false }
-        Automation = Test-TcpPort -Port $Runtime.DebugPort
-        DebugPort = $Runtime.DebugPort
-        WindowTitle = if ($process) { $process.MainWindowTitle } else { "" }
+        Worker        = $Runtime.WorkerId
+        Label         = $Runtime.Label
+        Registered    = $Runtime.Registered
+        Running       = [bool]$root
+        Pid           = if ($root) { $root.ProcessId } else { $null }
+        Responding    = if ($process) { [bool]$process.Responding } else { $false }
+        LoggedInState = $loggedIn
+        Automation    = Test-TcpPort -Port $Runtime.DebugPort
+        DebugPort     = $Runtime.DebugPort
+        WindowTitle   = if ($process) { $process.MainWindowTitle } else { "" }
+        SavedUrl      = (Get-WorkerConversationUrl -Runtime $Runtime)
     }
 }
 
@@ -433,12 +434,25 @@ function Copy-AuthStateItem {
     $parent = Split-Path -Parent $target
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
+
+    # Clean ephemeral caches from target if copying whole Default folder
+    if ($RelativePath -eq "Default") {
+        foreach ($junk in @("Cache", "Code Cache", "GPUCache", "DawnGraphiteCache", "DawnWebGPUCache", "blob_storage", "lockfile", "LOCK", "LOG", "LOG.old")) {
+            $junkPath = Join-Path $target $junk
+            if (Test-Path -LiteralPath $junkPath) {
+                Remove-Item -LiteralPath $junkPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 function Test-AuthProfile {
     param([string]$ProfilePath)
     if ([string]::IsNullOrWhiteSpace($ProfilePath)) { return $false }
-    Test-Path -LiteralPath (Join-Path $ProfilePath "IndexedDB")
+    (Test-Path -LiteralPath (Join-Path $ProfilePath "IndexedDB")) -or
+    (Test-Path -LiteralPath (Join-Path $ProfilePath "Default\Network\Cookies")) -or
+    (Test-Path -LiteralPath (Join-Path $ProfilePath "Network\Cookies")) -or
+    (Test-Path -LiteralPath (Join-Path $ProfilePath "Local State"))
 }
 
 function Ensure-AuthSeed {
@@ -454,24 +468,38 @@ function Ensure-AuthSeed {
             break
         }
     }
-    if (-not $sourceRuntime) {
-        throw "No authenticated production worker is available to seed new runtimes. Provision/login one worker first."
+
+    $sourceProfilePath = $null
+    $sourceLabel = $null
+    if ($sourceRuntime) {
+        $wasRunning = [bool](Get-WorkerRootProcess -Runtime $sourceRuntime)
+        if ($wasRunning) {
+            Stop-WorkerRuntime -Runtime $sourceRuntime
+            Start-Sleep -Milliseconds 900
+        }
+        $sourceProfilePath = $sourceRuntime.ProfilePath
+        $sourceLabel = $sourceRuntime.WorkerId
+    } else {
+        $primaryInfo = Resolve-ChatGPTDesktopPackage
+        if ($primaryInfo.IsInstalled -and (Test-AuthProfile -ProfilePath $primaryInfo.ProfilePath)) {
+            $sourceProfilePath = $primaryInfo.ProfilePath
+            $sourceLabel = "primary-$($primaryInfo.PackageName)"
+        }
     }
 
-    $wasRunning = [bool](Get-WorkerRootProcess -Runtime $sourceRuntime)
-    if ($wasRunning) {
-        Stop-WorkerRuntime -Runtime $sourceRuntime
-        Start-Sleep -Milliseconds 900
+    if (-not $sourceProfilePath) {
+        throw "No authenticated production worker or primary app is available to seed new runtimes. Log into ChatGPT first."
     }
+
     if (Test-Path -LiteralPath $authSeedProfile) { Remove-Item -LiteralPath $authSeedProfile -Recurse -Force }
     New-Item -ItemType Directory -Path $authSeedProfile -Force | Out-Null
     foreach ($item in $authStateItems) {
-        Copy-AuthStateItem -SourceRoot $sourceRuntime.ProfilePath -TargetRoot $authSeedProfile -RelativePath $item
+        Copy-AuthStateItem -SourceRoot $sourceProfilePath -TargetRoot $authSeedProfile -RelativePath $item
     }
     if (-not (Test-AuthProfile -ProfilePath $authSeedProfile)) {
-        throw "Authentication seed capture failed: IndexedDB is missing from the seed."
+        throw "Authentication seed capture failed: Profile state is missing from the seed."
     }
-    return "captured-from-$($sourceRuntime.WorkerId)"
+    return "captured-from-$sourceLabel"
 }
 
 function Apply-AuthSeed {
@@ -491,60 +519,52 @@ function Apply-AuthSeed {
 
 function Ensure-OneRuntime {
     param([Parameter(Mandatory)]$Runtime)
-    $url = Get-WorkerConversationUrl -Runtime $Runtime
+    if (-not (Test-AuthProfile -ProfilePath $Runtime.ProfilePath)) { [void](Apply-AuthSeed -Runtime $Runtime) }
+
     $root = Get-WorkerRootProcess -Runtime $Runtime
     $automation = Test-TcpPort -Port $Runtime.DebugPort
-    $state = "healthy"
-    $probe = $null
 
     if (-not $root -or -not $automation) {
-        if ($root) { Stop-WorkerRuntime -Runtime $Runtime; Start-Sleep -Milliseconds 500 }
-        $null = Start-WorkerRuntime -Runtime $Runtime -Automation -ForceRestart
-        $state = "started"
+        [void](Start-WorkerRuntime -Runtime $Runtime -Automation -ForceRestart)
     }
 
+    $url = Get-WorkerConversationUrl -Runtime $Runtime
     if ($url) {
         $probeResult = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--probe", "--compact")
-        $currentUrl = Convert-ToCanonicalConversationUrl -Url ([string]$probeResult.probe.href)
-        if ($currentUrl -ne $url) {
+        $probe = $probeResult.probe
+        if ($probe.throttled) {
             $cleanup = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--dismiss-only", "--compact", "--label", $Runtime.Label, "--conversation-url", $url)
             $probe = $cleanup.afterDismiss
-            $state = if ($state -eq "started") { "started-restored" } else { "restored" }
         }
-        else {
-            $cleanup = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--dismiss-only", "--compact", "--label", $Runtime.Label)
+        if (-not $probe.composer) {
+            $cleanup = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--dismiss-only", "--compact", "--label", $Runtime.Label, "--conversation-url", $url)
             $probe = $cleanup.afterDismiss
         }
         if ($probe.connectionInterrupted) {
             $null = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--interrupt-only", "--compact", "--label", $Runtime.Label, "--conversation-url", $url)
-            Start-Sleep -Milliseconds 350
+            Start-Sleep -Milliseconds 400
             $null = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--resume", "--compact", "--label", $Runtime.Label, "--conversation-url", $url)
-            $state = "interrupted-resume-sent"
         }
-        elseif (-not $probe.generating) {
+        elseif (-not $probe.generating -and $probe.composer -and -not $probe.composerDisabled -and $probe.composerTextLength -eq 0) {
             $null = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--resume", "--compact", "--label", $Runtime.Label, "--conversation-url", $url)
-            $state = if ($state -eq "healthy") { "resume-sent" } else { "$state-resume-sent" }
         }
-    }
-    elseif (-not $root -or -not $automation) {
-        $state = "started-no-conversation-map"
-    }
-    else {
-        $state = "running-no-conversation-map"
     }
 
-    Start-Sleep -Milliseconds 250
-    [void](Set-WorkerWindowState -Runtime $Runtime -Mode minimize)
+    if (-not $NoMinimize) {
+        Start-Sleep -Milliseconds 400
+        [void](Set-WorkerWindowState -Runtime $Runtime -Mode minimize)
+    }
+
     $status = Get-WorkerStatusRow -Runtime $Runtime
     [pscustomobject]@{
-        Worker = $Runtime.WorkerId
-        Label = $Runtime.Label
-        State = $state
-        Running = $status.Running
-        Responding = $status.Responding
-        LoggedIn = $status.LoggedInState
-        Automation = $status.Automation
-        ConversationUrl = $url
+        Worker          = $status.Worker
+        Label           = $status.Label
+        State           = "ensured-healthy"
+        Running         = $status.Running
+        Responding      = $status.Responding
+        LoggedIn        = $status.LoggedInState
+        Automation      = $status.Automation
+        ConversationUrl = $status.SavedUrl
     }
 }
 
@@ -559,42 +579,60 @@ function Invoke-CdpHelper {
     if (-not (Test-Path -LiteralPath $bootstrapScript)) {
         throw "CDP bootstrap helper is missing: $bootstrapScript"
     }
-    $node = (Get-Command node -ErrorAction Stop).Source
+
     $commandArguments = @($bootstrapScript, "--port", [string]$Runtime.DebugPort, "--compact") + $Arguments
-    $output = @(& $node @commandArguments)
+    $text = & node @commandArguments 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
-        throw "CDP helper failed for $($Runtime.WorkerId) with exit code $LASTEXITCODE."
+        throw "CDP helper failed for $($Runtime.WorkerId) with exit code $LASTEXITCODE. Output: $text"
     }
-    $text = ($output -join "`n").Trim()
-    try { return ($text | ConvertFrom-Json) }
+    try {
+        return ($text | ConvertFrom-Json)
+    }
     catch { throw "CDP helper returned invalid JSON for $($Runtime.WorkerId): $text" }
 }
 
 function Convert-ToCanonicalConversationUrl {
     param([string]$Url)
-    if ([string]::IsNullOrWhiteSpace($Url) -or $Url -notmatch '^https://chatgpt\.com/(?:c/|g/g-p-[^/]+/c/)') { return $null }
-    $uri = [Uri]$Url
-    return "$($uri.Scheme)://$($uri.Host)$($uri.AbsolutePath)"
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
+    try {
+        $uri = [System.Uri]::new($Url.Trim())
+        if ($uri.Host -ne "chatgpt.com") { return $null }
+        if ($uri.AbsolutePath -match '^/c/[0-9a-fA-F-]+$' -or $uri.AbsolutePath -match '^/g/g-p-[^/]+/c/[0-9a-fA-F-]+$') {
+            return "https://chatgpt.com" + $uri.AbsolutePath
+        }
+        return $null
+    }
+    catch { return $null }
 }
 
 function Invoke-AutoJoin {
     param([Parameter(Mandatory)]$Runtime)
+    if (-not (Test-AuthProfile -ProfilePath $Runtime.ProfilePath)) { [void](Apply-AuthSeed -Runtime $Runtime) }
+    [void](Start-WorkerRuntime -Runtime $Runtime -Automation)
 
     if ([string]::IsNullOrWhiteSpace($InviteCode)) {
         throw "autojoin requires -InviteCode."
     }
-    $arguments = @("--invite", $InviteCode, "--label", $Runtime.Label, "--minimal")
-    $existingConversationUrl = Get-WorkerConversationUrl -Runtime $Runtime
-    if ($existingConversationUrl) {
-        $arguments += @("--conversation-url", $existingConversationUrl)
+
+    $effectiveProjectUrl = Get-ConfiguredProjectUrl -ExplicitUrl $ProjectUrl
+    $arguments = @("--invite", $InviteCode.Trim(), "--label", $Runtime.Label)
+    if ($effectiveProjectUrl) {
+        $arguments += @("--project-url", $effectiveProjectUrl)
     }
     else {
-        $targetProjectUrl = Get-ConfiguredProjectUrl
-        if ($targetProjectUrl) { $arguments += @("--project-url", $targetProjectUrl) }
+        $arguments += "--new-chat"
     }
+
     $result = Invoke-CdpHelper -Runtime $Runtime -Arguments $arguments
-    $url = Convert-ToCanonicalConversationUrl -Url ([string]$result.after.href)
-    if ($url) { Set-WorkerConversationUrl -Runtime $Runtime -Url $url }
+    Start-Sleep -Seconds 2
+    $probe = Invoke-CdpHelper -Runtime $Runtime -Arguments @("--probe")
+    $url = Convert-ToCanonicalConversationUrl -Url ([string]$probe.probe.href)
+    if ($url) {
+        Set-WorkerConversationUrl -Runtime $Runtime -Url $url
+    }
+    if (-not $NoMinimize) {
+        [void](Set-WorkerWindowState -Runtime $Runtime -Mode minimize)
+    }
     return $result
 }
 
@@ -653,13 +691,13 @@ switch ($Action) {
             if (Get-WorkerRootProcess -Runtime $runtime) {
                 Stop-WorkerRuntime -Runtime $runtime
                 $rows += [pscustomobject]@{
-                    Worker = $runtime.WorkerId
-                    Label = $runtime.Label
-                    State = "scaled-down-stopped"
-                    Running = $false
-                    Responding = $false
-                    LoggedIn = (Test-AuthProfile -ProfilePath $runtime.ProfilePath)
-                    Automation = $false
+                    Worker          = $runtime.WorkerId
+                    Label           = $runtime.Label
+                    State           = "scaled-down-stopped"
+                    Running         = $false
+                    Responding      = $false
+                    LoggedIn        = (Test-AuthProfile -ProfilePath $runtime.ProfilePath)
+                    Automation      = $false
                     ConversationUrl = (Get-WorkerConversationUrl -Runtime $runtime)
                 }
             }
@@ -739,11 +777,11 @@ switch ($Action) {
         Start-Sleep -Milliseconds 500
         [void](Set-WorkerWindowState -Runtime $runtime -Mode minimize)
         [pscustomobject]@{
-            Worker = $runtime.WorkerId
-            State = $recoveryState
-            Pid = $started.Pid
-            ConversationUrl = $url
-            WasGenerating = [bool]$probe.generating
+            Worker                = $runtime.WorkerId
+            State                 = $recoveryState
+            Pid                   = $started.Pid
+            ConversationUrl       = $url
+            WasGenerating         = [bool]$probe.generating
             ConnectionInterrupted = [bool]$probe.connectionInterrupted
         } | Format-List
     }

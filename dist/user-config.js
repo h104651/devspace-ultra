@@ -18,6 +18,12 @@ export function devspaceSkillsDir(env = process.env) {
 export function devspaceAgentsDir(env = process.env) {
     return join(devspaceConfigDir(env), "agents");
 }
+export function devspacePluginsDir(env = process.env) {
+    return join(devspaceConfigDir(env), "plugins");
+}
+export function devspaceCapabilityRegistryPath(env = process.env) {
+    return join(devspacePluginsDir(env), "registry.json");
+}
 export function loadDevspaceFiles(env = process.env) {
     const dir = devspaceConfigDir(env);
     const configPath = join(dir, "config.json");

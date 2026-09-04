@@ -18,6 +18,39 @@ It keeps the original DevSpace local MCP workspace capabilities — local files,
 - **Update compatibility manager** — detects ChatGPT Classic version drift, supports a canary runtime, profile backup, rolling worker update, exact-conversation restore, verification, and rollback.
 - **Configurable runtime reservation** — operators can reserve any runtime numbers for standalone/private use; no runtime number is reserved by default in the public package.
 
+### Browser Control
+
+DevSpace Ultra 0.2.0 adds a local-first **DevSpace Browser Control** layer.
+
+After a one-time local Chrome extension setup, any DevSpace-connected orchestrator or subagent can:
+
+- discover user-approved existing Chrome tabs;
+- claim one tab with an exclusive lease so two agents cannot race the same page;
+- show a compact bottom-right **AGENT CLAIMED THIS TAB** control strip plus a visible black agent pointer/click pulse while control is active;
+- open and claim a new managed work tab;
+- inspect a semantic accessibility snapshot with stable short refs such as `e1`, `e2`;
+- click, fill, type, press keys, scroll, hover, drag, select, check, navigate, and wait;
+- capture screenshots plus console/network/download diagnostics;
+- opt into a separate Developer mode for supported CDP commands;
+- release/expire claims safely, with automatic detach and recovery after Chrome restart.
+
+The default tab policy is **selected tabs only**. Programmatic password-field filling is blocked; users enter credentials directly in Chrome, so agents can reuse an authenticated session without receiving the password. Every MCP-connected orchestrator or worker conversation receives the same `browser_control_*` tool surface and can claim a different tab concurrently. See the [Browser Control setup guide](browser-control-bridge/README.md) and [Browser Control architecture](docs/browser-control-architecture.md).
+
+### Unified Agent Capability Runtime — v0.3
+
+DevSpace Ultra 0.3 adds a shared **universal agent capability/plugin layer** on top of the same backend used by the orchestrator and every worker.
+
+The runtime exposes a compact progressive-disclosure `capability_*` surface for discovering, installing, inspecting, enabling, updating, isolating, and calling reusable capabilities. It understands Agent Skills, instruction packs, MCP tools/prompts/resources, DevSpace manifests, Claude-style and Codex-style plugin metadata, nested MCP profiles, official MCP Registry metadata, and explicitly declared local command tools. Managed packages live under `~/.devspace/plugins/packages`; enabled + trusted plugin `SKILL.md` files join normal workspace skill discovery automatically.
+
+Shared MCP services reuse one backend connection. Stateful application MCPs can instead claim isolated named instances with private tokens and ephemeral per-instance environment, allowing the same MCP type to serve independent projects without sharing process state. Git/local installation is separated from execution trust: downloading a repository does not execute it, executable surfaces stay disabled until explicitly trusted, and plugin secrets remain environment-driven instead of being copied into the registry. See [Unified Agent Capability Runtime](docs/capability-runtime.md).
+
+### Demo videos
+
+- [DevSpace Ultra v0.3 — Universal Plugin Layer (Chinese)](https://github.com/enwong93-sketch/devspace-ultra/releases/download/v0.3.0/DevSpace-Ultra-v0.3-Universal-Plugin-Layer-ZH.mp4)
+- [DevSpace Ultra — Chrome Browser Control demo](https://github.com/enwong93-sketch/devspace-ultra/releases/download/v0.3.0/DevSpace-Ultra-Browser-Control-Demo.mp4)
+
+The MP4s are attached to the GitHub release instead of committed into Git history, keeping clones small while leaving both demos directly reachable from the repository.
+
 ## One-click install
 
 ### Windows (PowerShell)
@@ -158,6 +191,8 @@ DevSpace Ultra inherits DevSpace's self-hosted MCP model. Keep the server bound 
 
 Worker tokens and orchestrator tokens are not intentionally written to normal controller logs. Runtime state stores package/profile/conversation mappings, not raw Swarm tokens.
 
+Browser Control uses one-time pairing plus exclusive per-tab claims. DevSpace persists only hashes of bridge/claim tokens and keeps live tab URLs/titles memory-only; the extension defaults to explicitly shared tabs rather than exposing the whole Chrome profile.
+
 See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 
 ## Verification
@@ -168,7 +203,9 @@ Distribution-level verification:
 npm run verify:ultra
 ```
 
-The Chat Swarm regression covers multi-worker fan-out, targeted routing, submit/repark, sparse wake-up, retry idempotency, persistence, close wake-up, recycle safety, and resize invariants.
+The Chat Swarm regression covers multi-worker fan-out, targeted routing, submit/repark, sparse wake-up, retry idempotency, persistence, close wake-up, recycle safety, and resize invariants. Browser Control regression covers multi-session tab claims, semantic actions, restart continuity, and credential boundaries. Capability Runtime regression covers install/trust separation, shared connection deduplication, stateful instance isolation, MCP tools/prompts/resources, command adapters, plugin path confinement, and secret non-persistence.
+
+Release-specific live gates additionally exercise real Chrome Browser Control, a real GitHub-installed capability package, dual stateful MCP instances, and Codex-plugin compatibility. The v0.3 release environment scanned 71 Codex plugin manifests with 71/71 structural compatibility; platform-managed App connector IDs and Codex host lifecycle hooks are preserved as explicit host dependencies rather than silently emulated.
 
 Windows lifecycle testing additionally covers isolated runtime startup, minimized CDP control, worker recovery, long lease soak, same-conversation continuity, and elastic provisioning.
 
@@ -176,6 +213,9 @@ Windows lifecycle testing additionally covers isolated runtime startup, minimize
 
 - [Classic operator guide](docs/chat-swarm-classic-operator.md)
 - [Productization and verification record](docs/chat-swarm-classic-productization.md)
+- [Browser Control architecture and local verification](docs/browser-control-architecture.md)
+- [Unified Agent Capability Runtime](docs/capability-runtime.md)
+- [Configuration](docs/configuration.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License

@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
-import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
+import { devspaceAgentsDir, devspaceCapabilityRegistryPath, devspacePluginsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 100 * 1024 * 1024;
@@ -174,6 +174,12 @@ export function loadConfig(env = process.env) {
         skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
         devspaceSkillsDir: devspaceSkillsDir(env),
         devspaceAgentsDir: devspaceAgentsDir(env),
+        pluginsEnabled: env.DEVSPACE_PLUGINS === undefined
+            ? files.config.pluginsEnabled !== false
+            : parseBoolean(env.DEVSPACE_PLUGINS),
+        pluginPaths: parsePathList(env.DEVSPACE_PLUGIN_PATHS ?? (Array.isArray(files.config.pluginPaths) ? files.config.pluginPaths.join(",") : files.config.pluginPaths)),
+        pluginsDir: resolve(expandHomePath(env.DEVSPACE_PLUGINS_DIR ?? files.config.pluginsDir ?? devspacePluginsDir(env))),
+        capabilityRegistryPath: resolve(expandHomePath(env.DEVSPACE_CAPABILITY_REGISTRY ?? files.config.capabilityRegistryPath ?? devspaceCapabilityRegistryPath(env))),
         subagents: env.DEVSPACE_SUBAGENTS === undefined
             ? files.config.subagents === true
             : parseBoolean(env.DEVSPACE_SUBAGENTS),
