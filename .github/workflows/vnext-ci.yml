@@ -76,39 +76,32 @@ jobs:
             exit 1
           fi
 
-          clean_token="${RAW_CLOUDFLARE_API_TOKEN//$'\r'/}"
-          clean_token="${clean_token//$'\n'/}"
-          if [ -z "$clean_token" ]; then
-            echo '::error::CLOUDFLARE_API_TOKEN is empty after line-break normalization.'
-            exit 1
-          fi
-
-          CLEAN_TOKEN="$clean_token" node <<'NODE'
-          const value = process.env.CLEAN_TOKEN ?? '';
-          const details = {
-            length: value.length,
-            startsBearer: value.startsWith('Bearer '),
-            startsDoubleQuote: value.startsWith('"'),
-            endsDoubleQuote: value.endsWith('"'),
-            startsSingleQuote: value.startsWith("'"),
-            endsSingleQuote: value.endsWith("'"),
-            cfatIndex: value.indexOf('cfat_'),
-            cfutIndex: value.indexOf('cfut_'),
-            whitespaceCount: (value.match(/\s/g) || []).length,
-          };
-          console.log(`Cloudflare token structure: ${JSON.stringify(details)}`);
-          NODE
-
-          if [ "$clean_token" != "$RAW_CLOUDFLARE_API_TOKEN" ]; then
-            echo 'Cloudflare API token contained embedded line break(s); normalized them for the HTTP Authorization header.'
-          fi
-
           if [[ "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\r'* || "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\n'* ]]; then
             echo '::error::CLOUDFLARE_ACCOUNT_ID must be a single line.'
             exit 1
           fi
 
+          token_file="$(mktemp)"
+          TOKEN_FILE="$token_file" node <<'NODE'
+          const fs = require('node:fs');
+          const raw = process.env.RAW_CLOUDFLARE_API_TOKEN ?? '';
+          const matches = raw.match(/cfat_[A-Za-z0-9]{40}[A-Fa-f0-9]{8}/g) || [];
+          if (matches.length !== 1) {
+            console.error(`Expected exactly one canonical cfat_ account token in CLOUDFLARE_API_TOKEN; found ${matches.length}.`);
+            process.exit(1);
+          }
+          fs.writeFileSync(process.env.TOKEN_FILE, matches[0], { encoding: 'utf8', mode: 0o600 });
+          NODE
+
+          clean_token="$(cat "$token_file")"
+          rm -f "$token_file"
+          if [ "${#clean_token}" -ne 53 ]; then
+            echo '::error::Extracted Cloudflare account token has an unexpected length.'
+            exit 1
+          fi
+
           echo "::add-mask::$clean_token"
+          echo 'Cloudflare account token extracted in canonical cfat_ format (53 characters).'
           printf 'CLOUDFLARE_API_TOKEN=%s\n' "$clean_token" >> "$GITHUB_ENV"
           printf 'CLOUDFLARE_ACCOUNT_ID=%s\n' "$RAW_CLOUDFLARE_ACCOUNT_ID" >> "$GITHUB_ENV"
       - name: Verify Cloudflare account API token
