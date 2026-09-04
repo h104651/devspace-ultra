@@ -6,6 +6,7 @@ node_modules/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+NUL
 .env
 .env.*
 !.env.example
@@ -16,6 +17,7 @@ dist/*.map
 .local/
 .devspace/
 chat-swarm-state.json
+browser-control-state.json
 controller-state.json
 update-backups/
 auth-seed/
