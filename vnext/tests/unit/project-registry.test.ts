@@ -7,6 +7,7 @@ import {
   ProjectPathSecurity,
   LocalProjectDefinition
 } from '../../src/local-agent/project-registry';
+import { LocalAgentClient } from '../../src/local-agent/client';
 
 export async function runProjectRegistryUnitTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0;
@@ -257,6 +258,51 @@ export async function runProjectRegistryUnitTests(): Promise<{ passed: number; f
       assert.strictEqual(p.projectId, 'proj-one');
       assert.strictEqual(p.permissions.write, true);
       assert.strictEqual(p.permissions.hostExecution, false);
+    });
+
+    // 8. Long-lived Local Agent project configuration hot-refresh
+    await test('LocalAgentClient: atomically refreshes changed project config only while idle and preserves last good config on invalid writes', () => {
+      const liveConfigPath = path.join(tmpBase, 'live_projects.json');
+      fs.writeFileSync(liveConfigPath, JSON.stringify({
+        projects: [
+          { projectId: 'live-one', root: rootA, permissions: { read: true } }
+        ]
+      }), 'utf-8');
+
+      const client = new LocalAgentClient({
+        gatewayUrl: 'ws://127.0.0.1:1/ws/agent',
+        deviceId: 'test-device',
+        token: 'test-token',
+        projectsConfigFile: liveConfigPath
+      });
+      const internal = client as any;
+      assert.deepStrictEqual(internal.executor.getRegistry().listProjects().map((p: any) => p.projectId), ['live-one']);
+
+      fs.writeFileSync(liveConfigPath, JSON.stringify({
+        projects: [
+          { projectId: 'live-two', root: rootB, permissions: { read: true, write: true } }
+        ]
+      }), 'utf-8');
+      assert.strictEqual(internal.refreshExecutorConfigIfIdle(), true, 'Changed valid config should hot-refresh while idle');
+      assert.deepStrictEqual(internal.executor.getRegistry().listProjects().map((p: any) => p.projectId), ['live-two']);
+      assert.strictEqual(internal.executor.getRegistry().getProject('live-two').permissions.write, true);
+
+      internal.activeTasks.set('busy-task', { taskId: 'busy-task' });
+      fs.writeFileSync(liveConfigPath, JSON.stringify({
+        projects: [
+          { projectId: 'live-three', root: rootA, permissions: { read: true } }
+        ]
+      }), 'utf-8');
+      assert.strictEqual(internal.refreshExecutorConfigIfIdle(), false, 'Active task must defer executor replacement');
+      assert.deepStrictEqual(internal.executor.getRegistry().listProjects().map((p: any) => p.projectId), ['live-two']);
+
+      internal.activeTasks.clear();
+      assert.strictEqual(internal.refreshExecutorConfigIfIdle(), true, 'Deferred valid config should apply once idle');
+      assert.deepStrictEqual(internal.executor.getRegistry().listProjects().map((p: any) => p.projectId), ['live-three']);
+
+      fs.writeFileSync(liveConfigPath, '{ invalid_json: ', 'utf-8');
+      assert.strictEqual(internal.refreshExecutorConfigIfIdle(), false, 'Invalid transient config must not replace the last good executor');
+      assert.deepStrictEqual(internal.executor.getRegistry().listProjects().map((p: any) => p.projectId), ['live-three']);
     });
 
   } finally {
