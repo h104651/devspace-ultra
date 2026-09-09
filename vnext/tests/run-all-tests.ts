@@ -1,6 +1,7 @@
 import { runAuthUnitTests } from './unit/auth.test';
 import { runScopesUnitTests } from './unit/scopes.test';
 import { runTaskStateUnitTests } from './unit/task-state.test';
+import { runTaskLogRetentionUnitTests } from './unit/task-log-retention.test';
 import { runRedactorUnitTests } from './unit/redactor.test';
 import { runPathSanitizerUnitTests } from './unit/path-sanitizer.test';
 import { runArtifactsUnitTests } from './unit/artifacts.test';
@@ -43,6 +44,7 @@ async function main() {
     { name: 'Unit: Auth & Token Management', runner: runAuthUnitTests },
     { name: 'Unit: Scopes & Permissions', runner: runScopesUnitTests },
     { name: 'Unit: Task State & Transitions', runner: runTaskStateUnitTests },
+    { name: 'Unit: Bounded Task Log Retention', runner: runTaskLogRetentionUnitTests },
     { name: 'Unit: Secret & PII Redactor', runner: runRedactorUnitTests },
     { name: 'Unit: Path Sanitizer & Sandbox', runner: runPathSanitizerUnitTests },
     { name: 'Unit: Artifacts & Integrity', runner: runArtifactsUnitTests },
