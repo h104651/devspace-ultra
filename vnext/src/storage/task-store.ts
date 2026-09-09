@@ -14,6 +14,8 @@ import { IStorageAdapter } from './storage-adapter.interface';
 
 const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['succeeded', 'failed', 'cancelled', 'stale']);
 const ACTIVE_ATTEMPT_STATUSES = new Set<TaskAttemptStatus>(['claimed', 'acknowledged', 'running']);
+const TASK_LOG_MAX_LINES = 2000;
+const TASK_LOG_RETENTION_MARKER = `[LOG_RETENTION] Older task logs truncated; retaining newest ${TASK_LOG_MAX_LINES - 1} entries`;
 
 type TaskWaitListener = (task: DurableTask) => void;
 
@@ -47,6 +49,7 @@ export class TaskStore {
     for (const task of tasks || []) {
       if (task?.taskId) {
         this.normalizeAttemptLedger(task);
+        this.enforceLogRetention(task);
         this.tasks.set(task.taskId, task);
       }
     }
@@ -62,6 +65,7 @@ export class TaskStore {
             const raw = fs.readFileSync(path.join(this.tasksDir, file), 'utf-8');
             const task: DurableTask = JSON.parse(raw);
             this.normalizeAttemptLedger(task);
+            this.enforceLogRetention(task);
             this.tasks.set(task.taskId, task);
           } catch (err) {
             console.error(`Failed to load task file ${file}:`, err);
@@ -83,7 +87,15 @@ export class TaskStore {
     }
   }
 
+  private enforceLogRetention(task: DurableTask): void {
+    if (!Array.isArray(task.logs)) task.logs = [];
+    if (task.logs.length <= TASK_LOG_MAX_LINES) return;
+    const newest = task.logs.slice(-(TASK_LOG_MAX_LINES - 1));
+    task.logs = [TASK_LOG_RETENTION_MARKER, ...newest];
+  }
+
   private saveTask(task: DurableTask) {
+    this.enforceLogRetention(task);
     task.updatedAt = Date.now();
 
     if (this.tasksDir) {
@@ -223,6 +235,7 @@ export class TaskStore {
     const durable = this.storageAdapter?.getTaskSync?.(taskId);
     if (durable) {
       this.normalizeAttemptLedger(durable);
+      this.enforceLogRetention(durable);
       this.tasks.set(taskId, durable);
     }
     return durable;
