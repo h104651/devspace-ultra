@@ -26,6 +26,35 @@ export interface TaskRetryPolicy {
   requeueOnStale: boolean;
 }
 
+export type TaskAttemptStatus =
+  | 'claimed'
+  | 'acknowledged'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'interrupted'
+  | 'cancelled';
+
+/**
+ * One durable execution attempt for a task.
+ *
+ * Attempts are append-only history. A retry creates a new record rather than
+ * overwriting the previous worker/lease state, so stale recovery and operator
+ * diagnostics can distinguish "the task" from each concrete execution turn.
+ */
+export interface TaskAttempt {
+  id: string;
+  attemptNumber: number;
+  status: TaskAttemptStatus;
+  claimedBy: string;
+  claimedAt: number;
+  acknowledgedAt?: number;
+  startedAt?: number;
+  completedAt?: number;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
 export interface TaskArtifactSummary {
   id: string;
   name: string;
@@ -66,6 +95,13 @@ export interface DurableTask<TPayload = any, TResult = any> {
   };
   lease?: TaskLease;
   retryPolicy: TaskRetryPolicy;
+  /**
+   * Optional for backwards compatibility with tasks persisted before the
+   * attempt-ledger migration. New tasks always initialize this to an empty list.
+   */
+  attempts?: TaskAttempt[];
+  /** ID of the single currently active attempt, if any. */
+  activeAttemptId?: string;
   artifacts: TaskArtifactSummary[];
   logs: string[];
   externalRun?: ExternalRunInfo;
