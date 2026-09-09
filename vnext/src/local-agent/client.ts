@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import { TaskExecutor, TaskExecutorConfig } from './task-executor';
 import { EnvironmentProbe } from './environment-probe';
 import { ProjectRegistry, LocalProjectDefinition } from './project-registry';
@@ -23,6 +24,9 @@ export interface LocalAgentClientConfig {
 export class LocalAgentClient {
   private config: LocalAgentClientConfig;
   private executor: TaskExecutor;
+  private executorConfig: TaskExecutorConfig;
+  private executorConfigRevision?: string;
+  private rejectedExecutorConfigRevision?: string;
   private ws?: WebSocket;
   private isRunning = false;
   private reconnectTimeout?: NodeJS.Timeout;
@@ -37,13 +41,15 @@ export class LocalAgentClient {
       heartbeatIntervalMs: config.heartbeatIntervalMs || 10000,
       pollIntervalMs: config.pollIntervalMs || 3000
     };
-    this.executor = new TaskExecutor({
+    this.executorConfig = {
       allowedWorkspaces: config.allowedWorkspaces,
       projects: config.projects,
       projectRegistry: config.projectRegistry,
       projectsConfigFile: config.projectsConfigFile,
       allowRawShell: config.allowRawShell
-    });
+    };
+    this.executor = new TaskExecutor(this.executorConfig);
+    this.executorConfigRevision = this.computeExecutorConfigRevision();
   }
 
   public start(): void {
@@ -62,6 +68,59 @@ export class LocalAgentClient {
     }
   }
 
+  /**
+   * Returns a content revision for the only executor configuration source that
+   * can legitimately change while this long-lived process is running.
+   *
+   * Explicit in-memory ProjectRegistry ownership is intentionally excluded: its
+   * caller owns mutation/lifecycle and replacing it behind that caller's back
+   * would violate the object boundary.
+   */
+  private computeExecutorConfigRevision(): string | undefined {
+    if (this.executorConfig.projectRegistry || !this.executorConfig.projectsConfigFile) {
+      return undefined;
+    }
+
+    try {
+      const raw = fs.readFileSync(this.executorConfig.projectsConfigFile);
+      return crypto.createHash('sha256').update(raw).digest('hex');
+    } catch {
+      // Missing/unreadable transient writes keep the last good executor. The
+      // next readable file will produce a revision and be considered normally.
+      return undefined;
+    }
+  }
+
+  /**
+   * Hot-refresh the project-backed TaskExecutor only at an idle boundary.
+   *
+   * This is the vNext equivalent of upstream daemon config-revision handling:
+   * changed configuration becomes live without a process restart, but active
+   * work is never interrupted. Invalid/partial writes fail open to the last
+   * known-good executor and the same rejected bytes are not retried every poll.
+   */
+  private refreshExecutorConfigIfIdle(): boolean {
+    if (this.activeTasks.size > 0) return false;
+
+    const nextRevision = this.computeExecutorConfigRevision();
+    if (!nextRevision || nextRevision === this.executorConfigRevision || nextRevision === this.rejectedExecutorConfigRevision) {
+      return false;
+    }
+
+    try {
+      const nextExecutor = new TaskExecutor(this.executorConfig);
+      this.executor = nextExecutor;
+      this.executorConfigRevision = nextRevision;
+      this.rejectedExecutorConfigRevision = undefined;
+      console.log('[AGENT] Reloaded changed local project configuration without restarting the agent.');
+      return true;
+    } catch (err: any) {
+      this.rejectedExecutorConfigRevision = nextRevision;
+      console.warn(`[AGENT] Ignoring invalid changed project configuration; keeping last good executor: ${err?.message || err}`);
+      return false;
+    }
+  }
+
   private connect(): void {
     if (!this.isRunning) return;
 
@@ -71,6 +130,7 @@ export class LocalAgentClient {
 
     this.ws.on('open', () => {
       this.reconnectAttempts = 0;
+      this.refreshExecutorConfigIfIdle();
       this.registerWithGateway(probe);
       this.startHeartbeat();
       this.startPollLoop(probe.capabilities);
@@ -144,6 +204,7 @@ export class LocalAgentClient {
     if (this.pollTimer) clearInterval(this.pollTimer);
 
     this.pollTimer = setInterval(() => {
+      this.refreshExecutorConfigIfIdle();
       this.send({
         type: 'TASK_CLAIM_POLL',
         messageId: crypto.randomUUID(),
@@ -232,6 +293,7 @@ export class LocalAgentClient {
       });
     } finally {
       this.activeTasks.delete(task.taskId);
+      this.refreshExecutorConfigIfIdle();
     }
   }
 }
