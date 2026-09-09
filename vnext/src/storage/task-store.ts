@@ -354,13 +354,34 @@ export class TaskStore {
 
   public startTask(taskId: string, deviceId: string): boolean {
     const task = this.tasks.get(taskId);
-    if (!task || !task.lease || task.lease.claimedBy !== deviceId) return false;
-    if (task.status !== 'claimed' && task.status !== 'acknowledged' && task.status !== 'running') return false;
+    if (!task) return false;
+
+    const now = Date.now();
+
+    if (task.lease) {
+      // A claimed task has an authoritative owner. No caller — including an
+      // internal backend — may take over that active attempt implicitly.
+      if (task.lease.claimedBy !== deviceId) return false;
+      if (task.status !== 'claimed' && task.status !== 'acknowledged' && task.status !== 'running') return false;
+    } else {
+      // Gateway-internal backends historically start immediately after durable
+      // submission and therefore do not perform the local-agent claim handshake.
+      // Preserve that path, but require local-device tasks to claim first.
+      if (task.backend === 'local' || task.status !== 'queued') return false;
+
+      const created = this.createAttempt(task, deviceId, now);
+      if (!created) return false;
+      task.lease = {
+        claimedBy: deviceId,
+        claimedAt: now,
+        leaseExpiresAt: now + this.defaultLeaseDurationMs,
+        lastHeartbeatAt: now
+      };
+    }
 
     const attempt = this.ensureActiveAttempt(task, deviceId);
     if (!attempt || attempt.claimedBy !== deviceId) return false;
 
-    const now = Date.now();
     if (task.status !== 'running') {
       task.status = 'running';
       task.startedAt = task.startedAt ?? now;
