@@ -178,7 +178,14 @@ export class TaskStore {
     error?: { code?: string; message?: string }
   ): void {
     this.normalizeAttemptLedger(task);
-    const attempt = this.getActiveAttempt(task);
+    let attempt = this.getActiveAttempt(task);
+    if (
+      !attempt &&
+      task.lease?.claimedBy &&
+      (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running')
+    ) {
+      attempt = this.ensureActiveAttempt(task, task.lease.claimedBy);
+    }
     if (!attempt) {
       task.activeAttemptId = undefined;
       return;
