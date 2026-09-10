@@ -20,10 +20,17 @@ export async function runTaskLogRetentionUnitTests(): Promise<{ passed: number; 
     assert.ok(retained.length <= 2000, `Task logs must be bounded; retained ${retained.length} lines`);
     assert.ok(retained[0]?.includes('[LOG_RETENTION]'), 'Truncated history must leave an explicit retention marker');
     assert.ok(retained[retained.length - 1]?.includes('diagnostic-line-2499'), 'Newest task logs must be preserved');
+
+    const hugeUtf8Line = '🚀'.repeat(5000);
+    store.appendLogs(task.taskId, [hugeUtf8Line]);
+    const afterHugeLine = store.getTask(task.taskId)?.logs || [];
+    const newest = afterHugeLine[afterHugeLine.length - 1] || '';
+    assert.ok(Buffer.byteLength(newest, 'utf8') <= 4096, `Individual retained log entry must be <= 4096 UTF-8 bytes; got ${Buffer.byteLength(newest, 'utf8')}`);
+    assert.ok(newest.includes('[LOG_LINE_TRUNCATED]'), 'Byte-truncated log entry must carry an explicit marker');
     passed++;
   } catch (err: any) {
     failed++;
-    console.error(`\n  FAIL: Task log retention remains bounded while preserving newest diagnostics\n  ${err.stack || err.message}`);
+    console.error(`\n  FAIL: Task log retention remains bounded by entry count and UTF-8 bytes\n  ${err.stack || err.message}`);
   }
 
   return { passed, failed };
