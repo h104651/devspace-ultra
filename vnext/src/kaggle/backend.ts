@@ -238,14 +238,23 @@ export class KaggleBackend {
   }
 
   /**
-   * Reconciles all non-terminal tasks associated with an external Kaggle run on system hydration/startup.
+   * Reconciles all non-terminal Kaggle tasks on hydration/startup. Legacy rows
+   * created before externalRun persistence are rediscovered from their backend,
+   * capability and durable kernelSlug rather than being resubmitted.
    */
   public async reconcileDanglingTasks(): Promise<{ reconciledCount: number }> {
     let count = 0;
     const nonTerminalTasks = this.taskStore.listTasks().filter(t =>
       ['queued', 'claimed', 'acknowledged', 'running'].includes(t.status) &&
-      t.externalRun &&
-      t.externalRun.provider === 'kaggle'
+      (
+        t.externalRun?.provider === 'kaggle' ||
+        (
+          t.backend === 'kaggle' &&
+          t.capability === 'kaggle:run' &&
+          typeof t.payload?.kernelSlug === 'string' &&
+          t.payload.kernelSlug.length > 0
+        )
+      )
     );
     for (const task of nonTerminalTasks) {
       try {
