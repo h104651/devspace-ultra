@@ -1,0 +1,120 @@
+name: vNext Production Diagnostic
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/vnext-production-diagnostic.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/vnext-production-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_ORIGIN: https://devspace-ultra-gateway.abdul-hsu.workers.dev
+
+jobs:
+  validate-diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Verify pinned Wrangler is available
+        run: npx --yes wrangler@4.129.0 --version
+
+  diagnose-production:
+    name: Capture production /health failure
+    needs: validate-diagnostic
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vnext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Capture error-only Worker tail and probe /health
+        env:
+          RAW_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RAW_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$RAW_CLOUDFLARE_API_TOKEN" ] || [ -z "$RAW_CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo '::error::Cloudflare diagnostic credentials are not configured.'
+            exit 1
+          fi
+
+          token_file="$(mktemp)"
+          TOKEN_FILE="$token_file" node <<'NODE'
+          const fs = require('node:fs');
+          const raw = process.env.RAW_CLOUDFLARE_API_TOKEN ?? '';
+          const matches = raw.match(/cfat_[A-Za-z0-9]{40}[A-Fa-f0-9]{8}/g) || [];
+          if (matches.length !== 1) {
+            console.error(`Expected exactly one canonical cfat_ account token; found ${matches.length}.`);
+            process.exit(1);
+          }
+          fs.writeFileSync(process.env.TOKEN_FILE, matches[0], { encoding: 'utf8', mode: 0o600 });
+          NODE
+
+          clean_token="$(cat "$token_file")"
+          rm -f "$token_file"
+          echo "::add-mask::$clean_token"
+          export CLOUDFLARE_API_TOKEN="$clean_token"
+          export CLOUDFLARE_ACCOUNT_ID="$RAW_CLOUDFLARE_ACCOUNT_ID"
+
+          tail_out="$(mktemp)"
+          tail_err="$(mktemp)"
+          health_body="$(mktemp)"
+
+          timeout 30s npx --yes wrangler@4.129.0 tail devspace-ultra-gateway \
+            --format json \
+            --status error \
+            --ip self \
+            >"$tail_out" 2>"$tail_err" &
+          tail_pid=$!
+
+          cleanup() {
+            kill "$tail_pid" 2>/dev/null || true
+            wait "$tail_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # Give the tail session enough time to attach before triggering the failing request.
+          sleep 8
+
+          health_status="$(curl --silent --show-error \
+            --output "$health_body" \
+            --write-out '%{http_code}' \
+            "$PRODUCTION_ORIGIN/health" || true)"
+
+          echo "::notice::Production /health returned HTTP $health_status"
+          echo '--- /health response body ---'
+          cat "$health_body" || true
+          echo
+
+          # Allow the error event to arrive before closing the tail session.
+          sleep 8
+          cleanup
+          trap - EXIT
+
+          echo '--- wrangler tail stderr ---'
+          cat "$tail_err" || true
+          echo
+          echo '--- wrangler tail JSON ---'
+          cat "$tail_out" || true
+          echo
+
+          if [ "$health_status" != '200' ]; then
+            echo "::error::Production /health remains unhealthy (HTTP $health_status); see Worker tail above for the root exception."
+            exit 1
+          fi
