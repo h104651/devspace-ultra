@@ -1,6 +1,8 @@
 import { runAuthUnitTests } from './unit/auth.test';
 import { runScopesUnitTests } from './unit/scopes.test';
 import { runTaskStateUnitTests } from './unit/task-state.test';
+import { runTaskAttemptMigrationTests } from './unit/task-attempt-migration.test';
+import { runTaskLogRetentionUnitTests } from './unit/task-log-retention.test';
 import { runRedactorUnitTests } from './unit/redactor.test';
 import { runPathSanitizerUnitTests } from './unit/path-sanitizer.test';
 import { runArtifactsUnitTests } from './unit/artifacts.test';
@@ -10,6 +12,7 @@ import { runDeviceStatusLiveCapabilitiesUnitTests } from './unit/device-status-l
 import { runLocalFastToolsBoundedResultTests } from './unit/local-fast-tools-bounded-result.test';
 import { runGatewayFlowIntegrationTests } from './integration/gateway-flow.test';
 import { runKaggleIntegrationTests } from './integration/kaggle-mock.test';
+import { runKaggleLegacyRecoveryTests } from './integration/kaggle-legacy-recovery.test';
 import { runSwarmIntegrationTests } from './integration/swarm.test';
 import { runStaleRecoveryIntegrationTests } from './integration/stale-recovery.test';
 import { runIdempotencyIntegrationTests } from './integration/idempotency.test';
@@ -20,7 +23,8 @@ import { runLocalWorkspaceDiscoveryIntegrationTests } from './integration/local-
 import { runSecurityTests } from './security/security.test';
 import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-security.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
-import { runWorkerRoutingRecoveryTests } from './cloudflare/worker-routing-recovery.test';
+import { runRemoteTaskWaitProductionTests } from './cloudflare/remote-task-wait-production.test';
+import { runTaskDurablePersistenceTests } from './cloudflare/task-durable-persistence.test';
 import { runChatSwarmBrowserE2ETests } from './cloudflare/chat-swarm-browser-e2e.test';
 import { runChatSwarmStorageEfficiencyTests } from './cloudflare/chat-swarm-storage-efficiency.test';
 import { runColdStartStorageEfficiencyTests } from './cloudflare/cold-start-storage-efficiency.test';
@@ -43,6 +47,8 @@ async function main() {
     { name: 'Unit: Auth & Token Management', runner: runAuthUnitTests },
     { name: 'Unit: Scopes & Permissions', runner: runScopesUnitTests },
     { name: 'Unit: Task State & Transitions', runner: runTaskStateUnitTests },
+    { name: 'Unit: Legacy In-Flight Attempt Migration', runner: runTaskAttemptMigrationTests },
+    { name: 'Unit: Bounded Task Log Retention', runner: runTaskLogRetentionUnitTests },
     { name: 'Unit: Secret & PII Redactor', runner: runRedactorUnitTests },
     { name: 'Unit: Path Sanitizer & Sandbox', runner: runPathSanitizerUnitTests },
     { name: 'Unit: Artifacts & Integrity', runner: runArtifactsUnitTests },
@@ -57,6 +63,7 @@ async function main() {
     { name: 'Integration: Local Multi-Project Named Routing', runner: runLocalProjectRoutingIntegrationTests },
     { name: 'Integration: Local Workspace Discovery & Nested Operations', runner: runLocalWorkspaceDiscoveryIntegrationTests },
     { name: 'Integration: Kaggle Mock Backend', runner: runKaggleIntegrationTests },
+    { name: 'Integration: Pre-Migration Kaggle Restart Recovery', runner: runKaggleLegacyRecoveryTests },
     { name: 'Integration: Kaggle Persistent Project Control v1', runner: runKaggleProjectTests },
     { name: 'Integration: Kaggle Large Project Workspace Mode', runner: runKaggleWorkspaceTests },
     { name: 'Integration: Kaggle Dataset File Direct Read', runner: runKaggleDatasetFileTests },
@@ -64,7 +71,8 @@ async function main() {
     { name: 'Integration: Stale Task Recovery', runner: runStaleRecoveryIntegrationTests },
     { name: 'Integration: Idempotency & Replays', runner: runIdempotencyIntegrationTests },
     { name: 'Cloudflare: Workers Runtime & SQLite DO & R2 Adapter', runner: runWorkersRuntimeTests },
-    { name: 'Cloudflare: Non-destructive Recovery Singleton Routing', runner: runWorkerRoutingRecoveryTests },
+    { name: 'Cloudflare: Production remote_task_wait MCP Surface', runner: runRemoteTaskWaitProductionTests },
+    { name: 'Cloudflare: Durable Task Execution Metadata Persistence', runner: runTaskDurablePersistenceTests },
     { name: 'Cloudflare: R2 Cost Guard & Hard Quota Limits', runner: runR2CostGuardTests },
     { name: 'Cloudflare: Browser Swarm E2E & DO Restart', runner: runChatSwarmBrowserE2ETests },
     { name: 'Cloudflare: Chat Swarm Durable Storage Efficiency', runner: runChatSwarmStorageEfficiencyTests },
