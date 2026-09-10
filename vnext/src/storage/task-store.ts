@@ -15,7 +15,9 @@ import { IStorageAdapter } from './storage-adapter.interface';
 const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['succeeded', 'failed', 'cancelled', 'stale']);
 const ACTIVE_ATTEMPT_STATUSES = new Set<TaskAttemptStatus>(['claimed', 'acknowledged', 'running']);
 const TASK_LOG_MAX_LINES = 2000;
+const TASK_LOG_MAX_ENTRY_BYTES = 4096;
 const TASK_LOG_RETENTION_MARKER = `[LOG_RETENTION] Older task logs truncated; retaining newest ${TASK_LOG_MAX_LINES - 1} entries`;
+const TASK_LOG_LINE_TRUNCATION_MARKER = ' …[LOG_LINE_TRUNCATED]';
 
 type TaskWaitListener = (task: DurableTask) => void;
 
@@ -49,7 +51,7 @@ export class TaskStore {
     for (const task of tasks || []) {
       if (task?.taskId) {
         this.normalizeAttemptLedger(task);
-        this.enforceLogRetention(task);
+        this.normalizeLogEntries(task);
         this.tasks.set(task.taskId, task);
       }
     }
@@ -65,7 +67,7 @@ export class TaskStore {
             const raw = fs.readFileSync(path.join(this.tasksDir, file), 'utf-8');
             const task: DurableTask = JSON.parse(raw);
             this.normalizeAttemptLedger(task);
-            this.enforceLogRetention(task);
+            this.normalizeLogEntries(task);
             this.tasks.set(task.taskId, task);
           } catch (err) {
             console.error(`Failed to load task file ${file}:`, err);
@@ -85,6 +87,29 @@ export class TaskStore {
       // authority and the next valid transition can create a replacement record.
       task.activeAttemptId = undefined;
     }
+  }
+
+  private truncateLogEntry(value: any): string {
+    const text = String(value ?? '');
+    if (Buffer.byteLength(text, 'utf8') <= TASK_LOG_MAX_ENTRY_BYTES) return text;
+
+    const suffixBytes = Buffer.byteLength(TASK_LOG_LINE_TRUNCATION_MARKER, 'utf8');
+    const maxPrefixBytes = Math.max(0, TASK_LOG_MAX_ENTRY_BYTES - suffixBytes);
+    const prefixChars: string[] = [];
+    let prefixBytes = 0;
+    for (const char of text) {
+      const charBytes = Buffer.byteLength(char, 'utf8');
+      if (prefixBytes + charBytes > maxPrefixBytes) break;
+      prefixChars.push(char);
+      prefixBytes += charBytes;
+    }
+    return `${prefixChars.join('')}${TASK_LOG_LINE_TRUNCATION_MARKER}`;
+  }
+
+  private normalizeLogEntries(task: DurableTask): void {
+    if (!Array.isArray(task.logs)) task.logs = [];
+    task.logs = task.logs.map(line => this.truncateLogEntry(line));
+    this.enforceLogRetention(task);
   }
 
   private enforceLogRetention(task: DurableTask): void {
@@ -242,7 +267,7 @@ export class TaskStore {
     const durable = this.storageAdapter?.getTaskSync?.(taskId);
     if (durable) {
       this.normalizeAttemptLedger(durable);
-      this.enforceLogRetention(durable);
+      this.normalizeLogEntries(durable);
       this.tasks.set(taskId, durable);
     }
     return durable;
@@ -445,7 +470,7 @@ export class TaskStore {
     if (!task) return;
 
     for (const line of lines) {
-      task.logs.push(`[${new Date().toISOString()}] ${line}`);
+      task.logs.push(this.truncateLogEntry(`[${new Date().toISOString()}] ${line}`));
     }
     this.saveTask(task);
   }
@@ -495,7 +520,7 @@ export class TaskStore {
       // task in an in-memory "retrying" timer that will never fire.
       if (this.storageAdapter) {
         task.status = 'queued';
-        task.logs.push(`[RETRY] Requeued durably after failure (attempt ${task.retryPolicy.retryCount}/${task.retryPolicy.maxRetries}): ${error.message}`);
+        task.logs.push(this.truncateLogEntry(`[RETRY] Requeued durably after failure (attempt ${task.retryPolicy.retryCount}/${task.retryPolicy.maxRetries}): ${error.message}`));
       } else {
         task.status = 'retrying';
         setTimeout(() => {
@@ -551,6 +576,7 @@ export class TaskStore {
     if (!task) return false;
     Object.assign(task, updates);
     this.normalizeAttemptLedger(task);
+    if (updates.logs !== undefined) this.normalizeLogEntries(task);
     this.saveTask(task);
     return true;
   }
@@ -572,7 +598,7 @@ export class TaskStore {
         now > task.lease.leaseExpiresAt
       ) {
         const claimedBy = task.lease.claimedBy;
-        task.logs.push(`[STALE_DETECTION] Lease expired at ${new Date(task.lease.leaseExpiresAt).toISOString()} for worker ${claimedBy}`);
+        task.logs.push(this.truncateLogEntry(`[STALE_DETECTION] Lease expired at ${new Date(task.lease.leaseExpiresAt).toISOString()} for worker ${claimedBy}`));
         this.ensureActiveAttempt(task, claimedBy);
         this.finishActiveAttempt(task, 'interrupted', {
           code: 'TASK_LEASE_EXPIRED',
