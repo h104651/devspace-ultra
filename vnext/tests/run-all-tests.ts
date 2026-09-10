@@ -12,6 +12,7 @@ import { runDeviceStatusLiveCapabilitiesUnitTests } from './unit/device-status-l
 import { runLocalFastToolsBoundedResultTests } from './unit/local-fast-tools-bounded-result.test';
 import { runGatewayFlowIntegrationTests } from './integration/gateway-flow.test';
 import { runKaggleIntegrationTests } from './integration/kaggle-mock.test';
+import { runKaggleLegacyRecoveryTests } from './integration/kaggle-legacy-recovery.test';
 import { runSwarmIntegrationTests } from './integration/swarm.test';
 import { runStaleRecoveryIntegrationTests } from './integration/stale-recovery.test';
 import { runIdempotencyIntegrationTests } from './integration/idempotency.test';
@@ -62,6 +63,7 @@ async function main() {
     { name: 'Integration: Local Multi-Project Named Routing', runner: runLocalProjectRoutingIntegrationTests },
     { name: 'Integration: Local Workspace Discovery & Nested Operations', runner: runLocalWorkspaceDiscoveryIntegrationTests },
     { name: 'Integration: Kaggle Mock Backend', runner: runKaggleIntegrationTests },
+    { name: 'Integration: Pre-Migration Kaggle Restart Recovery', runner: runKaggleLegacyRecoveryTests },
     { name: 'Integration: Kaggle Persistent Project Control v1', runner: runKaggleProjectTests },
     { name: 'Integration: Kaggle Large Project Workspace Mode', runner: runKaggleWorkspaceTests },
     { name: 'Integration: Kaggle Dataset File Direct Read', runner: runKaggleDatasetFileTests },
