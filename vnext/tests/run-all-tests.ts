@@ -25,6 +25,7 @@ import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-secur
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
 import { runRemoteTaskWaitProductionTests } from './cloudflare/remote-task-wait-production.test';
 import { runTaskDurablePersistenceTests } from './cloudflare/task-durable-persistence.test';
+import { runSqliteSchemaMigrationTests } from './cloudflare/sqlite-schema-migration.test';
 import { runChatSwarmBrowserE2ETests } from './cloudflare/chat-swarm-browser-e2e.test';
 import { runChatSwarmStorageEfficiencyTests } from './cloudflare/chat-swarm-storage-efficiency.test';
 import { runColdStartStorageEfficiencyTests } from './cloudflare/cold-start-storage-efficiency.test';
@@ -73,6 +74,7 @@ async function main() {
     { name: 'Cloudflare: Workers Runtime & SQLite DO & R2 Adapter', runner: runWorkersRuntimeTests },
     { name: 'Cloudflare: Production remote_task_wait MCP Surface', runner: runRemoteTaskWaitProductionTests },
     { name: 'Cloudflare: Durable Task Execution Metadata Persistence', runner: runTaskDurablePersistenceTests },
+    { name: 'Cloudflare: Real SQLite Legacy Schema Migration', runner: runSqliteSchemaMigrationTests },
     { name: 'Cloudflare: R2 Cost Guard & Hard Quota Limits', runner: runR2CostGuardTests },
     { name: 'Cloudflare: Browser Swarm E2E & DO Restart', runner: runChatSwarmBrowserE2ETests },
     { name: 'Cloudflare: Chat Swarm Durable Storage Efficiency', runner: runChatSwarmStorageEfficiencyTests },
