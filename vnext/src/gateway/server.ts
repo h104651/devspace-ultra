@@ -17,6 +17,7 @@ import { LeaseMonitor } from './lease-monitor';
 import { TaskRouter } from './task-router';
 import { McpHandlers, McpCallerContext } from '../mcp/handlers';
 import * as tools from '../mcp/tools';
+import { REMOTE_TASK_WAIT_TOOL, handleRemoteTaskWait } from '../mcp/reliability-tools';
 import { TokenPayload } from '../types/auth';
 import { modernCacheableResult, modernResult, validateMcpRequest, MCP_SUPPORTED_MODERN_VERSIONS } from '../mcp/protocol';
 
@@ -108,13 +109,14 @@ export class GatewayServer {
   }
 
   private getToolsList() {
-    return tools.getCanonicalToolsList();
+    return [...tools.getCanonicalToolsList(), REMOTE_TASK_WAIT_TOOL];
   }
 
   private async callTool(name: string, args: any, caller: McpCallerContext): Promise<any> {
     switch (name) {
       case 'remote_task_submit': return this.mcpHandlers.handleRemoteTaskSubmit(args, caller);
       case 'remote_task_status': return this.mcpHandlers.handleRemoteTaskStatus(args, caller);
+      case 'remote_task_wait': return handleRemoteTaskWait(this.taskStore, args, caller.scopes);
       case 'remote_task_logs': return this.mcpHandlers.handleRemoteTaskLogs(args, caller);
       case 'remote_task_artifacts': return this.mcpHandlers.handleRemoteTaskArtifacts(args, caller);
       case 'remote_task_cancel': return this.mcpHandlers.handleRemoteTaskCancel(args, caller);
