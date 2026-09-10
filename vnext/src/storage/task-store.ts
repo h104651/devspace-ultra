@@ -587,8 +587,10 @@ export class TaskStore {
     let failedCount = 0;
 
     for (const task of this.tasks.values()) {
-      // External durable jobs (such as Kaggle runs) must not be blindly requeued on local worker lease timeout.
-      if (task.externalRun && task.externalRun.provider === 'kaggle') {
+      // Kaggle is an external remote backend. Its provider state, not a local
+      // worker lease, is authoritative — including legacy rows that predate
+      // externalRun persistence and can only be identified by backend identity.
+      if (task.backend === 'kaggle' || task.externalRun?.provider === 'kaggle') {
         continue;
       }
 
