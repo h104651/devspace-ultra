@@ -165,9 +165,36 @@ jobs:
         run: |
           set -euo pipefail
 
-          health="$(curl --fail --silent --show-error "$PRODUCTION_ORIGIN/health")"
-          if [ "$health" != '{"ok":true}' ]; then
-            echo "::error::Unexpected /health response: $health"
+          health_status='000'
+          health_body=''
+          for attempt in 1 2 3 4 5 6; do
+            body_file="$(mktemp)"
+            health_status="$(curl --silent --show-error \
+              --output "$body_file" \
+              --write-out '%{http_code}' \
+              "$PRODUCTION_ORIGIN/health" || true)"
+            health_body="$(cat "$body_file" || true)"
+            rm -f "$body_file"
+
+            if [ "$health_status" = '200' ] && [ "$health_body" = '{"ok":true}' ]; then
+              echo "Production /health passed on attempt $attempt."
+              break
+            fi
+
+            echo "::warning::Production /health attempt $attempt returned HTTP $health_status body: $health_body"
+            if [ "$attempt" -lt 6 ]; then
+              case "$attempt" in
+                1) sleep 2 ;;
+                2) sleep 4 ;;
+                3) sleep 8 ;;
+                4) sleep 16 ;;
+                5) sleep 30 ;;
+              esac
+            fi
+          done
+
+          if [ "$health_status" != '200' ] || [ "$health_body" != '{"ok":true}' ]; then
+            echo "::error::Production /health remained unhealthy after bounded exponential-backoff retries: HTTP $health_status body: $health_body"
             exit 1
           fi
 
