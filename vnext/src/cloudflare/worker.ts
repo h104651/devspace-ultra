@@ -112,8 +112,9 @@ export class GatewayDurableObject extends BaseGatewayDurableObject {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Route all traffic to a singleton Gateway Durable Object instance
-    const id = env.GATEWAY_DO.idFromName('global-gateway-singleton');
+    // Preserve the original named object and its durable storage for Cloudflare recovery.
+    // New production traffic uses a fresh object in the same existing namespace.
+    const id = env.GATEWAY_DO.idFromName('global-gateway-singleton-recovery-20260910');
     const stub = env.GATEWAY_DO.get(id);
     return stub.fetch(request);
   }
