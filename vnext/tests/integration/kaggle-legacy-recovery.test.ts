@@ -44,6 +44,20 @@ export async function runKaggleLegacyRecoveryTests(): Promise<{ passed: number; 
       startedAt: now - 120000,
       createdAt: now - 130000,
       updatedAt: now - 60000
+    } as any, {
+      taskId: 'legacy-kaggle-never-submitted',
+      backend: 'kaggle',
+      capability: 'kaggle:run',
+      requiredScope: 'kaggle:submit',
+      status: 'queued',
+      priority: 0,
+      payload: { kernelSlug: 'owner/not-yet-submitted' },
+      retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 1000, requeueOnStale: true },
+      attempts: [],
+      artifacts: [],
+      logs: [],
+      createdAt: now - 30000,
+      updatedAt: now - 30000
     } as any]);
 
     const staleRecovery = store.recoverStaleTasks();
@@ -62,12 +76,14 @@ export async function runKaggleLegacyRecoveryTests(): Promise<{ passed: number; 
     );
 
     const reconciled = await backend.reconcileDanglingTasks();
-    assert.strictEqual(reconciled.reconciledCount, 1, 'Legacy Kaggle task without externalRun must still be rediscovered by backend/payload identity');
-    assert.deepStrictEqual(client.statusCalls, ['owner/legacy-running']);
+    assert.strictEqual(reconciled.reconciledCount, 1, 'Only an actually running legacy Kaggle task may be rediscovered without externalRun metadata');
+    assert.deepStrictEqual(client.statusCalls, ['owner/legacy-running'], 'Queued tasks without externalRun must not be mistaken for already-submitted remote runs');
     const after = store.getTask('legacy-kaggle-running');
     assert.strictEqual(after?.status, 'running');
     assert.strictEqual(after?.externalRun?.provider, 'kaggle', 'Reconciliation must backfill durable externalRun metadata');
     assert.strictEqual(after?.externalRun?.kernelRef, 'owner/legacy-running');
+    assert.strictEqual(store.getTask('legacy-kaggle-never-submitted')?.status, 'queued', 'A not-yet-submitted queued task must remain queued');
+    assert.strictEqual(store.getTask('legacy-kaggle-never-submitted')?.externalRun, undefined, 'A not-yet-submitted queued task must not gain fabricated externalRun metadata');
     assert.ok(scheduled >= 1, 'Still-running legacy Kaggle task must resume durable polling');
     passed++;
   } catch (err: any) {
