@@ -81,7 +81,6 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     assert.ok(toolNames.includes('kaggle_run'));
     assert.ok(toolNames.includes('remote_task_submit'));
     assert.ok(toolNames.includes('remote_task_status'));
-    assert.ok(toolNames.includes('remote_task_wait'), 'Remote MCP must expose event-driven remote_task_wait');
     assert.ok(toolNames.includes('kaggle_workspace_get'));
     assert.ok(toolNames.includes('kaggle_workspace_file'));
     assert.ok(toolNames.includes('kaggle_workspace_continue'));
@@ -110,44 +109,7 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     assert.strictEqual(content.status, 'queued');
     passed++;
 
-    // Test 4: remote_task_wait is bounded and resolves immediately once terminal.
-    const timeoutWait = await makeMcpRequest(
-      '/mcp',
-      {
-        method: 'tools/call',
-        params: {
-          name: 'remote_task_wait',
-          arguments: { taskId: content.taskId, timeoutMs: 20 }
-        }
-      },
-      clientToken
-    );
-    assert.strictEqual(timeoutWait.statusCode, 200);
-    const timeoutWaitParsed = JSON.parse(timeoutWait.body.result.content[0].text);
-    assert.strictEqual(timeoutWaitParsed.taskId, content.taskId);
-    assert.strictEqual(timeoutWaitParsed.status, 'queued');
-    assert.strictEqual(timeoutWaitParsed.timedOut, true);
-
-    server.taskStore.completeTask(content.taskId, { waited: true });
-    const terminalWait = await makeMcpRequest(
-      '/mcp',
-      {
-        method: 'tools/call',
-        params: {
-          name: 'remote_task_wait',
-          arguments: { taskId: content.taskId, timeoutMs: 100 }
-        }
-      },
-      clientToken
-    );
-    assert.strictEqual(terminalWait.statusCode, 200);
-    const terminalWaitParsed = JSON.parse(terminalWait.body.result.content[0].text);
-    assert.strictEqual(terminalWaitParsed.status, 'succeeded');
-    assert.strictEqual(terminalWaitParsed.timedOut, false);
-    assert.deepStrictEqual(terminalWaitParsed.result, { waited: true });
-    passed++;
-
-    // Test 5: Authenticated tools/call for kaggle_run
+    // Test 4: Authenticated tools/call for kaggle_run
     const kaggleCall = await makeMcpRequest(
       '/api/mcp/v1',
       {
@@ -170,7 +132,7 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     assert.strictEqual(kaggleResult.status, 'running');
     passed++;
 
-    // Test 6: Server discover exposes version 2.1.0 and full tools list
+    // Test 5: Server discover exposes version 2.1.0 and full tools list
     const discoverRes = await makeMcpRequest(
       '/mcp',
       {
@@ -193,13 +155,12 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     assert.strictEqual(discoverRes.body.result.ttlMs, 0);
     assert.ok(Array.isArray(discoverRes.body.result.tools));
     const discToolNames = discoverRes.body.result.tools.map((t: any) => t.name);
-    assert.ok(discToolNames.includes('remote_task_wait'));
     assert.ok(discToolNames.includes('kaggle_workspace_get'));
     assert.ok(discToolNames.includes('kaggle_workspace_file'));
     assert.ok(discToolNames.includes('kaggle_workspace_continue'));
     passed++;
 
-    // Test 7: Authenticated tools/call for workspace tools dispatch correctly
+    // Test 6: Authenticated tools/call for workspace tools dispatch correctly
     const kClient = (server.kaggleBackend.getClient() as any);
     if (kClient && typeof kClient.registerMockDataset === 'function') {
       const contextText = '# Astor TuneUp Context Header\n';

@@ -17,7 +17,6 @@ import { SwarmOrchestrator } from '../swarm/swarm-orchestrator';
 import { DurableChatSwarmCompat } from '../swarm/chat-swarm-compat';
 import { McpHandlers, McpCallerContext } from '../mcp/handlers';
 import * as tools from '../mcp/tools';
-import { REMOTE_TASK_WAIT_TOOL, handleRemoteTaskWait } from '../mcp/reliability-tools';
 import { OAuthManager } from '../oauth/oauth-manager';
 import { GatewayMessage } from '../types/gateway';
 import { TokenPayload } from '../types/auth';
@@ -310,6 +309,7 @@ export class GatewayDurableObject {
       );
     }
 
+    // Explicitly reject token-signing master secret when used as admin credential
     if (this.env.MASTER_SECRET && this.timingSafeEqualStr(candidate, this.env.MASTER_SECRET)) {
       return Response.json(
         { error: 'FORBIDDEN: token signing master secret cannot be used as admin credential' },
@@ -324,7 +324,7 @@ export class GatewayDurableObject {
       );
     }
 
-    return undefined;
+    return undefined; // Authorized!
   }
 
   private async parseJsonRequest(request: Request): Promise<any> {
@@ -1064,7 +1064,7 @@ export class GatewayDurableObject {
   }
 
   private getToolsList() {
-    return [...tools.getCanonicalToolsList(), REMOTE_TASK_WAIT_TOOL];
+    return tools.getCanonicalToolsList();
   }
 
   private requireSwarmScope(auth: TokenPayload): void {
@@ -1248,7 +1248,6 @@ export class GatewayDurableObject {
           switch (toolName) {
             case 'remote_task_submit': result = await this.mcpHandlers.handleRemoteTaskSubmit(args, caller); break;
             case 'remote_task_status': result = await this.mcpHandlers.handleRemoteTaskStatus(args, caller); break;
-            case 'remote_task_wait': result = await handleRemoteTaskWait(this.taskStore, args, caller.scopes); break;
             case 'remote_task_logs': result = await this.mcpHandlers.handleRemoteTaskLogs(args, caller); break;
             case 'remote_task_artifacts': result = await this.mcpHandlers.handleRemoteTaskArtifacts(args, caller); break;
             case 'remote_task_cancel': result = await this.mcpHandlers.handleRemoteTaskCancel(args, caller); break;
