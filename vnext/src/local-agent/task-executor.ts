@@ -237,11 +237,13 @@ export class TaskExecutor {
         const effectiveRelPath = relativePath || (isLegacy ? '' : task.payload.relativePath);
         const targetPath = ProjectPathSecurity.resolveReadPath(project.canonicalRoot, effectiveRelPath);
         const content = fs.readFileSync(targetPath, 'utf-8');
+        const sha256 = crypto.createHash('sha256').update(content, 'utf-8').digest('hex');
 
         return {
           projectId: project.projectId,
           relativePath: effectiveRelPath,
           sizeBytes: Buffer.byteLength(content),
+          sha256,
           content: task.payload.limit ? content.substring(0, task.payload.limit) : content
         };
       }
