@@ -126,6 +126,31 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       assert.strictEqual(resB.content, 'Greetings from PROJECT_B');
     });
 
+    await test('TaskExecutor: local:read_file returns full-file SHA256 for deterministic patch OCC, even when content is limited', async () => {
+      const logs: string[] = [];
+      const expectedSha = crypto.createHash('sha256').update(initialAContent, 'utf-8').digest('hex');
+
+      const fullRead = await executor.executeTask(
+        makeTask('local:read_file', { projectId: 'project-a', relativePath: 'greeting.txt' }),
+        l => logs.push(l)
+      );
+      assert.strictEqual(fullRead.sha256, expectedSha);
+      assert.strictEqual(fullRead.sizeBytes, Buffer.byteLength(initialAContent));
+      assert.strictEqual(fullRead.content, initialAContent);
+
+      const limitedRead = await executor.executeTask(
+        makeTask('local:read_file', { projectId: 'project-a', relativePath: 'greeting.txt', limit: 5 }),
+        l => logs.push(l)
+      );
+      assert.strictEqual(limitedRead.content, initialAContent.substring(0, 5));
+      assert.strictEqual(limitedRead.sizeBytes, Buffer.byteLength(initialAContent));
+      assert.strictEqual(
+        limitedRead.sha256,
+        expectedSha,
+        'sha256 must describe the full on-disk file, not the truncated response content'
+      );
+    });
+
     // ----------------------------------------------------
     // Deterministic Structured Patch & Concurrent OCC Tests
     // ----------------------------------------------------
