@@ -167,6 +167,52 @@ export async function runMcpInsufficientScopeTests(): Promise<{ passed: number; 
       [{ type: 'oauth2', scopes: ['mcp:access', 'tasks:submit', 'local:read'] }],
       'local_read_file must advertise mcp:access + tasks:submit + local:read'
     );
+
+    assert.deepStrictEqual(
+      byName('local_read_file')?.annotations,
+      {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      'local_read_file must explicitly advertise read-only closed-world behavior'
+    );
+
+    assert.deepStrictEqual(
+      byName('local_git_status')?.annotations,
+      {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      'local_git_status must explicitly advertise read-only closed-world behavior'
+    );
+
+    for (const name of ['local_write_file', 'local_patch_file']) {
+      assert.deepStrictEqual(
+        byName(name)?.annotations,
+        {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false
+        },
+        `${name} must explicitly advertise local mutation behavior`
+      );
+    }
+
+    assert.deepStrictEqual(
+      byName('local_create_directory')?.annotations,
+      {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      'local_create_directory must advertise non-destructive idempotent mutation behavior'
+    );
   });
 
   await run('ordinary non-auth tool failures remain HTTP 200 MCP isError results', async () => {
