@@ -646,11 +646,40 @@ export const LOCAL_BUILD_PROJECT_SCHEMA = {
   additionalProperties: false
 };
 
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface McpToolDefinition {
   name: string;
   description: string;
   inputSchema: any;
+  annotations?: McpToolAnnotations;
 }
+
+const LOCAL_READ_ONLY_ANNOTATIONS: McpToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+};
+
+const LOCAL_WRITE_ANNOTATIONS: McpToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false
+};
+
+const LOCAL_CREATE_ANNOTATIONS: McpToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+};
 
 export function getCanonicalToolsList(): McpToolDefinition[] {
   return [
@@ -677,17 +706,17 @@ export function getCanonicalToolsList(): McpToolDefinition[] {
     { name: 'kaggle_dataset_file', description: 'Read a specific file from a Kaggle dataset version with actual byte SHA256 integrity verification', inputSchema: KAGGLE_DATASET_FILE_SCHEMA },
     { name: 'kaggle_workspace_continue', description: 'Atomically update project workspace dataset version, apply file changes, and trigger thin runner execution', inputSchema: KAGGLE_WORKSPACE_CONTINUE_SCHEMA },
 
-    { name: 'local_project_list', description: 'List registered and authorized local projects with capabilities and metadata. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_PROJECT_LIST_SCHEMA },
-    { name: 'local_project_status', description: 'Inspect status, git branch, and capabilities of an authorized local project. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_PROJECT_STATUS_SCHEMA },
-    { name: 'local_read_file', description: 'Read file content from an authorized local project using relative path. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_READ_FILE_SCHEMA },
-    { name: 'local_write_file', description: 'Write or overwrite file in an authorized local project using relative path. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_WRITE_FILE_SCHEMA },
-    { name: 'local_patch_file', description: 'Patch or create file in an authorized local project using relative path. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_PATCH_FILE_SCHEMA },
-    { name: 'local_list_directory', description: 'List directory entries within an authorized local project or workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_LIST_DIRECTORY_SCHEMA },
-    { name: 'local_find_files', description: 'Recursively search for files matching name or pattern within an authorized workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_FIND_FILES_SCHEMA },
-    { name: 'local_search_text', description: 'Search for text query across files within an authorized local workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_SEARCH_TEXT_SCHEMA },
-    { name: 'local_find_repositories', description: 'Recursively discover Git repositories and project types within an authorized workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_FIND_REPOSITORIES_SCHEMA },
-    { name: 'local_create_directory', description: 'Create directory within an authorized local workspace root. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_CREATE_DIRECTORY_SCHEMA },
-    { name: 'local_git_status', description: 'Get git status of an authorized local workspace or nested subproject repository. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_GIT_STATUS_SCHEMA },
+    { name: 'local_project_list', description: 'List registered and authorized local projects with capabilities and metadata. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_PROJECT_LIST_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_project_status', description: 'Inspect status, git branch, and capabilities of an authorized local project. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_PROJECT_STATUS_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_read_file', description: 'Read file content from an authorized local project using relative path. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_READ_FILE_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_write_file', description: 'Write or overwrite file in an authorized local project using relative path. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_WRITE_FILE_SCHEMA, annotations: LOCAL_WRITE_ANNOTATIONS },
+    { name: 'local_patch_file', description: 'Patch or create file in an authorized local project using relative path. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_PATCH_FILE_SCHEMA, annotations: LOCAL_WRITE_ANNOTATIONS },
+    { name: 'local_list_directory', description: 'List directory entries within an authorized local project or workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_LIST_DIRECTORY_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_find_files', description: 'Recursively search for files matching name or pattern within an authorized workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_FIND_FILES_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_search_text', description: 'Search for text query across files within an authorized local workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_SEARCH_TEXT_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_find_repositories', description: 'Recursively discover Git repositories and project types within an authorized workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_FIND_REPOSITORIES_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_create_directory', description: 'Create directory within an authorized local workspace root. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_CREATE_DIRECTORY_SCHEMA, annotations: LOCAL_CREATE_ANNOTATIONS },
+    { name: 'local_git_status', description: 'Get git status of an authorized local workspace or nested subproject repository. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_GIT_STATUS_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
     { name: 'local_run_tests', description: 'Run test suite inside an authorized local project or subproject root', inputSchema: LOCAL_RUN_TESTS_SCHEMA },
     { name: 'local_build_project', description: 'Execute build command inside an authorized local project or subproject root', inputSchema: LOCAL_BUILD_PROJECT_SCHEMA },
 
