@@ -65,16 +65,56 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
       subjectId: 'admin-caller'
     };
 
-    // 1. Zero live agent: returns immediately without waiting
+    // 1. Transiently offline agent: reconnect within bounded wait and return terminal success
     mockConnectedAgents = [];
-    const zeroAgentRes = await handlers.handleLocalFindRepositories({ projectId: 'astor-tuneup' }, callerAdmin);
-    assert.strictEqual(zeroAgentRes.status, 'queued');
-    assert.strictEqual(zeroAgentRes.pending, true);
-    assert.strictEqual(zeroAgentRes.waitingForEligibleDevice, true);
-    assert.strictEqual(zeroAgentRes.reason, 'NO_ONLINE_DEVICE');
+    setTimeout(() => {
+      mockConnectedAgents = [
+        {
+          deviceId,
+          name: 'Agent-Full',
+          platform: 'windows',
+          capabilities: liveCapabilities,
+          status: 'online',
+          connectedAt: Date.now()
+        }
+      ];
+      let claimed: any;
+      while ((claimed = taskStore.claimTask(deviceId, liveCapabilities))) {
+        if (claimed.capability === 'local:find_repositories') {
+          taskStore.completeTask(claimed.taskId, {
+            repositories: [{ repoRelativePath: '.', branch: 'main', projectTypes: ['node'] }]
+          });
+        }
+      }
+    }, 50);
+
+    const transientOfflineRes = await handlers.handleLocalFindRepositories({
+      projectId: 'astor-tuneup',
+      waitMs: 1000
+    }, callerAdmin);
+    assert.strictEqual(transientOfflineRes.status, 'succeeded');
+    assert.strictEqual(transientOfflineRes.directResult, true);
+    assert.strictEqual(transientOfflineRes.result.repositories[0].repoRelativePath, '.');
     passed++;
 
-    // 2. Live agent without required capability: returns immediately without waiting
+    // 2. Persistently offline agent: wait first, then report NO_ONLINE_DEVICE while leaving durable task queued
+    mockConnectedAgents = [];
+    const zeroAgentStartedAt = Date.now();
+    const zeroAgentRes = await handlers.handleLocalFindRepositories({
+      projectId: 'astor-tuneup',
+      waitMs: 150
+    }, callerAdmin);
+    assert.ok(Date.now() - zeroAgentStartedAt >= 100, 'Offline preflight must not return immediately');
+    assert.strictEqual(zeroAgentRes.status, 'queued');
+    assert.strictEqual(zeroAgentRes.pending, true);
+    assert.strictEqual(zeroAgentRes.directResult, false);
+    assert.strictEqual(zeroAgentRes.waitingForEligibleDevice, true);
+    assert.strictEqual(zeroAgentRes.reason, 'NO_ONLINE_DEVICE');
+    assert.strictEqual(taskStore.getTask(zeroAgentRes.taskId)?.status, 'queued');
+    taskStore.cancelTask(zeroAgentRes.taskId, 'test cleanup');
+    passed++;
+
+    // 3. Temporarily ineligible agent: eligible capability appears within bounded wait and task succeeds
     mockConnectedAgents = [
       {
         deviceId,
@@ -85,11 +125,60 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
         connectedAt: Date.now()
       }
     ];
-    const ineligibleRes = await handlers.handleLocalFindRepositories({ projectId: 'astor-tuneup' }, callerAdmin);
+
+    setTimeout(() => {
+      mockConnectedAgents = [
+        {
+          deviceId,
+          name: 'Agent-Full',
+          platform: 'windows',
+          capabilities: liveCapabilities,
+          status: 'online',
+          connectedAt: Date.now()
+        }
+      ];
+      let claimed: any;
+      while ((claimed = taskStore.claimTask(deviceId, liveCapabilities))) {
+        if (claimed.capability === 'local:find_repositories') {
+          taskStore.completeTask(claimed.taskId, {
+            repositories: [{ repoRelativePath: '.', branch: 'main', projectTypes: ['node'] }]
+          });
+        }
+      }
+    }, 50);
+
+    const transientIneligibleRes = await handlers.handleLocalFindRepositories({
+      projectId: 'astor-tuneup',
+      waitMs: 1000
+    }, callerAdmin);
+    assert.strictEqual(transientIneligibleRes.status, 'succeeded');
+    assert.strictEqual(transientIneligibleRes.directResult, true);
+    passed++;
+
+    // 4. Persistently ineligible agent: wait first, then report NO_ELIGIBLE_DEVICE_CAPABILITY
+    mockConnectedAgents = [
+      {
+        deviceId,
+        name: 'Agent-Limited',
+        platform: 'windows',
+        capabilities: ['local:read_file'],
+        status: 'online',
+        connectedAt: Date.now()
+      }
+    ];
+    const ineligibleStartedAt = Date.now();
+    const ineligibleRes = await handlers.handleLocalFindRepositories({
+      projectId: 'astor-tuneup',
+      waitMs: 150
+    }, callerAdmin);
+    assert.ok(Date.now() - ineligibleStartedAt >= 100, 'Capability preflight must not return immediately');
     assert.strictEqual(ineligibleRes.status, 'queued');
     assert.strictEqual(ineligibleRes.pending, true);
+    assert.strictEqual(ineligibleRes.directResult, false);
     assert.strictEqual(ineligibleRes.waitingForEligibleDevice, true);
     assert.strictEqual(ineligibleRes.reason, 'NO_ELIGIBLE_DEVICE_CAPABILITY');
+    assert.strictEqual(taskStore.getTask(ineligibleRes.taskId)?.status, 'queued');
+    taskStore.cancelTask(ineligibleRes.taskId, 'test cleanup');
     passed++;
 
     // Set full live capabilities
