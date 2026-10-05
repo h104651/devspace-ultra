@@ -1,0 +1,20 @@
+name = "devspace-ultra-gateway"
+main = "src/cloudflare/worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "GATEWAY_DO", class_name = "GatewayDurableObject" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewayDurableObject"]
+
+# [[r2_buckets]]
+# binding = "ARTIFACTS_R2"
+# bucket_name = "devspace-ultra-artifacts"
+
+[observability]
+enabled = true

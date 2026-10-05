@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.devspace-storage/
+.devspace-storage*/
+logs/
+*.log
+clouudfare AIP token/
+.DS_Store
+Thumbs.db
+
