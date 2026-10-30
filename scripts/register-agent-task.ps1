@@ -15,10 +15,10 @@ if (Test-Path $legacyVbs) {
     Write-Host '[CLEANUP] Removed legacy Startup folder script: DevSpaceUltraAgent.vbs' -ForegroundColor Yellow
 }
 
-# 2. Define Scheduled Task Action: directly execute node.exe with agent-daemon.js
+# 2. Define Scheduled Task Action: execute wscript.exe with launch-daemon.vbs (100% windowless background)
 $action = New-ScheduledTaskAction `
-    -Execute 'C:\Program Files\nodejs\node.exe' `
-    -Argument 'C:\Users\testuser\Desktop\devspace-ultra\scripts\agent-daemon.js' `
+    -Execute 'C:\Windows\System32\wscript.exe' `
+    -Argument 'C:\Users\testuser\Desktop\devspace-ultra\scripts\launch-daemon.vbs' `
     -WorkingDirectory 'C:\Users\testuser\Desktop\devspace-ultra'
 
 # 3. Define Trigger: At Logon + 10s delay for network readiness
