@@ -149,6 +149,15 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
   async deleteTask(taskId: string): Promise<boolean> { this.sql.exec('DELETE FROM tasks WHERE taskId = ?', taskId); return true; }
 
   private rowToTask(row: any): DurableTask {
+    let externalRun: any = undefined;
+    if (row.externalRunJson) {
+      try {
+        externalRun = JSON.parse(row.externalRunJson);
+      } catch (err) {
+        console.error(`Failed to parse externalRunJson for task ${row.taskId}:`, err);
+      }
+    }
+
     return {
       taskId: row.taskId, taskKey: row.taskKey || undefined, idempotencyKey: row.idempotencyKey || undefined,
       clientRequestId: row.clientRequestId || undefined, backend: row.backend, capability: row.capability,
@@ -160,7 +169,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       artifacts: JSON.parse(row.artifactsJson || '[]'), logs: JSON.parse(row.logsJson || '[]'),
       metadata: row.metadataJson ? JSON.parse(row.metadataJson) : undefined,
       attempts: JSON.parse(row.attemptsJson || '[]'), activeAttemptId: row.activeAttemptId || undefined,
-      externalRun: row.externalRunJson ? JSON.parse(row.externalRunJson) : undefined,
+      externalRun,
       startedAt: row.startedAt || undefined, completedAt: row.completedAt || undefined,
       createdAt: row.createdAt, updatedAt: row.updatedAt
     } as DurableTask;

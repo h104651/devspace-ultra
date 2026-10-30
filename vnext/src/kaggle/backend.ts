@@ -13,6 +13,11 @@ export interface KagglePollScheduler {
 
 type KaggleClientLike = IKaggleClient | KaggleClient;
 
+interface InFlightReconciliation {
+  promise: Promise<boolean>;
+  rescheduleRequested: boolean;
+}
+
 export class KaggleBackend {
   private client: KaggleClientLike;
   private taskStore: TaskStore;
@@ -21,6 +26,7 @@ export class KaggleBackend {
   private pollIntervalMs: number;
   private pollScheduler?: KagglePollScheduler;
   private activePollers: Map<string, NodeJS.Timeout> = new Map();
+  private inFlightReconciliations: Map<string, InFlightReconciliation> = new Map();
 
   constructor(
     taskStore: TaskStore,
@@ -116,8 +122,33 @@ export class KaggleBackend {
   /**
    * Reconciles an externally-submitted Kaggle task against the authoritative remote provider.
    * Never re-pushes or duplicates kernels on Kaggle.
+   * Single-flight per taskId prevents concurrent duplicate reconciliation/finalization.
+   * Preserves reschedule=true intent across concurrent callers.
    */
   public async reconcileTask(taskId: string, reschedule = false): Promise<boolean> {
+    const existing = this.inFlightReconciliations.get(taskId);
+    if (existing) {
+      if (reschedule) {
+        existing.rescheduleRequested = true;
+      }
+      return existing.promise;
+    }
+
+    const inFlight: InFlightReconciliation = {
+      promise: Promise.resolve(false),
+      rescheduleRequested: reschedule
+    };
+    inFlight.promise = this.executeReconcileTask(taskId, inFlight);
+    this.inFlightReconciliations.set(taskId, inFlight);
+
+    try {
+      return await inFlight.promise;
+    } finally {
+      this.inFlightReconciliations.delete(taskId);
+    }
+  }
+
+  private async executeReconcileTask(taskId: string, inFlight: InFlightReconciliation): Promise<boolean> {
     const task = this.taskStore.getTask(taskId);
     if (!task || ['succeeded', 'failed', 'cancelled'].includes(task.status)) return false;
 
@@ -132,9 +163,16 @@ export class KaggleBackend {
 
     try {
       const statusRes = await this.client.getKernelStatus(kernelSlug);
+
+      // Re-read latest task state after remote await
+      const latestTask = this.taskStore.getTask(taskId);
+      if (!latestTask || ['succeeded', 'failed', 'cancelled'].includes(latestTask.status)) {
+        return false;
+      }
+
       const now = Date.now();
       const updatedExternalRun = {
-        ...(task.externalRun || { provider: 'kaggle' as const, submittedAt: task.createdAt }),
+        ...(latestTask.externalRun || { provider: 'kaggle' as const, submittedAt: latestTask.createdAt }),
         kernelRef: kernelSlug,
         lastPolledAt: now,
         lastRemoteStatus: statusRes.status
@@ -175,25 +213,51 @@ export class KaggleBackend {
       // If running or queued, preserve active state and reschedule poll
       updatedExternalRun.reconciliationState = 'active' as const;
       this.taskStore.setExternalRun(taskId, updatedExternalRun);
-      if (reschedule) await this.schedulePoll(taskId, kernelSlug);
+      if (inFlight.rescheduleRequested) {
+        const checkTask = this.taskStore.getTask(taskId);
+        if (checkTask && !['succeeded', 'failed', 'cancelled'].includes(checkTask.status)) {
+          await this.schedulePoll(taskId, kernelSlug);
+        }
+      }
       return true;
     } catch (err: any) {
+      // Re-read latest task state in error handler
+      const latestTask = this.taskStore.getTask(taskId);
+      if (!latestTask || ['succeeded', 'failed', 'cancelled'].includes(latestTask.status)) {
+        return false;
+      }
       this.taskStore.appendLogs(taskId, [`Kaggle status poll failed: ${err.message || String(err)}`]);
       const updatedExternalRun = {
-        ...(task.externalRun || { provider: 'kaggle' as const, submittedAt: task.createdAt }),
+        ...(latestTask.externalRun || { provider: 'kaggle' as const, submittedAt: latestTask.createdAt }),
         kernelRef: kernelSlug,
         lastPolledAt: Date.now(),
         reconciliationState: 'pending' as const
       };
       this.taskStore.setExternalRun(taskId, updatedExternalRun);
-      if (reschedule) await this.schedulePoll(taskId, kernelSlug);
+      if (inFlight.rescheduleRequested) {
+        const checkTask = this.taskStore.getTask(taskId);
+        if (checkTask && !['succeeded', 'failed', 'cancelled'].includes(checkTask.status)) {
+          await this.schedulePoll(taskId, kernelSlug);
+        }
+      }
       return true;
     }
   }
 
   private async finalizeKaggleRun(taskId: string, kernelSlug: string) {
+    const taskBefore = this.taskStore.getTask(taskId);
+    if (!taskBefore || ['succeeded', 'failed', 'cancelled'].includes(taskBefore.status)) {
+      return;
+    }
+
     const outputDir = this.workDirBase ? path.join(this.workDirBase, taskId, 'outputs') : '';
     const downloadRes = await (this.client as any).downloadKernelOutput(kernelSlug, outputDir);
+
+    const taskAfterDownload = this.taskStore.getTask(taskId);
+    if (!taskAfterDownload || ['succeeded', 'failed', 'cancelled'].includes(taskAfterDownload.status)) {
+      return;
+    }
+
     const resultSummary: KaggleTaskResult = { kernelSlug, status: 'complete', outputFiles: [] };
 
     if (downloadRes.success && Array.isArray(downloadRes.files)) {

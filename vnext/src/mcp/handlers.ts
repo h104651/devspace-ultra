@@ -190,21 +190,38 @@ export class McpHandlers {
     };
   }
 
+  private async reconcileKaggleTaskIfNeeded(taskId: string): Promise<void> {
+    if (!taskId) return;
+    const task = this.gateway.taskStore.getTask(taskId);
+    if (task && (task.backend === 'kaggle' || task.externalRun?.provider === 'kaggle') && !['succeeded', 'failed', 'cancelled'].includes(task.status)) {
+      if (this.gateway.kaggleBackend && typeof this.gateway.kaggleBackend.reconcileTask === 'function') {
+        try {
+          await this.gateway.kaggleBackend.reconcileTask(task.taskId, false);
+        } catch (err: any) {
+          console.warn(`[KaggleSync] On-demand reconcile error for ${task.taskId}:`, err?.message || err);
+        }
+      }
+    }
+  }
+
   public async handleKaggleStatus(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'kaggle:read', 'tasks:read');
+    await this.reconcileKaggleTaskIfNeeded(args?.taskId);
     return this.handleRemoteTaskStatus(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
   }
 
   public async handleKaggleLogs(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'kaggle:read', 'tasks:read');
+    await this.reconcileKaggleTaskIfNeeded(args?.taskId);
     return this.handleRemoteTaskLogs(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
   }
 
   public async handleKaggleResult(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'kaggle:read', 'tasks:read');
+    await this.reconcileKaggleTaskIfNeeded(args?.taskId);
     const elevatedRead = { ...auth, scopes: [...auth.scopes, 'tasks:read', 'artifacts:read'] };
     const status = await this.handleRemoteTaskStatus(args, elevatedRead);
     const artifacts = await this.handleRemoteTaskArtifacts(args, elevatedRead);

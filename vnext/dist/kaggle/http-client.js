@@ -199,12 +199,20 @@ class CloudflareKaggleHttpClient {
             }
             const data = await res.json();
             const files = [];
-            if (data.log) {
-                let logText = typeof data.log === 'string' ? data.log : '';
+            const rawLog = (data.log !== undefined && data.log !== null && data.log !== '') ? data.log : data.logNullable;
+            let logText = undefined;
+            if (rawLog !== undefined && rawLog !== null && rawLog !== '') {
+                logText = typeof rawLog === 'string' ? rawLog : '';
                 try {
-                    const parsedLog = typeof data.log === 'string' ? JSON.parse(data.log) : data.log;
+                    const parsedLog = typeof rawLog === 'string' ? JSON.parse(rawLog) : rawLog;
                     if (Array.isArray(parsedLog)) {
-                        logText = parsedLog.map((item) => item.data || '').join('');
+                        logText = parsedLog.map((item) => {
+                            if (typeof item === 'string')
+                                return item;
+                            if (item && typeof item === 'object')
+                                return item.data || item.text || '';
+                            return '';
+                        }).join('');
                     }
                 }
                 catch { }
@@ -235,7 +243,7 @@ class CloudflareKaggleHttpClient {
                     });
                 }
             }
-            return { success: true, files, log: typeof data.log === 'string' ? data.log : undefined };
+            return { success: true, files, log: logText };
         }
         catch (err) {
             return { success: false, files: [], error: err.message };

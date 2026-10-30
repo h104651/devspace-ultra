@@ -15,11 +15,13 @@ class CloudflareSqliteStorageAdapter {
         status TEXT NOT NULL, priority INTEGER NOT NULL, payloadJson TEXT NOT NULL,
         retryPolicyJson TEXT NOT NULL, leaseJson TEXT, resultJson TEXT, errorJson TEXT,
         artifactsJson TEXT NOT NULL, logsJson TEXT NOT NULL, metadataJson TEXT,
-        startedAt INTEGER, completedAt INTEGER, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL
+        startedAt INTEGER, completedAt INTEGER, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+        attemptsJson TEXT NOT NULL DEFAULT '[]', activeAttemptId TEXT, externalRunJson TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_tasks_idemp ON tasks(idempotencyKey);
       CREATE INDEX IF NOT EXISTS idx_tasks_client_req ON tasks(clientRequestId);
+      CREATE INDEX IF NOT EXISTS idx_tasks_priority_created ON tasks(priority DESC, createdAt DESC);
 
       CREATE TABLE IF NOT EXISTS idempotency (
         key TEXT PRIMARY KEY, taskId TEXT NOT NULL, taskJson TEXT NOT NULL, expiresAt INTEGER NOT NULL
@@ -39,10 +41,12 @@ class CloudflareSqliteStorageAdapter {
         sizeBytes INTEGER NOT NULL, sha256 TEXT NOT NULL, mimeType TEXT, preview TEXT, createdAt INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(taskId);
+      CREATE INDEX IF NOT EXISTS idx_artifacts_task_created ON artifacts(taskId, createdAt ASC);
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, actor TEXT NOT NULL, actorType TEXT NOT NULL,
         action TEXT NOT NULL, resource TEXT, taskId TEXT, scopeUsed TEXT, result TEXT NOT NULL, detailsJson TEXT
       );
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
       CREATE TABLE IF NOT EXISTS oauth_clients (
         clientId TEXT PRIMARY KEY, clientSecret TEXT, clientName TEXT, redirectUrisJson TEXT NOT NULL,
         grantTypesJson TEXT NOT NULL, responseTypesJson TEXT NOT NULL, tokenAuthMethod TEXT NOT NULL,
@@ -61,14 +65,26 @@ class CloudflareSqliteStorageAdapter {
         id TEXT PRIMARY KEY, stateJson TEXT NOT NULL, updatedAt INTEGER NOT NULL
       );
     `);
-        // Existing Durable Object databases created by the previous build need an
-        // additive migration. Ignore duplicate-column errors on fresh databases.
+        // Existing Durable Object databases created by previous builds need additive migrations.
+        // Ignore duplicate-column errors on fresh or already-migrated databases.
         try {
             this.sql.exec("ALTER TABLE oauth_clients ADD COLUMN applicationType TEXT NOT NULL DEFAULT 'web'");
         }
         catch { }
         try {
             this.sql.exec('ALTER TABLE oauth_codes ADD COLUMN resource TEXT');
+        }
+        catch { }
+        try {
+            this.sql.exec("ALTER TABLE tasks ADD COLUMN attemptsJson TEXT NOT NULL DEFAULT '[]'");
+        }
+        catch { }
+        try {
+            this.sql.exec('ALTER TABLE tasks ADD COLUMN activeAttemptId TEXT');
+        }
+        catch { }
+        try {
+            this.sql.exec('ALTER TABLE tasks ADD COLUMN externalRunJson TEXT');
         }
         catch { }
     }
@@ -93,35 +109,47 @@ class CloudflareSqliteStorageAdapter {
             return undefined;
         }
     }
-    async getTask(taskId) {
+    getTaskSync(taskId) {
         const row = this.getFirstRow('SELECT * FROM tasks WHERE taskId = ?', taskId);
         return row ? this.rowToTask(row) : undefined;
+    }
+    async getTask(taskId) {
+        return this.getTaskSync(taskId);
     }
     async saveTask(task) {
         task.updatedAt = Date.now();
         this.sql.exec(`INSERT OR REPLACE INTO tasks (
         taskId, taskKey, idempotencyKey, clientRequestId, backend, capability, requiredScope, status, priority,
         payloadJson, retryPolicyJson, leaseJson, resultJson, errorJson, artifactsJson, logsJson, metadataJson,
-        startedAt, completedAt, createdAt, updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.taskId, task.taskKey || null, task.idempotencyKey || null, task.clientRequestId || null, task.backend, task.capability, task.requiredScope, task.status, task.priority, JSON.stringify(task.payload), JSON.stringify(task.retryPolicy), task.lease ? JSON.stringify(task.lease) : null, task.result !== undefined ? JSON.stringify(task.result) : null, task.error !== undefined ? JSON.stringify(task.error) : null, JSON.stringify(task.artifacts || []), JSON.stringify(task.logs || []), task.metadata ? JSON.stringify(task.metadata) : null, task.startedAt || null, task.completedAt || null, task.createdAt, task.updatedAt);
+        startedAt, completedAt, createdAt, updatedAt, attemptsJson, activeAttemptId, externalRunJson
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.taskId, task.taskKey || null, task.idempotencyKey || null, task.clientRequestId || null, task.backend, task.capability, task.requiredScope, task.status, task.priority, JSON.stringify(task.payload), JSON.stringify(task.retryPolicy), task.lease ? JSON.stringify(task.lease) : null, task.result !== undefined ? JSON.stringify(task.result) : null, task.error !== undefined ? JSON.stringify(task.error) : null, JSON.stringify(task.artifacts || []), JSON.stringify(task.logs || []), task.metadata ? JSON.stringify(task.metadata) : null, task.startedAt || null, task.completedAt || null, task.createdAt, task.updatedAt, JSON.stringify(task.attempts || []), task.activeAttemptId || null, task.externalRun ? JSON.stringify(task.externalRun) : null);
+    }
+    async listActiveTasks() {
+        const activeStatuses = ['queued', 'claimed', 'acknowledged', 'running', 'retrying'];
+        const placeholders = activeStatuses.map(() => '?').join(', ');
+        return this.sql.exec(`SELECT * FROM tasks WHERE status IN (${placeholders})`, ...activeStatuses).toArray().map(r => this.rowToTask(r));
     }
     async listTasks(filter) {
+        // The no-filter call is the Durable Object cold-start working-set hydration path.
+        // Historical terminal rows are loaded lazily by primary key instead of on every eviction/restart.
+        if (!filter)
+            return this.listActiveTasks();
         let query = 'SELECT * FROM tasks WHERE 1=1';
         const params = [];
-        if (filter?.status) {
+        if (filter.status) {
             query += ' AND status = ?';
             params.push(filter.status);
         }
-        if (filter?.backend) {
+        if (filter.backend) {
             query += ' AND backend = ?';
             params.push(filter.backend);
         }
-        if (filter?.capability) {
+        if (filter.capability) {
             query += ' AND capability = ?';
             params.push(filter.capability);
         }
         query += ' ORDER BY priority DESC, createdAt DESC';
-        if (filter?.limit) {
+        if (filter.limit) {
             query += ' LIMIT ?';
             params.push(filter.limit);
         }
@@ -129,6 +157,15 @@ class CloudflareSqliteStorageAdapter {
     }
     async deleteTask(taskId) { this.sql.exec('DELETE FROM tasks WHERE taskId = ?', taskId); return true; }
     rowToTask(row) {
+        let externalRun = undefined;
+        if (row.externalRunJson) {
+            try {
+                externalRun = JSON.parse(row.externalRunJson);
+            }
+            catch (err) {
+                console.error(`Failed to parse externalRunJson for task ${row.taskId}:`, err);
+            }
+        }
         return {
             taskId: row.taskId, taskKey: row.taskKey || undefined, idempotencyKey: row.idempotencyKey || undefined,
             clientRequestId: row.clientRequestId || undefined, backend: row.backend, capability: row.capability,
@@ -139,6 +176,8 @@ class CloudflareSqliteStorageAdapter {
             error: row.errorJson ? JSON.parse(row.errorJson) : undefined,
             artifacts: JSON.parse(row.artifactsJson || '[]'), logs: JSON.parse(row.logsJson || '[]'),
             metadata: row.metadataJson ? JSON.parse(row.metadataJson) : undefined,
+            attempts: JSON.parse(row.attemptsJson || '[]'), activeAttemptId: row.activeAttemptId || undefined,
+            externalRun,
             startedAt: row.startedAt || undefined, completedAt: row.completedAt || undefined,
             createdAt: row.createdAt, updatedAt: row.updatedAt
         };
@@ -176,12 +215,22 @@ class CloudflareSqliteStorageAdapter {
     async saveArtifactMetadata(meta) {
         this.sql.exec('INSERT OR REPLACE INTO artifacts (id, taskId, name, type, sizeBytes, sha256, mimeType, preview, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', meta.id, meta.taskId, meta.name, meta.type, meta.sizeBytes, meta.sha256, meta.mimeType || null, meta.preview || null, meta.createdAt);
     }
-    async getArtifactMetadata(id) {
+    getArtifactMetadataSync(id) {
         const row = this.getFirstRow('SELECT * FROM artifacts WHERE id = ?', id);
         return row ? this.rowToArtifact(row) : undefined;
     }
-    async listTaskArtifacts(taskId) { return this.sql.exec('SELECT * FROM artifacts WHERE taskId = ? ORDER BY createdAt ASC', taskId).toArray().map(r => this.rowToArtifact(r)); }
-    async listArtifacts() { return this.sql.exec('SELECT * FROM artifacts ORDER BY createdAt DESC').toArray().map(r => this.rowToArtifact(r)); }
+    async getArtifactMetadata(id) {
+        return this.getArtifactMetadataSync(id);
+    }
+    listTaskArtifactsSync(taskId) {
+        return this.sql.exec('SELECT * FROM artifacts WHERE taskId = ? ORDER BY createdAt ASC', taskId).toArray().map(r => this.rowToArtifact(r));
+    }
+    async listTaskArtifacts(taskId) { return this.listTaskArtifactsSync(taskId); }
+    async listArtifacts() {
+        // Gateway startup intentionally requests a lazy hydration snapshot here.
+        // Full historical metadata remains authoritative in SQLite and is fetched by id/taskId on demand.
+        return [];
+    }
     rowToArtifact(row) {
         return { id: row.id, taskId: row.taskId, name: row.name, type: row.type, sizeBytes: row.sizeBytes, sha256: row.sha256, mimeType: row.mimeType || undefined, preview: row.preview || undefined, createdAt: row.createdAt };
     }

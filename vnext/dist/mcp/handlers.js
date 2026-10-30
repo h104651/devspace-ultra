@@ -189,19 +189,37 @@ class McpHandlers {
             message: 'Kaggle task submitted. Query kaggle_status for execution progress.'
         };
     }
+    async reconcileKaggleTaskIfNeeded(taskId) {
+        if (!taskId)
+            return;
+        const task = this.gateway.taskStore.getTask(taskId);
+        if (task && (task.backend === 'kaggle' || task.externalRun?.provider === 'kaggle') && !['succeeded', 'failed', 'cancelled'].includes(task.status)) {
+            if (this.gateway.kaggleBackend && typeof this.gateway.kaggleBackend.reconcileTask === 'function') {
+                try {
+                    await this.gateway.kaggleBackend.reconcileTask(task.taskId, false);
+                }
+                catch (err) {
+                    console.warn(`[KaggleSync] On-demand reconcile error for ${task.taskId}:`, err?.message || err);
+                }
+            }
+        }
+    }
     async handleKaggleStatus(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        await this.reconcileKaggleTaskIfNeeded(args?.taskId);
         return this.handleRemoteTaskStatus(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
     }
     async handleKaggleLogs(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        await this.reconcileKaggleTaskIfNeeded(args?.taskId);
         return this.handleRemoteTaskLogs(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
     }
     async handleKaggleResult(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        await this.reconcileKaggleTaskIfNeeded(args?.taskId);
         const elevatedRead = { ...auth, scopes: [...auth.scopes, 'tasks:read', 'artifacts:read'] };
         const status = await this.handleRemoteTaskStatus(args, elevatedRead);
         const artifacts = await this.handleRemoteTaskArtifacts(args, elevatedRead);
@@ -1950,31 +1968,11 @@ class McpHandlers {
                 };
             }
         }
-        // 3. Preflight check: live connected agents (PR #5 source of truth)
-        const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
-        if (connected.length === 0) {
-            return {
-                taskId,
-                status: submitResult.status || 'queued',
-                pending: true,
-                waitingForEligibleDevice: true,
-                reason: 'NO_ONLINE_DEVICE',
-                isReplay: !!submitResult.isReplay,
-                message: 'Task queued, but no local agents are currently connected.'
-            };
-        }
-        const eligible = connected.some((c) => c.capabilities?.includes(options.capability));
-        if (!eligible) {
-            return {
-                taskId,
-                status: submitResult.status || 'queued',
-                pending: true,
-                waitingForEligibleDevice: true,
-                reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
-                isReplay: !!submitResult.isReplay,
-                message: `Task queued, but currently connected devices are not authorized for capability '${options.capability}'.`
-            };
-        }
+        // 3. Bounded wait absorbs transient Local Agent disconnect/reconnect gaps.
+        // The task is already durable at this point, so do not return NO_ONLINE_DEVICE
+        // or NO_ELIGIBLE_DEVICE_CAPABILITY immediately based on a momentary snapshot.
+        // A reconnecting agent may still claim and complete the queued task within the
+        // caller's bounded wait window.
         // 4. Bounded wait for eligible live agent execution
         const startTime = Date.now();
         while (Date.now() - startTime < boundedWaitMs) {
@@ -2010,12 +2008,41 @@ class McpHandlers {
                 };
             }
         }
-        // 5. Bounded wait timeout: return pending=true, directResult=false (do NOT cancel task)
+        // 5. Bounded wait timeout: inspect the latest device snapshot only now.
+        // The durable task remains authoritative and is never cancelled here.
+        const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+        const eligible = connected.some((c) => c.capabilities?.includes(options.capability));
+        const status = currentTask?.status || 'queued';
+        if (status === 'queued' && connected.length === 0) {
+            return {
+                taskId,
+                status,
+                pending: true,
+                directResult: false,
+                waitingForEligibleDevice: true,
+                reason: 'NO_ONLINE_DEVICE',
+                isReplay: !!submitResult.isReplay,
+                message: 'Task remains queued after the bounded wait because no local agents are currently connected.'
+            };
+        }
+        if (status === 'queued' && !eligible) {
+            return {
+                taskId,
+                status,
+                pending: true,
+                directResult: false,
+                waitingForEligibleDevice: true,
+                reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
+                isReplay: !!submitResult.isReplay,
+                message: `Task remains queued after the bounded wait because currently connected devices are not authorized for capability '${options.capability}'.`
+            };
+        }
         return {
             taskId,
-            status: currentTask?.status || 'queued',
+            status,
             pending: true,
             directResult: false,
+            isReplay: !!submitResult.isReplay,
             message: 'Task is still executing; query remote_task_status using this taskId.'
         };
     }

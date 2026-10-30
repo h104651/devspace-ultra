@@ -45,6 +45,7 @@ class KaggleBackend {
     pollIntervalMs;
     pollScheduler;
     activePollers = new Map();
+    inFlightReconciliations = new Map();
     constructor(taskStore, artifactStore, client, storageDir, pollIntervalMs = 15000, pollScheduler) {
         this.taskStore = taskStore;
         this.artifactStore = artifactStore;
@@ -124,8 +125,31 @@ class KaggleBackend {
     /**
      * Reconciles an externally-submitted Kaggle task against the authoritative remote provider.
      * Never re-pushes or duplicates kernels on Kaggle.
+     * Single-flight per taskId prevents concurrent duplicate reconciliation/finalization.
+     * Preserves reschedule=true intent across concurrent callers.
      */
     async reconcileTask(taskId, reschedule = false) {
+        const existing = this.inFlightReconciliations.get(taskId);
+        if (existing) {
+            if (reschedule) {
+                existing.rescheduleRequested = true;
+            }
+            return existing.promise;
+        }
+        const inFlight = {
+            promise: Promise.resolve(false),
+            rescheduleRequested: reschedule
+        };
+        inFlight.promise = this.executeReconcileTask(taskId, inFlight);
+        this.inFlightReconciliations.set(taskId, inFlight);
+        try {
+            return await inFlight.promise;
+        }
+        finally {
+            this.inFlightReconciliations.delete(taskId);
+        }
+    }
+    async executeReconcileTask(taskId, inFlight) {
         const task = this.taskStore.getTask(taskId);
         if (!task || ['succeeded', 'failed', 'cancelled'].includes(task.status))
             return false;
@@ -139,9 +163,14 @@ class KaggleBackend {
         }
         try {
             const statusRes = await this.client.getKernelStatus(kernelSlug);
+            // Re-read latest task state after remote await
+            const latestTask = this.taskStore.getTask(taskId);
+            if (!latestTask || ['succeeded', 'failed', 'cancelled'].includes(latestTask.status)) {
+                return false;
+            }
             const now = Date.now();
             const updatedExternalRun = {
-                ...(task.externalRun || { provider: 'kaggle', submittedAt: task.createdAt }),
+                ...(latestTask.externalRun || { provider: 'kaggle', submittedAt: latestTask.createdAt }),
                 kernelRef: kernelSlug,
                 lastPolledAt: now,
                 lastRemoteStatus: statusRes.status
@@ -173,27 +202,48 @@ class KaggleBackend {
             // If running or queued, preserve active state and reschedule poll
             updatedExternalRun.reconciliationState = 'active';
             this.taskStore.setExternalRun(taskId, updatedExternalRun);
-            if (reschedule)
-                await this.schedulePoll(taskId, kernelSlug);
+            if (inFlight.rescheduleRequested) {
+                const checkTask = this.taskStore.getTask(taskId);
+                if (checkTask && !['succeeded', 'failed', 'cancelled'].includes(checkTask.status)) {
+                    await this.schedulePoll(taskId, kernelSlug);
+                }
+            }
             return true;
         }
         catch (err) {
+            // Re-read latest task state in error handler
+            const latestTask = this.taskStore.getTask(taskId);
+            if (!latestTask || ['succeeded', 'failed', 'cancelled'].includes(latestTask.status)) {
+                return false;
+            }
             this.taskStore.appendLogs(taskId, [`Kaggle status poll failed: ${err.message || String(err)}`]);
             const updatedExternalRun = {
-                ...(task.externalRun || { provider: 'kaggle', submittedAt: task.createdAt }),
+                ...(latestTask.externalRun || { provider: 'kaggle', submittedAt: latestTask.createdAt }),
                 kernelRef: kernelSlug,
                 lastPolledAt: Date.now(),
                 reconciliationState: 'pending'
             };
             this.taskStore.setExternalRun(taskId, updatedExternalRun);
-            if (reschedule)
-                await this.schedulePoll(taskId, kernelSlug);
+            if (inFlight.rescheduleRequested) {
+                const checkTask = this.taskStore.getTask(taskId);
+                if (checkTask && !['succeeded', 'failed', 'cancelled'].includes(checkTask.status)) {
+                    await this.schedulePoll(taskId, kernelSlug);
+                }
+            }
             return true;
         }
     }
     async finalizeKaggleRun(taskId, kernelSlug) {
+        const taskBefore = this.taskStore.getTask(taskId);
+        if (!taskBefore || ['succeeded', 'failed', 'cancelled'].includes(taskBefore.status)) {
+            return;
+        }
         const outputDir = this.workDirBase ? path.join(this.workDirBase, taskId, 'outputs') : '';
         const downloadRes = await this.client.downloadKernelOutput(kernelSlug, outputDir);
+        const taskAfterDownload = this.taskStore.getTask(taskId);
+        if (!taskAfterDownload || ['succeeded', 'failed', 'cancelled'].includes(taskAfterDownload.status)) {
+            return;
+        }
         const resultSummary = { kernelSlug, status: 'complete', outputFiles: [] };
         if (downloadRes.success && Array.isArray(downloadRes.files)) {
             for (const item of downloadRes.files) {
@@ -239,13 +289,19 @@ class KaggleBackend {
         this.taskStore.appendLogs(taskId, [`Kaggle kernel run finalized successfully. Ingested ${resultSummary.outputFiles.length} artifacts.`]);
     }
     /**
-     * Reconciles all non-terminal tasks associated with an external Kaggle run on system hydration/startup.
+     * Reconciles all non-terminal Kaggle tasks on hydration/startup. Legacy rows
+     * created before externalRun persistence are rediscovered only when they are
+     * already running; a queued row may represent work that was never submitted.
      */
     async reconcileDanglingTasks() {
         let count = 0;
         const nonTerminalTasks = this.taskStore.listTasks().filter(t => ['queued', 'claimed', 'acknowledged', 'running'].includes(t.status) &&
-            t.externalRun &&
-            t.externalRun.provider === 'kaggle');
+            (t.externalRun?.provider === 'kaggle' ||
+                (t.status === 'running' &&
+                    t.backend === 'kaggle' &&
+                    t.capability === 'kaggle:run' &&
+                    typeof t.payload?.kernelSlug === 'string' &&
+                    t.payload.kernelSlug.length > 0)));
         for (const task of nonTerminalTasks) {
             try {
                 await this.reconcileTask(task.taskId, true);
