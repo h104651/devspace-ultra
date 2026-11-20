@@ -22,7 +22,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
         retryPolicyJson TEXT NOT NULL, leaseJson TEXT, resultJson TEXT, errorJson TEXT,
         artifactsJson TEXT NOT NULL, logsJson TEXT NOT NULL, metadataJson TEXT,
         startedAt INTEGER, completedAt INTEGER, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-        attemptsJson TEXT NOT NULL DEFAULT '[]', activeAttemptId TEXT, externalRunJson TEXT
+        attemptsJson TEXT NOT NULL DEFAULT '[]', activeAttemptId TEXT, externalRunJson TEXT, targetDeviceId TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_tasks_idemp ON tasks(idempotencyKey);
@@ -79,6 +79,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     try { this.sql.exec("ALTER TABLE tasks ADD COLUMN attemptsJson TEXT NOT NULL DEFAULT '[]'"); } catch {}
     try { this.sql.exec('ALTER TABLE tasks ADD COLUMN activeAttemptId TEXT'); } catch {}
     try { this.sql.exec('ALTER TABLE tasks ADD COLUMN externalRunJson TEXT'); } catch {}
+    try { this.sql.exec('ALTER TABLE tasks ADD COLUMN targetDeviceId TEXT'); } catch {}
   }
 
   private getFirstRow(query: string, ...params: any[]): any {
@@ -108,8 +109,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       `INSERT OR REPLACE INTO tasks (
         taskId, taskKey, idempotencyKey, clientRequestId, backend, capability, requiredScope, status, priority,
         payloadJson, retryPolicyJson, leaseJson, resultJson, errorJson, artifactsJson, logsJson, metadataJson,
-        startedAt, completedAt, createdAt, updatedAt, attemptsJson, activeAttemptId, externalRunJson
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        startedAt, completedAt, createdAt, updatedAt, attemptsJson, activeAttemptId, externalRunJson, targetDeviceId
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       task.taskId, task.taskKey || null, task.idempotencyKey || null, task.clientRequestId || null,
       task.backend, task.capability, task.requiredScope, task.status, task.priority,
       JSON.stringify(task.payload), JSON.stringify(task.retryPolicy), task.lease ? JSON.stringify(task.lease) : null,
@@ -118,7 +119,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       JSON.stringify(task.artifacts || []), JSON.stringify(task.logs || []),
       task.metadata ? JSON.stringify(task.metadata) : null, task.startedAt || null, task.completedAt || null,
       task.createdAt, task.updatedAt, JSON.stringify(task.attempts || []), task.activeAttemptId || null,
-      task.externalRun ? JSON.stringify(task.externalRun) : null
+      task.externalRun ? JSON.stringify(task.externalRun) : null,
+      task.targetDeviceId || null
     );
   }
 
@@ -169,7 +171,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       artifacts: JSON.parse(row.artifactsJson || '[]'), logs: JSON.parse(row.logsJson || '[]'),
       metadata: row.metadataJson ? JSON.parse(row.metadataJson) : undefined,
       attempts: JSON.parse(row.attemptsJson || '[]'), activeAttemptId: row.activeAttemptId || undefined,
-      externalRun,
+      externalRun, targetDeviceId: row.targetDeviceId || undefined,
       startedAt: row.startedAt || undefined, completedAt: row.completedAt || undefined,
       createdAt: row.createdAt, updatedAt: row.updatedAt
     } as DurableTask;

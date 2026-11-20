@@ -105,6 +105,7 @@ export interface DurableTask<TPayload = any, TResult = any> {
   artifacts: TaskArtifactSummary[];
   logs: string[];
   externalRun?: ExternalRunInfo;
+  targetDeviceId?: string;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;
@@ -124,5 +125,6 @@ export interface CreateTaskOptions<TPayload = any> {
   payload: TPayload;
   maxRetries?: number;
   leaseDurationMs?: number;
+  targetDeviceId?: string;
   metadata?: Record<string, any>;
 }

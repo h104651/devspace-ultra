@@ -142,10 +142,30 @@ class AuthManager {
         this.save();
         return { clientId, token, record };
     }
-    registerDevice(name, platform = 'windows', capabilities = ['local:read', 'local:write', 'local:test']) {
-        const deviceId = `dev-${crypto.randomBytes(6).toString('hex')}`;
-        const { token } = this.generateToken(deviceId, 'device', ['device:connect', ...capabilities]);
-        const record = { deviceId, name, platform, status: 'offline', capabilities, registeredAt: Date.now(), tokenHash: this.hashToken(token) };
+    registerDevice(name, platform = 'windows', capabilities = ['local:read', 'local:write', 'local:test'], customDeviceId, expiresInMs) {
+        const deviceId = customDeviceId ? customDeviceId.trim().toLowerCase() : `dev-${crypto.randomBytes(6).toString('hex')}`;
+        if (!/^[a-z0-9-_.]+$/.test(deviceId)) {
+            throw new Error(`INVALID_DEVICE_ID: Device ID '${deviceId}' contains invalid characters. Use letters, numbers, hyphens, dots, or underscores.`);
+        }
+        const existing = this.devices.get(deviceId);
+        if (existing && existing.status !== 'revoked') {
+            throw new Error(`DEVICE_ID_CONFLICT: Device with ID '${deviceId}' already exists and is active`);
+        }
+        const scopes = ['device:connect'];
+        for (const cap of (capabilities || [])) {
+            if (!scopes.includes(cap))
+                scopes.push(cap);
+        }
+        const { token } = this.generateToken(deviceId, 'device', scopes, expiresInMs);
+        const record = {
+            deviceId,
+            name,
+            platform,
+            status: 'offline',
+            capabilities,
+            registeredAt: Date.now(),
+            tokenHash: this.hashToken(token)
+        };
         this.devices.set(deviceId, record);
         this.save();
         return { deviceId, token, record };

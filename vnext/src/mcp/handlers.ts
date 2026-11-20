@@ -47,7 +47,8 @@ export class McpHandlers {
         capability: args.capability,
         payload: args.payload,
         priority: args.priority,
-        clientRequestId: args.clientRequestId
+        clientRequestId: args.clientRequestId,
+        targetDeviceId: args.targetDeviceId
       },
       auth.scopes,
       auth.subjectId
@@ -55,6 +56,23 @@ export class McpHandlers {
 
     if (args.backend === 'local') {
       const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+      if (args.targetDeviceId) {
+        const isTargetOnline = connected.some((c: any) => c.deviceId === args.targetDeviceId);
+        if (!isTargetOnline) {
+          return {
+            taskId: result.taskId,
+            status: result.status,
+            backend: args.backend,
+            capability: args.capability,
+            targetDeviceId: args.targetDeviceId,
+            waitingForEligibleDevice: true,
+            reason: 'TARGET_DEVICE_OFFLINE',
+            isReplay: !!result.isReplay,
+            message: `Task queued specifically for targeted device '${args.targetDeviceId}', which is currently offline.`
+          };
+        }
+      }
+
       if (connected.length === 0) {
         return {
           taskId: result.taskId,
@@ -68,7 +86,10 @@ export class McpHandlers {
         };
       }
 
-      const eligible = connected.some((c: any) => c.capabilities?.includes(args.capability));
+      const eligible = connected.some((c: any) => {
+        if (args.targetDeviceId && c.deviceId !== args.targetDeviceId) return false;
+        return c.capabilities?.includes(args.capability);
+      });
       if (!eligible) {
         return {
           taskId: result.taskId,
@@ -78,7 +99,9 @@ export class McpHandlers {
           waitingForEligibleDevice: true,
           reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
           isReplay: !!result.isReplay,
-          message: `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
+          message: args.targetDeviceId
+            ? `Task queued, but targeted device '${args.targetDeviceId}' is not authorized for capability '${args.capability}'.`
+            : `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
         };
       }
     }
@@ -1237,9 +1260,14 @@ export class McpHandlers {
     };
   }
 
-  public async handleDeviceStatus(caller?: McpCallerContext) {
+  public async handleDeviceStatus(args?: any, caller?: McpCallerContext) {
+    if (!caller && args && (args.scopes || args.subjectId)) {
+      caller = args;
+      args = undefined;
+    }
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:read', 'admin:*');
+    const filterId = typeof args?.targetDeviceId === 'string' ? args.targetDeviceId.trim() : (typeof args?.deviceId === 'string' ? args.deviceId.trim() : undefined);
     const devices = this.gateway.authManager.listDevices();
     const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
 
@@ -1304,11 +1332,12 @@ export class McpHandlers {
       }
     }
 
+    const filteredResults = filterId ? deviceResults.filter(d => d.deviceId === filterId) : deviceResults;
     return {
       totalRegistered: devices.length,
       totalOnline: connectedByDevice.size,
       totalConnections: connected.length,
-      devices: deviceResults
+      devices: filteredResults
     };
   }
 
@@ -2194,6 +2223,7 @@ export class McpHandlers {
       payload: any;
       clientRequestId?: string;
       idempotencyKey?: string;
+      targetDeviceId?: string;
     },
     auth: McpCallerContext,
     waitMs?: number
@@ -2209,7 +2239,8 @@ export class McpHandlers {
         capability: options.capability,
         payload: options.payload,
         clientRequestId: options.clientRequestId,
-        idempotencyKey: options.idempotencyKey
+        idempotencyKey: options.idempotencyKey,
+        targetDeviceId: options.targetDeviceId
       },
       auth.scopes,
       auth.subjectId
@@ -2294,33 +2325,57 @@ export class McpHandlers {
     // 5. Bounded wait timeout: inspect the latest device snapshot only now.
     // The durable task remains authoritative and is never cancelled here.
     const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
-    const eligible = connected.some((c: any) => c.capabilities?.includes(options.capability));
+    const eligible = connected.some((c: any) => {
+      if (options.targetDeviceId && c.deviceId !== options.targetDeviceId) return false;
+      return c.capabilities?.includes(options.capability);
+    });
     const status = currentTask?.status || 'queued';
 
-    if (status === 'queued' && connected.length === 0) {
-      return {
-        taskId,
-        status,
-        pending: true,
-        directResult: false,
-        waitingForEligibleDevice: true,
-        reason: 'NO_ONLINE_DEVICE',
-        isReplay: !!submitResult.isReplay,
-        message: 'Task remains queued after the bounded wait because no local agents are currently connected.'
-      };
-    }
+    if (status === 'queued') {
+      if (options.targetDeviceId) {
+        const isTargetOnline = connected.some((c: any) => c.deviceId === options.targetDeviceId);
+        if (!isTargetOnline) {
+          return {
+            taskId,
+            status,
+            targetDeviceId: options.targetDeviceId,
+            pending: true,
+            directResult: false,
+            waitingForEligibleDevice: true,
+            reason: 'TARGET_DEVICE_OFFLINE',
+            isReplay: !!submitResult.isReplay,
+            message: `Task remains queued specifically for targeted device '${options.targetDeviceId}', which is currently offline.`
+          };
+        }
+      }
 
-    if (status === 'queued' && !eligible) {
-      return {
-        taskId,
-        status,
-        pending: true,
-        directResult: false,
-        waitingForEligibleDevice: true,
-        reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
-        isReplay: !!submitResult.isReplay,
-        message: `Task remains queued after the bounded wait because currently connected devices are not authorized for capability '${options.capability}'.`
-      };
+      if (connected.length === 0) {
+        return {
+          taskId,
+          status,
+          pending: true,
+          directResult: false,
+          waitingForEligibleDevice: true,
+          reason: 'NO_ONLINE_DEVICE',
+          isReplay: !!submitResult.isReplay,
+          message: 'Task remains queued after the bounded wait because no local agents are currently connected.'
+        };
+      }
+
+      if (!eligible) {
+        return {
+          taskId,
+          status,
+          pending: true,
+          directResult: false,
+          waitingForEligibleDevice: true,
+          reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
+          isReplay: !!submitResult.isReplay,
+          message: options.targetDeviceId
+            ? `Task remains queued because targeted device '${options.targetDeviceId}' is not authorized for capability '${options.capability}'.`
+            : `Task remains queued after the bounded wait because currently connected devices are not authorized for capability '${options.capability}'.`
+        };
+      }
     }
 
     return {
@@ -2340,7 +2395,8 @@ export class McpHandlers {
       {
         capability: 'local:list_projects',
         payload: args || {},
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2357,7 +2413,8 @@ export class McpHandlers {
       {
         capability: 'local:project_status',
         payload: { projectId: args.projectId },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2378,7 +2435,8 @@ export class McpHandlers {
           relativePath: args.relativePath,
           limit: args.limit
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2402,7 +2460,8 @@ export class McpHandlers {
           relativePath: args.relativePath,
           content: args.content
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2430,7 +2489,8 @@ export class McpHandlers {
           expectedSha256: args.expectedSha256,
           patches: args.patches
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2451,7 +2511,8 @@ export class McpHandlers {
           relativePath: args.relativePath || '.',
           maxEntries: args.maxEntries
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2477,7 +2538,8 @@ export class McpHandlers {
           maxResults: args.maxResults,
           type: args.type || 'all'
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2503,7 +2565,8 @@ export class McpHandlers {
           maxDepth: args.maxDepth,
           maxResults: args.maxResults
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2524,7 +2587,8 @@ export class McpHandlers {
           relativePath: args.relativePath || '.',
           maxDepth: args.maxDepth
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2544,7 +2608,8 @@ export class McpHandlers {
           projectId: args.projectId,
           relativePath: args.relativePath
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2564,7 +2629,8 @@ export class McpHandlers {
           projectId: args.projectId,
           repoRelativePath: args?.repoRelativePath
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth,
       args?.waitMs
@@ -2587,7 +2653,8 @@ export class McpHandlers {
           runnerId: args?.runnerId || 'npm',
           workingRelativePath: args?.workingRelativePath || '.'
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth.scopes,
       auth.subjectId
@@ -2610,7 +2677,8 @@ export class McpHandlers {
           commandId: args?.commandId || 'npm',
           workingRelativePath: args?.workingRelativePath || '.'
         },
-        clientRequestId: args?.clientRequestId
+        clientRequestId: args?.clientRequestId,
+        targetDeviceId: args?.targetDeviceId
       },
       auth.scopes,
       auth.subjectId

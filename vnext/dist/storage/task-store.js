@@ -38,11 +38,18 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto = __importStar(require("crypto"));
 const scope_checker_1 = require("../security/scope-checker");
+const TERMINAL_TASK_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'stale']);
+const ACTIVE_ATTEMPT_STATUSES = new Set(['claimed', 'acknowledged', 'running']);
+const TASK_LOG_MAX_LINES = 2000;
+const TASK_LOG_MAX_ENTRY_BYTES = 4096;
+const TASK_LOG_RETENTION_MARKER = `[LOG_RETENTION] Older task logs truncated; retaining newest ${TASK_LOG_MAX_LINES - 1} entries`;
+const TASK_LOG_LINE_TRUNCATION_MARKER = ' …[LOG_LINE_TRUNCATED]';
 class TaskStore {
     tasksDir;
     tasks = new Map();
     defaultLeaseDurationMs;
     storageAdapter;
+    taskWaiters = new Map();
     constructor(storageDir, defaultLeaseDurationMs = 60000, storageAdapter) {
         this.defaultLeaseDurationMs = defaultLeaseDurationMs;
         this.storageAdapter = storageAdapter;
@@ -60,6 +67,8 @@ class TaskStore {
     hydrate(tasks) {
         for (const task of tasks || []) {
             if (task?.taskId) {
+                this.normalizeAttemptLedger(task);
+                this.normalizeLogEntries(task);
                 this.tasks.set(task.taskId, task);
             }
         }
@@ -74,6 +83,8 @@ class TaskStore {
                     try {
                         const raw = fs.readFileSync(path.join(this.tasksDir, file), 'utf-8');
                         const task = JSON.parse(raw);
+                        this.normalizeAttemptLedger(task);
+                        this.normalizeLogEntries(task);
                         this.tasks.set(task.taskId, task);
                     }
                     catch (err) {
@@ -86,7 +97,49 @@ class TaskStore {
             console.error('Failed to read tasks directory:', err);
         }
     }
+    normalizeAttemptLedger(task) {
+        if (!Array.isArray(task.attempts))
+            task.attempts = [];
+        if (task.activeAttemptId && !task.attempts.some(attempt => attempt.id === task.activeAttemptId)) {
+            // A dangling pointer from an interrupted/partial older write is never
+            // treated as proof that work is active. Task/lease state remains the
+            // authority and the next valid transition can create a replacement record.
+            task.activeAttemptId = undefined;
+        }
+    }
+    truncateLogEntry(value) {
+        const text = String(value ?? '');
+        if (Buffer.byteLength(text, 'utf8') <= TASK_LOG_MAX_ENTRY_BYTES)
+            return text;
+        const suffixBytes = Buffer.byteLength(TASK_LOG_LINE_TRUNCATION_MARKER, 'utf8');
+        const maxPrefixBytes = Math.max(0, TASK_LOG_MAX_ENTRY_BYTES - suffixBytes);
+        const prefixChars = [];
+        let prefixBytes = 0;
+        for (const char of text) {
+            const charBytes = Buffer.byteLength(char, 'utf8');
+            if (prefixBytes + charBytes > maxPrefixBytes)
+                break;
+            prefixChars.push(char);
+            prefixBytes += charBytes;
+        }
+        return `${prefixChars.join('')}${TASK_LOG_LINE_TRUNCATION_MARKER}`;
+    }
+    normalizeLogEntries(task) {
+        if (!Array.isArray(task.logs))
+            task.logs = [];
+        task.logs = task.logs.map(line => this.truncateLogEntry(line));
+        this.enforceLogRetention(task);
+    }
+    enforceLogRetention(task) {
+        if (!Array.isArray(task.logs))
+            task.logs = [];
+        if (task.logs.length <= TASK_LOG_MAX_LINES)
+            return;
+        const newest = task.logs.slice(-(TASK_LOG_MAX_LINES - 1));
+        task.logs = [TASK_LOG_RETENTION_MARKER, ...newest];
+    }
     saveTask(task) {
+        this.enforceLogRetention(task);
         task.updatedAt = Date.now();
         if (this.tasksDir) {
             try {
@@ -103,6 +156,85 @@ class TaskStore {
                 console.error(`Failed to persist task ${task.taskId} through storage adapter:`, err);
             });
         }
+        this.notifyTaskChanged(task);
+    }
+    notifyTaskChanged(task) {
+        const listeners = this.taskWaiters.get(task.taskId);
+        if (!listeners || listeners.size === 0)
+            return;
+        for (const listener of Array.from(listeners))
+            listener(task);
+    }
+    getActiveAttempt(task) {
+        if (!task.activeAttemptId || !task.attempts)
+            return undefined;
+        return task.attempts.find(attempt => attempt.id === task.activeAttemptId);
+    }
+    createAttempt(task, deviceId, claimedAt = Date.now()) {
+        this.normalizeAttemptLedger(task);
+        const referenced = this.getActiveAttempt(task);
+        if (referenced && ACTIVE_ATTEMPT_STATUSES.has(referenced.status))
+            return undefined;
+        if (referenced)
+            task.activeAttemptId = undefined;
+        const attempts = task.attempts;
+        const attemptNumber = attempts.length + 1;
+        const attempt = {
+            id: `attempt-${attemptNumber}-${crypto.randomBytes(4).toString('hex')}`,
+            attemptNumber,
+            status: 'claimed',
+            claimedBy: deviceId,
+            claimedAt
+        };
+        attempts.push(attempt);
+        task.activeAttemptId = attempt.id;
+        return attempt;
+    }
+    /**
+     * Backwards-compatible migration for tasks that were already claimed/running
+     * when the attempt ledger was introduced. It creates history only from an
+     * authoritative current lease and never guesses another owner.
+     */
+    ensureActiveAttempt(task, deviceId) {
+        this.normalizeAttemptLedger(task);
+        const current = this.getActiveAttempt(task);
+        if (current)
+            return current.claimedBy === deviceId ? current : undefined;
+        if (!task.lease || task.lease.claimedBy !== deviceId)
+            return undefined;
+        const attempt = this.createAttempt(task, deviceId, task.lease.claimedAt);
+        if (!attempt)
+            return undefined;
+        if (task.status === 'acknowledged') {
+            attempt.status = 'acknowledged';
+            attempt.acknowledgedAt = task.lease.acknowledgedAt;
+        }
+        else if (task.status === 'running') {
+            attempt.status = 'running';
+            attempt.acknowledgedAt = task.lease.acknowledgedAt;
+            attempt.startedAt = task.startedAt;
+        }
+        return attempt;
+    }
+    finishActiveAttempt(task, status, error) {
+        this.normalizeAttemptLedger(task);
+        let attempt = this.getActiveAttempt(task);
+        if (!attempt &&
+            task.lease?.claimedBy &&
+            (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running')) {
+            attempt = this.ensureActiveAttempt(task, task.lease.claimedBy);
+        }
+        if (!attempt) {
+            task.activeAttemptId = undefined;
+            return;
+        }
+        attempt.status = status;
+        attempt.completedAt = Date.now();
+        if (error?.code)
+            attempt.errorCode = error.code;
+        if (error?.message)
+            attempt.errorMessage = error.message;
+        task.activeAttemptId = undefined;
     }
     createTask(options) {
         const taskId = options.taskId || `task-${crypto.randomBytes(8).toString('hex')}`;
@@ -124,8 +256,10 @@ class TaskStore {
                 backoffMs: 2000,
                 requeueOnStale: true
             },
+            attempts: [],
             artifacts: [],
             logs: [],
+            targetDeviceId: options.targetDeviceId ? options.targetDeviceId.trim() : undefined,
             createdAt: Date.now(),
             updatedAt: Date.now(),
             metadata: options.metadata
@@ -135,7 +269,19 @@ class TaskStore {
         return task;
     }
     getTask(taskId) {
-        return this.tasks.get(taskId);
+        const cached = this.tasks.get(taskId);
+        if (cached)
+            return cached;
+        // Cloudflare Durable Object SQLite is synchronously queryable even though the
+        // general adapter contract is async. Use that optional fast path only for a
+        // cache miss so terminal history can stay out of cold-start hydration.
+        const durable = this.storageAdapter?.getTaskSync?.(taskId);
+        if (durable) {
+            this.normalizeAttemptLedger(durable);
+            this.normalizeLogEntries(durable);
+            this.tasks.set(taskId, durable);
+        }
+        return durable;
     }
     findByIdempotencyKey(key) {
         for (const t of this.tasks.values()) {
@@ -145,10 +291,73 @@ class TaskStore {
         }
         return undefined;
     }
+    /**
+     * Wait for one task to reach a terminal state without status polling.
+     *
+     * The waiter is process-local and bounded by timeout; durable task state stays
+     * authoritative, so a caller can safely retry wait after a process/DO restart.
+     */
+    waitForTask(taskId, options) {
+        const initial = this.getTask(taskId);
+        if (!initial)
+            return Promise.reject(new Error(`TASK_NOT_FOUND: ${taskId}`));
+        if (TERMINAL_TASK_STATUSES.has(initial.status)) {
+            return Promise.resolve({ task: initial, timedOut: false });
+        }
+        const timeoutMs = Math.max(0, options?.timeoutMs ?? 30000);
+        return new Promise((resolve) => {
+            let settled = false;
+            let timer;
+            const cleanup = () => {
+                if (timer)
+                    clearTimeout(timer);
+                const listeners = this.taskWaiters.get(taskId);
+                listeners?.delete(listener);
+                if (listeners && listeners.size === 0)
+                    this.taskWaiters.delete(taskId);
+            };
+            const finish = (task, timedOut) => {
+                if (settled)
+                    return;
+                settled = true;
+                cleanup();
+                resolve({ task, timedOut });
+            };
+            const listener = (task) => {
+                if (TERMINAL_TASK_STATUSES.has(task.status))
+                    finish(task, false);
+            };
+            let listeners = this.taskWaiters.get(taskId);
+            if (!listeners) {
+                listeners = new Set();
+                this.taskWaiters.set(taskId, listeners);
+            }
+            listeners.add(listener);
+            // Close the registration race: the task may have completed between the
+            // initial snapshot and listener insertion.
+            const refreshed = this.getTask(taskId);
+            if (refreshed && TERMINAL_TASK_STATUSES.has(refreshed.status)) {
+                finish(refreshed, false);
+                return;
+            }
+            timer = setTimeout(() => {
+                const current = this.getTask(taskId) || initial;
+                finish(current, !TERMINAL_TASK_STATUSES.has(current.status));
+            }, timeoutMs);
+        });
+    }
     claimTask(deviceId, supportedCapabilities, leaseDurationMs) {
         this.recoverStaleTasks();
         const eligibleTasks = Array.from(this.tasks.values())
-            .filter(t => t.status === 'queued' && supportedCapabilities.includes(t.capability))
+            .filter(t => {
+            if (t.status !== 'queued')
+                return false;
+            if (!supportedCapabilities.includes(t.capability))
+                return false;
+            if (t.targetDeviceId && t.targetDeviceId !== deviceId)
+                return false;
+            return true;
+        })
             .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
         if (eligibleTasks.length === 0)
             return undefined;
@@ -158,7 +367,12 @@ class TaskStore {
         const task = this.tasks.get(taskId);
         if (!task || task.status !== 'queued')
             return undefined;
+        if (task.targetDeviceId && task.targetDeviceId !== deviceId)
+            return undefined;
         const now = Date.now();
+        const attempt = this.createAttempt(task, deviceId, now);
+        if (!attempt)
+            return undefined;
         const duration = leaseDurationMs || this.defaultLeaseDurationMs;
         task.status = 'claimed';
         task.lease = {
@@ -175,10 +389,16 @@ class TaskStore {
         if (!task || task.status !== 'claimed' || task.lease?.claimedBy !== deviceId) {
             return false;
         }
+        const attempt = this.ensureActiveAttempt(task, deviceId);
+        if (!attempt || attempt.claimedBy !== deviceId)
+            return false;
+        const now = Date.now();
         task.status = 'acknowledged';
+        attempt.status = 'acknowledged';
+        attempt.acknowledgedAt = now;
         if (task.lease) {
-            task.lease.acknowledgedAt = Date.now();
-            task.lease.lastHeartbeatAt = Date.now();
+            task.lease.acknowledgedAt = now;
+            task.lease.lastHeartbeatAt = now;
         }
         this.saveTask(task);
         return true;
@@ -187,20 +407,48 @@ class TaskStore {
         const task = this.tasks.get(taskId);
         if (!task)
             return false;
-        task.status = 'running';
-        task.startedAt = Date.now();
+        const now = Date.now();
         if (task.lease) {
-            task.lease.lastHeartbeatAt = Date.now();
-            task.lease.leaseExpiresAt = Date.now() + this.defaultLeaseDurationMs;
+            // A claimed task has an authoritative owner. No caller — including an
+            // internal backend — may take over that active attempt implicitly.
+            if (task.lease.claimedBy !== deviceId)
+                return false;
+            if (task.status !== 'claimed' && task.status !== 'acknowledged' && task.status !== 'running')
+                return false;
         }
         else {
+            // Gateway-internal backends historically start immediately after durable
+            // submission and therefore do not perform the local-agent claim handshake.
+            // Preserve that path, but require local-device tasks to claim first.
+            if (task.backend === 'local' || task.status !== 'queued')
+                return false;
+            const created = this.createAttempt(task, deviceId, now);
+            if (!created)
+                return false;
             task.lease = {
                 claimedBy: deviceId,
-                claimedAt: Date.now(),
-                leaseExpiresAt: Date.now() + this.defaultLeaseDurationMs,
-                lastHeartbeatAt: Date.now()
+                claimedAt: now,
+                leaseExpiresAt: now + this.defaultLeaseDurationMs,
+                lastHeartbeatAt: now
             };
         }
+        const attempt = this.ensureActiveAttempt(task, deviceId);
+        if (!attempt || attempt.claimedBy !== deviceId)
+            return false;
+        if (task.status !== 'running') {
+            task.status = 'running';
+            task.startedAt = task.startedAt ?? now;
+            attempt.status = 'running';
+            attempt.startedAt = attempt.startedAt ?? now;
+        }
+        else {
+            // TASK_PROGRESS can arrive many times. Starting an already-running attempt
+            // is idempotent and must not rewrite its original start timestamp.
+            attempt.status = 'running';
+            attempt.startedAt = attempt.startedAt ?? task.startedAt ?? now;
+        }
+        task.lease.lastHeartbeatAt = now;
+        task.lease.leaseExpiresAt = now + this.defaultLeaseDurationMs;
         this.saveTask(task);
         return true;
     }
@@ -212,6 +460,9 @@ class TaskStore {
         if (task.status !== 'claimed' && task.status !== 'acknowledged' && task.status !== 'running') {
             return false;
         }
+        const attempt = this.ensureActiveAttempt(task, deviceId);
+        if (!attempt || attempt.claimedBy !== deviceId)
+            return false;
         const now = Date.now();
         task.lease.lastHeartbeatAt = now;
         task.lease.leaseExpiresAt = now + (extensionMs || this.defaultLeaseDurationMs);
@@ -223,7 +474,7 @@ class TaskStore {
         if (!task)
             return;
         for (const line of lines) {
-            task.logs.push(`[${new Date().toISOString()}] ${line}`);
+            task.logs.push(this.truncateLogEntry(`[${new Date().toISOString()}] ${line}`));
         }
         this.saveTask(task);
     }
@@ -238,8 +489,9 @@ class TaskStore {
     }
     completeTask(taskId, result) {
         const task = this.tasks.get(taskId);
-        if (!task)
+        if (!task || TERMINAL_TASK_STATUSES.has(task.status))
             return false;
+        this.finishActiveAttempt(task, 'succeeded');
         task.status = 'succeeded';
         task.result = result;
         task.completedAt = Date.now();
@@ -249,8 +501,9 @@ class TaskStore {
     }
     failTask(taskId, error, options) {
         const task = this.tasks.get(taskId);
-        if (!task)
+        if (!task || TERMINAL_TASK_STATUSES.has(task.status))
             return false;
+        this.finishActiveAttempt(task, 'failed', error);
         const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
         if (isRetryable) {
             task.retryPolicy.retryCount++;
@@ -264,7 +517,7 @@ class TaskStore {
             // task in an in-memory "retrying" timer that will never fire.
             if (this.storageAdapter) {
                 task.status = 'queued';
-                task.logs.push(`[RETRY] Requeued durably after failure (attempt ${task.retryPolicy.retryCount}/${task.retryPolicy.maxRetries}): ${error.message}`);
+                task.logs.push(this.truncateLogEntry(`[RETRY] Requeued durably after failure (attempt ${task.retryPolicy.retryCount}/${task.retryPolicy.maxRetries}): ${error.message}`));
             }
             else {
                 task.status = 'retrying';
@@ -296,6 +549,7 @@ class TaskStore {
         if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'cancelled') {
             return false;
         }
+        this.finishActiveAttempt(task, 'cancelled', { code: 'TASK_CANCELLED', message: reason });
         task.status = 'cancelled';
         task.error = { code: 'TASK_CANCELLED', message: reason };
         task.completedAt = Date.now();
@@ -316,6 +570,9 @@ class TaskStore {
         if (!task)
             return false;
         Object.assign(task, updates);
+        this.normalizeAttemptLedger(task);
+        if (updates.logs !== undefined)
+            this.normalizeLogEntries(task);
         this.saveTask(task);
         return true;
     }
@@ -324,15 +581,22 @@ class TaskStore {
         let recoveredCount = 0;
         let failedCount = 0;
         for (const task of this.tasks.values()) {
-            // External durable jobs (such as Kaggle runs) must not be blindly requeued on local worker lease timeout.
-            if (task.externalRun && task.externalRun.provider === 'kaggle') {
+            // Kaggle is an external remote backend. Its provider state, not a local
+            // worker lease, is authoritative — including legacy rows that predate
+            // externalRun persistence and can only be identified by backend identity.
+            if (task.backend === 'kaggle' || task.externalRun?.provider === 'kaggle') {
                 continue;
             }
             if ((task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running') &&
                 task.lease &&
                 now > task.lease.leaseExpiresAt) {
                 const claimedBy = task.lease.claimedBy;
-                task.logs.push(`[STALE_DETECTION] Lease expired at ${new Date(task.lease.leaseExpiresAt).toISOString()} for worker ${claimedBy}`);
+                task.logs.push(this.truncateLogEntry(`[STALE_DETECTION] Lease expired at ${new Date(task.lease.leaseExpiresAt).toISOString()} for worker ${claimedBy}`));
+                this.ensureActiveAttempt(task, claimedBy);
+                this.finishActiveAttempt(task, 'interrupted', {
+                    code: 'TASK_LEASE_EXPIRED',
+                    message: `Task lease expired without heartbeat or completion from worker ${claimedBy}`
+                });
                 if (task.retryPolicy.requeueOnStale && task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
                     task.retryPolicy.retryCount++;
                     task.status = 'queued';

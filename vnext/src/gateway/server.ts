@@ -64,7 +64,16 @@ export class GatewayServer {
     this.swarmOrchestrator = new SwarmOrchestrator(this.taskStore);
     this.connectionManager = new ConnectionManager(this.authManager, this.killSwitch, this.auditLogger, this.taskStore);
     this.leaseMonitor = new LeaseMonitor(this.taskStore, this.connectionManager, this.auditLogger);
-    this.taskRouter = new TaskRouter(this.taskStore, this.idempotencyStore, this.kaggleBackend, this.swarmOrchestrator, this.killSwitch, this.auditLogger);
+    this.taskRouter = new TaskRouter(
+      this.taskStore,
+      this.idempotencyStore,
+      this.kaggleBackend,
+      this.swarmOrchestrator,
+      this.killSwitch,
+      this.auditLogger,
+      this.connectionManager,
+      this.authManager
+    );
     this.mcpHandlers = new McpHandlers(this);
     this.app = express();
     this.httpServer = http.createServer(this.app);
@@ -169,6 +178,60 @@ export class GatewayServer {
     this.app.get('/health', (_req, res) => res.json({ ok: true }));
     this.app.get('/admin/health', this.authenticate('admin:health'), (_req, res) => res.json({ status: 'healthy', service: 'devspace-ultra-gateway', version: '2.1.0', timestamp: Date.now(), connectedAgents: this.connectionManager.getConnectedAgents().length }));
 
+    this.app.post('/admin/devices', this.authenticate('admin'), async (req: Request, res: Response) => {
+      try {
+        const { name, platform, capabilities, deviceId, expiresInMs } = req.body || {};
+        if (!name || typeof name !== 'string') {
+          return res.status(400).json({ error: 'INVALID_ARGUMENT: name is required' });
+        }
+        const reg = this.authManager.registerDevice(name, platform || 'windows', capabilities, deviceId, expiresInMs);
+        this.auditLogger.log({ actor: (req as any).auth?.subjectId || 'admin', actorType: 'client', action: 'DEVICE_REGISTERED', resource: reg.deviceId, result: 'SUCCESS' });
+        return res.status(201).json({
+          ok: true,
+          deviceId: reg.deviceId,
+          token: reg.token,
+          device: {
+            deviceId: reg.record.deviceId,
+            name: reg.record.name,
+            platform: reg.record.platform,
+            status: reg.record.status,
+            capabilities: reg.record.capabilities,
+            registeredAt: reg.record.registeredAt
+          },
+          message: 'Device registered successfully. Save token securely; it cannot be retrieved again.'
+        });
+      } catch (err: any) {
+        const isConflict = err.message?.includes('DEVICE_ID_CONFLICT');
+        return res.status(isConflict ? 409 : 400).json({ error: err.message });
+      }
+    });
+
+    this.app.get('/admin/devices', this.authenticate('admin'), (_req: Request, res: Response) => {
+      const connected = this.connectionManager.getConnectedAgents();
+      const onlineIds = new Set(connected.map(c => c.deviceId));
+      const devices = this.authManager.listDevices().map(d => ({
+        deviceId: d.deviceId,
+        name: d.name,
+        platform: d.platform,
+        status: d.status === 'revoked' ? 'revoked' : (onlineIds.has(d.deviceId) ? 'online' : 'offline'),
+        capabilities: d.capabilities,
+        registeredAt: d.registeredAt,
+        lastConnectedAt: d.lastConnectedAt,
+        revokedAt: d.revokedAt,
+        revocationReason: d.revocationReason
+      }));
+      res.json({ total: devices.length, devices });
+    });
+
+    this.app.post('/admin/devices/:deviceId/revoke', this.authenticate('admin'), (req: Request, res: Response) => {
+      const deviceId = req.params.deviceId;
+      const reason = req.body?.reason || 'Admin action';
+      this.authManager.revokeDevice(deviceId, reason);
+      this.killSwitch.revokeDevice(deviceId, reason);
+      this.connectionManager.disconnectDevice(deviceId, reason);
+      res.json({ ok: true, deviceId, status: 'revoked' });
+    });
+
     const handleRemoteMcp = async (req: Request, res: Response) => {
       const auth: TokenPayload = (req as any).auth;
       const body = req.body;
@@ -213,10 +276,10 @@ export class GatewayServer {
 
     this.app.post('/api/tasks', this.authenticate(), async (req: Request, res: Response) => {
       const auth: TokenPayload = (req as any).auth;
-      const { backend, capability, payload, priority, idempotencyKey, clientRequestId, taskKey } = req.body;
+      const { backend, capability, payload, priority, idempotencyKey, clientRequestId, taskKey, targetDeviceId } = req.body;
       if (!backend || !capability || payload === undefined) return res.status(400).json({ error: 'INVALID_TASK_PAYLOAD' });
       try {
-        const result = await this.taskRouter.routeTaskSubmit({ backend, capability, payload, priority, idempotencyKey, clientRequestId, taskKey }, auth.scopes, auth.subjectId);
+        const result = await this.taskRouter.routeTaskSubmit({ backend, capability, payload, priority, idempotencyKey, clientRequestId, taskKey, targetDeviceId }, auth.scopes, auth.subjectId);
         res.status(202).json({ taskId: result.taskId, status: result.status, backend, capability, isReplay: !!result.isReplay, createdAt: result.task.createdAt });
       } catch (err: any) {
         res.status(err.message?.includes('AUTH_FORBIDDEN') ? 403 : err.message?.includes('KILL_SWITCH') ? 503 : 500).json({ error: 'TASK_SUBMISSION_FAILED', message: err.message });

@@ -247,6 +247,7 @@ export class TaskStore {
       attempts: [],
       artifacts: [],
       logs: [],
+      targetDeviceId: options.targetDeviceId ? options.targetDeviceId.trim() : undefined,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       metadata: options.metadata
@@ -348,7 +349,12 @@ export class TaskStore {
     this.recoverStaleTasks();
 
     const eligibleTasks = Array.from(this.tasks.values())
-      .filter(t => t.status === 'queued' && supportedCapabilities.includes(t.capability))
+      .filter(t => {
+        if (t.status !== 'queued') return false;
+        if (!supportedCapabilities.includes(t.capability)) return false;
+        if (t.targetDeviceId && t.targetDeviceId !== deviceId) return false;
+        return true;
+      })
       .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
 
     if (eligibleTasks.length === 0) return undefined;
@@ -358,6 +364,7 @@ export class TaskStore {
   public claimTaskById(taskId: string, deviceId: string, leaseDurationMs?: number): DurableTask | undefined {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'queued') return undefined;
+    if (task.targetDeviceId && task.targetDeviceId !== deviceId) return undefined;
 
     const now = Date.now();
     const attempt = this.createAttempt(task, deviceId, now);

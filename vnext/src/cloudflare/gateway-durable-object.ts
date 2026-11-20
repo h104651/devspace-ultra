@@ -138,13 +138,31 @@ export class GatewayDurableObject {
       { schedule: (taskId, kernelSlug, delayMs) => this.scheduleKagglePoll(taskId, kernelSlug, delayMs) }
     );
     this.swarmOrchestrator = new SwarmOrchestrator(this.taskStore);
+
+    const connectionManagerFacade = {
+      getConnectedAgents: () => (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).map((ws: any) => {
+        const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) || {};
+        return {
+          deviceId: att.deviceId || 'unknown',
+          name: att.name || att.deviceId || 'unknown',
+          platform: att.platform || 'windows',
+          capabilities: att.capabilities || [],
+          connectedAt: att.connectedAt || Date.now(),
+          lastHeartbeatAt: Date.now(),
+          socket: ws
+        };
+      }).filter((a: any) => a.deviceId !== 'unknown')
+    };
+
     this.taskRouter = new TaskRouter(
       this.taskStore,
       this.idempotencyStore,
       this.kaggleBackend,
       this.swarmOrchestrator,
       this.killSwitch,
-      this.auditLogger
+      this.auditLogger,
+      connectionManagerFacade,
+      this.authManager
     );
 
     const gatewayFacade: any = {
@@ -155,20 +173,7 @@ export class GatewayDurableObject {
       swarmOrchestrator: this.swarmOrchestrator,
       authManager: this.authManager,
       killSwitch: this.killSwitch,
-      connectionManager: {
-        getConnectedAgents: () => (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).map((ws: any) => {
-          const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) || {};
-          return {
-            deviceId: att.deviceId || 'unknown',
-            name: att.name || att.deviceId || 'unknown',
-            platform: att.platform || 'windows',
-            capabilities: att.capabilities || [],
-            connectedAt: att.connectedAt || Date.now(),
-            lastHeartbeatAt: Date.now(),
-            socket: ws
-          };
-        }).filter((a: any) => a.deviceId !== 'unknown')
-      }
+      connectionManager: connectionManagerFacade
     };
     this.mcpHandlers = new McpHandlers(gatewayFacade);
 
@@ -179,6 +184,12 @@ export class GatewayDurableObject {
   }
 
   private async initializeFromDurableStorage(): Promise<void> {
+    try {
+      this.authManager.hydrateDevices(await this.storage.listDevices());
+      this.authManager.hydrateClients(await this.storage.listClients());
+    } catch (err) {
+      console.error('Failed to hydrate auth devices/clients from storage:', err);
+    }
     try {
       await this.killSwitch.hydrate();
     } catch (err) {
@@ -688,6 +699,20 @@ export class GatewayDurableObject {
           await this.killSwitch.resetGlobalEmergencyStop();
         } else if (action === 'REVOKE_DEVICE' && targetId) {
           await this.killSwitch.revokeDevice(targetId, reason);
+          this.authManager.revokeDevice(targetId, reason);
+          const dev = this.authManager.getDevice(targetId);
+          if (dev) await this.storage.saveDevice(dev);
+          if (this.ctx.getWebSockets) {
+            for (const ws of this.ctx.getWebSockets()) {
+              const att = typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null;
+              if (att && att.deviceId === targetId) {
+                try {
+                  ws.send(JSON.stringify({ type: 'ERROR', error: 'DEVICE_REVOKED: Device revoked by admin' }));
+                  ws.close(1008, 'Device revoked');
+                } catch {}
+              }
+            }
+          }
         } else if (action === 'REVOKE_CLIENT' && targetId) {
           await this.killSwitch.revokeClient(targetId, reason);
         } else if (action === 'DISABLE_LOCAL') {
@@ -707,6 +732,93 @@ export class GatewayDurableObject {
         }
 
         return Response.json({ ok: true, action, state: this.killSwitch.getState() });
+      }
+
+      if ((url.pathname === '/admin/devices' || url.pathname === '/api/admin/devices') && request.method === 'POST') {
+        const adminAuthError = this.authenticateAdmin(request);
+        if (adminAuthError) return adminAuthError;
+
+        try {
+          const body = await request.json() as any;
+          const name = typeof body?.name === 'string' ? body.name.trim() : 'Local Agent';
+          const platform = body?.platform || 'windows';
+          const capabilities = Array.isArray(body?.capabilities) ? body.capabilities : ['local:read', 'local:write', 'local:test', 'local:exec'];
+          const customDeviceId = typeof body?.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : undefined;
+          const expiresInMs = typeof body?.expiresInMs === 'number' ? body.expiresInMs : undefined;
+
+          const reg = this.authManager.registerDevice(name, platform, capabilities, customDeviceId, expiresInMs);
+          await this.storage.saveDevice(reg.record);
+
+          this.auditLogger.log({ actor: 'admin', actorType: 'client', action: 'DEVICE_REGISTERED', resource: reg.deviceId, result: 'SUCCESS' });
+          return Response.json({
+            ok: true,
+            deviceId: reg.deviceId,
+            token: reg.token,
+            device: {
+              deviceId: reg.record.deviceId,
+              name: reg.record.name,
+              platform: reg.record.platform,
+              status: reg.record.status,
+              capabilities: reg.record.capabilities,
+              registeredAt: reg.record.registeredAt
+            },
+            message: 'Device registered successfully. Save token securely; it cannot be retrieved again.'
+          }, { status: 201 });
+        } catch (err: any) {
+          const isConflict = err.message?.includes('DEVICE_ID_CONFLICT');
+          return Response.json({ error: err.message }, { status: isConflict ? 409 : 400 });
+        }
+      }
+
+      if ((url.pathname === '/admin/devices' || url.pathname === '/api/admin/devices') && request.method === 'GET') {
+        const adminAuthError = this.authenticateAdmin(request);
+        if (adminAuthError) return adminAuthError;
+
+        const liveSockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
+        const onlineIds = new Set(
+          liveSockets.map((ws: any) => {
+            const att = typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null;
+            return att?.deviceId;
+          }).filter(Boolean)
+        );
+
+        const devices = this.authManager.listDevices().map(d => ({
+          deviceId: d.deviceId,
+          name: d.name,
+          platform: d.platform,
+          status: d.status === 'revoked' ? 'revoked' : (onlineIds.has(d.deviceId) ? 'online' : 'offline'),
+          capabilities: d.capabilities,
+          registeredAt: d.registeredAt,
+          lastConnectedAt: d.lastConnectedAt,
+          revokedAt: d.revokedAt,
+          revocationReason: d.revocationReason
+        }));
+        return Response.json({ total: devices.length, devices });
+      }
+
+      if (url.pathname.startsWith('/admin/devices/') && url.pathname.endsWith('/revoke') && request.method === 'POST') {
+        const adminAuthError = this.authenticateAdmin(request);
+        if (adminAuthError) return adminAuthError;
+        const targetId = url.pathname.replace('/admin/devices/', '').replace('/revoke', '');
+        const body = (await request.json().catch(() => ({}))) as any;
+        const reason = body?.reason || 'Admin action';
+
+        await this.killSwitch.revokeDevice(targetId, reason);
+        this.authManager.revokeDevice(targetId, reason);
+        const dev = this.authManager.getDevice(targetId);
+        if (dev) await this.storage.saveDevice(dev);
+        if (this.ctx.getWebSockets) {
+          for (const ws of this.ctx.getWebSockets()) {
+            const att = typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null;
+            if (att && att.deviceId === targetId) {
+              try {
+                ws.send(JSON.stringify({ type: 'ERROR', error: 'DEVICE_REVOKED: Device revoked by admin' }));
+                ws.close(1008, 'Device revoked');
+              } catch {}
+            }
+          }
+        }
+        return Response.json({ ok: true, deviceId: targetId, status: 'revoked' });
       }
 
       if ((url.pathname === '/admin/tasks' || url.pathname === '/api/admin/tasks') && request.method === 'GET') {
@@ -872,6 +984,15 @@ export class GatewayDurableObject {
         }
 
         const authoritativeDeviceId = val.payload.subjectId;
+        if (this.killSwitch.isDeviceRevoked(authoritativeDeviceId) || this.authManager.getDevice(authoritativeDeviceId)?.status === 'revoked') {
+          ws.send(JSON.stringify({
+            type: 'ERROR',
+            error: 'DEVICE_REVOKED: Device is revoked'
+          }));
+          ws.close(1008, 'Device revoked');
+          return;
+        }
+
         const requestedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
           ? msg.capabilities
           : [...LOCAL_EXECUTABLE_CAPABILITIES];
@@ -883,6 +1004,11 @@ export class GatewayDurableObject {
         });
 
         this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, (msg.platform as any) || 'windows');
+        const devRecord = this.authManager.getDevice(authoritativeDeviceId);
+        if (devRecord) {
+          await this.storage.saveDevice(devRecord);
+        }
+
         (ws as any).serializeAttachment({
           deviceId: authoritativeDeviceId,
           name: msg.name || authoritativeDeviceId,
@@ -909,6 +1035,12 @@ export class GatewayDurableObject {
 
       const authenticatedDeviceId = attachment.deviceId;
       const authorizedCapabilities = attachment.capabilities || [];
+
+      if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'DEVICE_REVOKED: Device is revoked' }));
+        ws.close(1008, 'Device revoked');
+        return;
+      }
 
       if (msg.type === 'AGENT_HEARTBEAT') {
         this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);

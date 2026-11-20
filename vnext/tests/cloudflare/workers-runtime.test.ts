@@ -16,7 +16,7 @@ class MockSqlStorage implements SqlStorage {
       priority: row[8], payloadJson: row[9], retryPolicyJson: row[10], leaseJson: row[11],
       resultJson: row[12], errorJson: row[13], artifactsJson: row[14], logsJson: row[15],
       metadataJson: row[16], startedAt: row[17], completedAt: row[18], createdAt: row[19], updatedAt: row[20],
-      attemptsJson: row[21], activeAttemptId: row[22], externalRunJson: row[23]
+      attemptsJson: row[21], activeAttemptId: row[22], externalRunJson: row[23], targetDeviceId: row[24]
     };
   }
 

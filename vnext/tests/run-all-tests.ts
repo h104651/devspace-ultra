@@ -22,6 +22,7 @@ import { runLocalProjectRoutingIntegrationTests } from './integration/local-proj
 import { runLocalWorkspaceDiscoveryIntegrationTests } from './integration/local-workspace-discovery.test';
 import { runSecurityTests } from './security/security.test';
 import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-security.test';
+import { runMultiDeviceRoutingTests } from './integration/multi-device-routing.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
 import { runWorkerRoutingRecoveryTests } from './cloudflare/worker-routing-recovery.test';
 import { runRemoteTaskWaitProductionTests } from './cloudflare/remote-task-wait-production.test';
@@ -63,6 +64,7 @@ async function main() {
     { name: 'Integration: Remote MCP Transport (HTTP POST /mcp)', runner: runRemoteMcpHttpTests },
     { name: 'Integration: Agent Lifecycle & Durability', runner: runAgentLifecycleDurabilityTests },
     { name: 'Integration: Local Multi-Project Named Routing', runner: runLocalProjectRoutingIntegrationTests },
+    { name: 'Integration: Multi-Device Targeted Routing & Registration', runner: runMultiDeviceRoutingTests },
     { name: 'Integration: Local Workspace Discovery & Nested Operations', runner: runLocalWorkspaceDiscoveryIntegrationTests },
     { name: 'Integration: Kaggle Mock Backend', runner: runKaggleIntegrationTests },
     { name: 'Integration: Pre-Migration Kaggle Restart Recovery', runner: runKaggleLegacyRecoveryTests },

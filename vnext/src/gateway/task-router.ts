@@ -16,7 +16,9 @@ export class TaskRouter {
     private kaggleBackend: KaggleBackend,
     private swarmOrchestrator: SwarmOrchestrator,
     private killSwitch: KillSwitch,
-    private auditLogger: AuditLogger
+    private auditLogger: AuditLogger,
+    private connectionManager?: { getConnectedAgents(): Array<{ deviceId: string }> } | any,
+    private authManager?: any
   ) {}
 
   public async routeTaskSubmit<TPayload = any>(
@@ -40,6 +42,38 @@ export class TaskRouter {
           details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
         });
         throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+      }
+
+      // Multi-device targeted routing enforcement
+      if (this.connectionManager && typeof this.connectionManager.getConnectedAgents === 'function') {
+        const connected = this.connectionManager.getConnectedAgents() || [];
+        const distinctDevices: string[] = Array.from(new Set<string>(connected.map((a: any) => String(a.deviceId)).filter(Boolean)));
+
+        if (!options.targetDeviceId) {
+          if (distinctDevices.length > 1) {
+            this.auditLogger.log({
+              actor: actorId,
+              actorType: 'client',
+              action: 'TASK_SUBMIT_DENIED',
+              result: 'DENY',
+              details: { reason: 'AMBIGUOUS_DEVICE_TARGET', connectedDevices: distinctDevices, capability: options.capability }
+            });
+            throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local agents are online (${distinctDevices.join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
+          } else if (distinctDevices.length === 1) {
+            // Auto-bind to single online device for backwards compatibility
+            options.targetDeviceId = distinctDevices[0];
+          }
+        } else {
+          if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
+            throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
+          }
+          options.targetDeviceId = options.targetDeviceId.trim();
+        }
+      } else if (options.targetDeviceId) {
+        if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
+          throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
+        }
+        options.targetDeviceId = options.targetDeviceId.trim();
       }
     }
 

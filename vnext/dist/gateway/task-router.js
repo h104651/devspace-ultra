@@ -10,13 +10,17 @@ class TaskRouter {
     swarmOrchestrator;
     killSwitch;
     auditLogger;
-    constructor(taskStore, idempotencyStore, kaggleBackend, swarmOrchestrator, killSwitch, auditLogger) {
+    connectionManager;
+    authManager;
+    constructor(taskStore, idempotencyStore, kaggleBackend, swarmOrchestrator, killSwitch, auditLogger, connectionManager, authManager) {
         this.taskStore = taskStore;
         this.idempotencyStore = idempotencyStore;
         this.kaggleBackend = kaggleBackend;
         this.swarmOrchestrator = swarmOrchestrator;
         this.killSwitch = killSwitch;
         this.auditLogger = auditLogger;
+        this.connectionManager = connectionManager;
+        this.authManager = authManager;
     }
     async routeTaskSubmit(options, callerScopes, actorId) {
         const idempKey = options.idempotencyKey || options.clientRequestId || options.taskKey;
@@ -35,6 +39,39 @@ class TaskRouter {
                     details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
                 });
                 throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+            }
+            // Multi-device targeted routing enforcement
+            if (this.connectionManager && typeof this.connectionManager.getConnectedAgents === 'function') {
+                const connected = this.connectionManager.getConnectedAgents() || [];
+                const distinctDevices = Array.from(new Set(connected.map((a) => String(a.deviceId)).filter(Boolean)));
+                if (!options.targetDeviceId) {
+                    if (distinctDevices.length > 1) {
+                        this.auditLogger.log({
+                            actor: actorId,
+                            actorType: 'client',
+                            action: 'TASK_SUBMIT_DENIED',
+                            result: 'DENY',
+                            details: { reason: 'AMBIGUOUS_DEVICE_TARGET', connectedDevices: distinctDevices, capability: options.capability }
+                        });
+                        throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local agents are online (${distinctDevices.join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
+                    }
+                    else if (distinctDevices.length === 1) {
+                        // Auto-bind to single online device for backwards compatibility
+                        options.targetDeviceId = distinctDevices[0];
+                    }
+                }
+                else {
+                    if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
+                        throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
+                    }
+                    options.targetDeviceId = options.targetDeviceId.trim();
+                }
+            }
+            else if (options.targetDeviceId) {
+                if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
+                    throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
+                }
+                options.targetDeviceId = options.targetDeviceId.trim();
             }
         }
         const killCheck = this.killSwitch.isExecutionAllowed(options.backend);

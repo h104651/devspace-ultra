@@ -218,6 +218,10 @@ export class LocalAgentClient {
   private handleGatewayMessage(msg: GatewayMessage): void {
     if (msg.type === 'TASK_ASSIGNED') {
       const task = msg.task;
+      if (task.targetDeviceId && task.targetDeviceId !== this.config.deviceId) {
+        console.warn(`[AGENT] Task '${task.taskId}' was targeted to '${task.targetDeviceId}', but this agent is '${this.config.deviceId}'. Ignoring misrouted task.`);
+        return;
+      }
       this.activeTasks.set(task.taskId, task);
 
       // Send ACK

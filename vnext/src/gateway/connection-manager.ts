@@ -112,12 +112,12 @@ export class ConnectionManager {
 
       const authoritativeDeviceId = auth.payload.subjectId;
 
-      if (this.killSwitch.isDeviceRevoked(authoritativeDeviceId)) {
+      if (this.killSwitch.isDeviceRevoked(authoritativeDeviceId) || this.authManager.getDevice(authoritativeDeviceId)?.status === 'revoked') {
         socket.send(JSON.stringify({
           type: 'ERROR',
           messageId: msg.messageId,
           timestamp: Date.now(),
-          error: 'DEVICE_REVOKED: Device is revoked by Kill Switch'
+          error: 'DEVICE_REVOKED: Device is revoked'
         }));
         socket.close();
         return;
@@ -178,6 +178,19 @@ export class ConnectionManager {
 
     const agent = this.agents.get(authenticatedDeviceId);
     if (!agent) return;
+
+    if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
+      socket.send(JSON.stringify({
+        type: 'ERROR',
+        messageId: (msg as any).messageId,
+        timestamp: Date.now(),
+        error: 'DEVICE_REVOKED: Device is revoked'
+      }));
+      socket.close();
+      this.agents.delete(authenticatedDeviceId);
+      this.sockets.delete(socket);
+      return;
+    }
 
     if (msg.type === 'AGENT_HEARTBEAT') {
       agent.lastHeartbeatAt = Date.now();
@@ -323,6 +336,22 @@ export class ConnectionManager {
 
   public getAgent(deviceId: string): ConnectedAgent | undefined {
     return this.agents.get(deviceId);
+  }
+
+  public disconnectDevice(deviceId: string, reason = 'Device revoked'): void {
+    const agent = this.agents.get(deviceId);
+    if (agent) {
+      try {
+        agent.socket.send(JSON.stringify({
+          type: 'ERROR',
+          timestamp: Date.now(),
+          error: `DEVICE_REVOKED: ${reason}`
+        }));
+        agent.socket.close(1008, reason);
+      } catch {}
+      this.agents.delete(deviceId);
+      this.sockets.delete(agent.socket);
+    }
   }
 
   public sendToAgent(deviceId: string, message: any): boolean {
