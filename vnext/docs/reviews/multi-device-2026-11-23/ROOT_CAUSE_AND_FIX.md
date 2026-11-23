@@ -82,19 +82,23 @@
      - `migrateLegacyUnassignedTasks`: 0 台或大於 1 台已註冊裝置時，無歷史認領者的排隊任務直接 Fail-Closed 轉為 `failed`，設定錯誤碼 `AMBIGUOUS_LEGACY_TASK`。
   2. 新增 `Task B15` 隔離回歸測試，完整覆蓋 10 項邊界檢驗（含 SQLite 持久化與 Durable Object 冷啟動路徑）。
 
-### 4. P0 正式歷史任務升級安全性與冷啟動非破壞性隔離 (Zero Task Loss Architecture)
-- **問題現象**:
-  1. 正式 Gateway 過去回報 `totalRegistered: 0 / totalOnline: 1`，舊電腦使用 Bootstrap Token 連線，未曾透過 `POST /admin/devices` 註冊進 SQLite `devices` 表。
-  2. 若 Gateway DO 在冷啟動時發現 0 註冊裝置，將未指定 `targetDeviceId` 且無歷史認領者的排隊任務直接標記為 `failed`，將造成正式環境中遺留任務的非預期失敗（資料遺失）。
+### 4. P0 歷史任務不可自動綁定第一台連線裝置與零遺失隔離架構 (Zero Task Loss & Strict Ownership)
+- **問題現象與根因**:
+  1. 過去實作在 `GatewayDurableObject.webSocketMessage(AGENT_REGISTER)` 與 `ConnectionManager.processMessage` 中，當只有一台已知裝置連線時，會自動呼叫 `migrateLegacyUnassignedTasks([authoritativeDeviceId])`。
+  2. 然而，第一台合法連線的 Agent（例如新註冊的新電腦，或舊電腦離線時新電腦先連線）**不一定是歷史任務的合法擁有者**。盲目將未指派任務綁定給第一台連線裝置，會導致新電腦偷走本應屬於舊電腦的任務。
 - **修復代碼實作**:
-  1. `vnext/src/storage/task-store.ts`:
-     - 當 `knownDeviceIds.length === 0` 時，任務**安全保留在 `queued` 狀態**（非破壞性隔離），不轉為 `failed`。
-     - 同時藉由 `claimTask()` 嚴格要求相符之 `targetDeviceId`，阻止任何新連線或未授權 Agent 偷領（Fail Closed 認領保護）。
-     - 當 `knownDeviceIds.length > 1` 時（多台裝置已註冊），因目標無法確定，嚴格 Fail Closed 轉為 `failed`（`AMBIGUOUS_LEGACY_TASK`）。
-  2. `vnext/src/cloudflare/gateway-durable-object.ts` & `vnext/src/gateway/connection-manager.ts`:
-     - 當舊電腦（或唯一合法裝置）建立 WebSocket 連線認證（`AGENT_REGISTER`）時，系統觸發 `rememberAuthenticatedDevice`。
-     - 若此時系統中僅有 1 台活躍裝置，Gateway 自動執行 `migrateLegacyUnassignedTasks([authoritativeDeviceId])`，將懸空的歷史任務安全綁定至舊電腦，隨後由舊電腦正常認領執行，達到 **Zero Task Loss**。
-  3. 新增 `Task B17` 整合測試，完整覆蓋冷啟動保護與舊電腦連線自動綁定認領流程。
+  1. **移除連線時之自動任務綁定**:
+     - 在 `ConnectionManager.ts` 與 `gateway-durable-object.ts` 中徹底刪除 `AGENT_REGISTER` 時觸發 `migrateLegacyUnassignedTasks([authoritativeDeviceId])` 的邏輯。連線本身**絕不構成任務擁有權之證明**。
+  2. **可驗證之歷史證據優先綁定**:
+     - 在 `TaskStore.migrateLegacyUnassignedTasks` 中，優先依序檢查 `task.lease?.claimedBy` 與 `task.attempts` 中的歷史認領者。若存在歷史 Claimant，直接綁定原歷史裝置（如 `win11-arm64-workstation`）。
+  3. **無證明任務之非破壞性隔離 (Fail Closed)**:
+     - 對於缺乏歷史認領者之排隊任務，保持 `status: 'queued'` 且 `targetDeviceId: undefined`，不隨意綁定給連線裝置，亦不無條件標記為失敗。
+     - 因 `claimTask` 與 `claimTaskById` 嚴格要求 `t.targetDeviceId === deviceId`，任何 Agent 均無法認領此懸空任務，徹底杜絕跨裝置錯派與搶單。
+  4. **受保護之管理端指派能力 (`POST /admin/tasks/assign-legacy`)**:
+     - 於 Gateway DO 與 Server 實作 `POST /admin/tasks/assign-legacy` 端點，需 `X-Admin-Secret` 認證。
+     - 經驗證 `targetDeviceId` 存在且非撤銷狀態後，方可將隔離任務指派給指定裝置，並記錄審計日誌與持久化存儲。
+  5. **完整覆蓋 8 大場景之專項測試**:
+     - 擴充 `Task B18` 至 `Task B24`，涵蓋舊裝置先上線、新裝置先上線、新裝置已註冊舊裝置離線、雙裝置同時連線、有 Claimant、無 Claimant、DO 冷啟動、多裝置斷線與租約回收。
 
 ### 5. P1 舊 Agent Bootstrap Token 相容性驗證與嚴禁使用 `POST /admin/devices` 補登
 - **根因分析**:
@@ -109,26 +113,29 @@
 
 ### 6. P1 清查 PR #23 中額外 Kaggle 變更來源與保留依賴理由
 - **變更清查結果**:
-  - 經 Git Commit 歷程溯源（`git log main..HEAD`），PR #23 包含以下 7 個提交：
-    1. `8187c14` fix(vnext): single-flight reconcile, reschedule intent, durable migration, and test matrix
-    2. `6f9a366` feat(vnext): implement secure device registration and multi-device targeted task routing
-    3. `3b99dc5` fix(vnext): harden zero-agent routing, legacy migration, device validation, and idempotency
-    4. `8e40f54` fix(vnext): resolve Task B7 stale recovery race, harden idempotency and device routing matrix
-    5. `0f9b2cc` fix(vnext): enforce zero-device fail-closed routing, minimal device scopes, and CLI deployment docs
-    6. `5084bc4` fix(vnext): strictly fail closed unassigned local task claims and zero-device legacy migration
-    7. `21dbfe1` docs(vnext): record green GitHub Actions CI run evidence for PR #23
-  - **Kaggle 變更之唯一來源為 Commit `8187c14`**，後續 6 個 Commit 完全未修改任何 `vnext/src/kaggle` 檔案。
+  - 經 Git Commit 歷程溯源（`git log main..HEAD`），PR #23 包含之 Kaggle 變更之唯一來源為 Commit `8187c14`，後續 6 個 Commit 完全未修改任何 `vnext/src/kaggle` 檔案。
 - **出現於 PR #23 之原因**:
   - 本開發工作分支 `feature/multi-device-targeted-routing` 係接續自 `feature/vnext-remote-gateway-reintegrate`（舊電腦工作基準 Commit `8187c14`）。
   - 而目標分支 `main` 目前停留在 PR #22（Commit `1a933d3`），尚未包含 `8187c14`。因此 GitHub 在對比 `main` 與 PR #23 時，自動將 `8187c14` 納入 PR Diff。
-- **變更內容與依賴關係**:
-  - `vnext/src/kaggle/backend.ts`: 實作單一排程調和（Single-Flight Reconcile）與 Durable Object 歷史任務重啟水合相容性。
-  - `vnext/src/kaggle/http-client.ts`: 增強 `logNullable` 的容錯解析。
-  - `vnext/tests/integration/kaggle-durable-reconciliation.test.ts`: 新增 12 項冷啟動調和測試。
-  - `vnext/src/storage/task-store.ts`: `recoverStaleTasks` 依賴 Kaggle 後端標記排除，防止逾期掃描誤將遠端 Kaggle 任務判定為 Local Stale。
 - **處置建議 (不可也不應拆分)**:
-  - 依安全規範嚴格禁止 Force Push。若強行 Revert `8187c14`，將破壞已驗證之 Kaggle 冷啟動調和修復，並導致測試矩陣中 12 項測試失效。
-  - Commit `8187c14` 屬於先前審查通過之工程成果，已在多平臺 CI 中 100% 通過驗證，無破壞性變更，建議隨 PR #23 一併併入 `main`。
+  - 依安全規範嚴格禁止 Force Push。若強行 Revert `8187c14`，將破壞已驗證之 Kaggle 冷啟動調和修復，並導致測試矩陣中 12 項測試失效。Commit `8187c14` 屬於先前審查通過之工程成果，建議隨 PR #23 一併併入 `main`。
+
+### 7. P0 實作受保護之唯讀任務盤點能力與 CLI 腳本 (Read-Only Task Inventory)
+- **問題現象**: 正式環境現存 `/admin/tasks` 僅回傳固定 100 筆且無 `targetDeviceId`、`priorClaimant`、租約及 Attempt 明細，無法完成上線前孤兒任務盤點。
+- **修復代碼實作**:
+  1. 增強 `GET /admin/tasks` 與 `GET /admin/tasks/inventory`，支援 `limit`、`offset` 分頁、`backend`、`status` 過濾與全域統計。
+  2. 回傳資料嚴格脫敏（不洩漏 Code、Payload 內機密與 Token），完整輸出 `targetDeviceId`、`priorClaimant`、`isQuarantined`、租約狀態與 Attempt 歷史摘要。
+  3. 實作可執行腳本 `vnext/scripts/inventory-tasks.ts`（支援 `npm run inventory:tasks`），自動識別舊版 Schema、提供 Wrangler Direct SQL 備援指令，並支援 Exit Code 0（通過）、1（錯誤）、2（阻礙）。
+  4. 新增獨立測試套件 `vnext/tests/unit/inventory-tasks.test.ts`（30 tests）。
+
+### 8. P0 解耦 PR Merge 與 GitHub Actions 正式部署 (Deployment Gate)
+- **問題現象**: 原 `.github/workflows/vnext-ci.yml` 在 `main` 分支發生 Push 時自動觸發 `deploy-production`，與「先 Merge、維護窗口盤點、後手動部署」之運維規範衝突。
+- **修復代碼實作**:
+  1. 將 `deploy-production` 之 `if:` 條件改為嚴格限制：
+     `if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.deploy_production == true && inputs.preflight_inventory_confirmed == true`
+  2. 配置 `workflow_dispatch` 輸入參數：`deploy_production`、`preflight_inventory_confirmed`、`target_commit_sha` 與 `operator_name`。
+  3. 在 Job 第一步增加 Target Commit SHA 與授權資訊驗證，若 SHA 不相符則立即終止部署。
+  4. 新增獨立測試套件 `vnext/tests/unit/workflow-deployment-gate.test.ts`（22 tests），驗證 Push 與 PR 絕不觸發部署。
 
 ---
 
@@ -137,15 +144,16 @@
 | 檢驗項目 | 修改前行為 | 修改後行為 |
 | :--- | :--- | :--- |
 | **B7 斷言可靠度** | 若背景 Agent 輪詢搶先回收租約，測試因 `rec.recoveredCount === 0` 誤判失敗 | 驗證任務實際回收狀態（`queued`、`retryCount: 1`、`attempt: interrupted`），相容背景與主動回收 |
-| **目標裝置重新認領** | 未在 B7 測試重新認領行為 | 明確驗證新電腦可合法認領 Attempt 2，且 Attempt Ledger 記錄完整 |
-| **隔離環境確定性** | 無隔離的 Lease 耗盡測試 | 新增 `Task B7b`，在無背景輪詢干擾下精準驗證 `recoveredCount: 1` 以及超過重試上限時的 `TASK_STALE` 終態 |
+| **歷史任務連線綁定 (P0)** | 只有一台已知裝置連線時，自動將所有未綁定歷史任務綁定給該裝置 | 連線絕不構成任務擁有權證明；優先以歷史 Claimant 恢復，無證明者安全隔離於 queued，僅限管理員受管指派 |
+| **唯讀任務盤點 (P0)** | `/admin/tasks` 限制 100 筆且無 `targetDeviceId` 與 Attempt 歷史 | 支援分頁、全量統計、敏感資訊脫敏，並提供可執行 CLI 盤點腳本（`npm run inventory:tasks`） |
+| **GitHub Actions 部署門禁 (P0)** | 合併 PR 或 Push 至 `main` 時自動觸發正式 Cloudflare 部署 | 完全解耦：Push/PR 僅執行 CI 與 Dry Run；正式部署嚴格限定為手動 `workflow_dispatch` 雙核准門禁 |
 | **零裝置在線/註冊派工 (P0)** | 0 裝置且未指定目標時仍允許建立未綁定任務排隊，後續依賴遷移 | 0 裝置且未指定目標時嚴格 Fail-Closed，立即拒絕並拋出 `DEVICE_TARGET_REQUIRED`；指定目標時安全排隊等待該裝置 |
 | **未綁定任務認領保護 (P0)** | 歷史排隊任務無 `targetDeviceId` 時任何 Agent 皆可認領 | 嚴格要求本地任務必須具備 `targetDeviceId` 且等於請求裝置 ID，否則拒絕認領 |
 | **零裝置冷啟動舊任務安全遷移 (P0)** | 0 註冊裝置冷啟動時將未綁定任務直接標記為 `failed` | 0 註冊裝置冷啟動時安全保留在 `queued` 狀態（非破壞性隔離），待舊電腦重新連線時自動安全綁定（Zero Task Loss） |
 | **舊 Agent 補登安全性 (P1)** | 文件建議使用 `POST /admin/devices` 補登舊電腦 ID | 明確禁止補登舊電腦 ID（避免 `TOKEN_SUPERSEDED` 導致斷線），改由 Gateway 連線時自動收錄 |
 | **新電腦初次驗收權限 (P1)** | 部署範例包含 `local:write`、`local:test` | 嚴格限定為最小唯讀範圍 `['local:read', 'artifacts:read']`，並移除未被 CLI 解析之 `start` 參數 |
 | **Token 回應快取安全 (P1)** | 管理端註冊回應未設置安全快取限制標頭 | 嚴格強制回傳 `Cache-Control: no-store` 與 `Pragma: no-cache` |
-| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (460/460 PASS) |
+| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (519/519 PASS) |
 
 ---
 

@@ -863,19 +863,24 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       });
 
       // Run migration:
-      // With 1 device: legacySingle binds to sole device
-      memStore.migrateLegacyUnassignedTasks(['sole-device-01']);
+      // Prior claimant is preserved
+      memStore.migrateLegacyUnassignedTasks();
       assert.strictEqual(memStore.getTask(legacyClaimed.taskId)?.targetDeviceId, 'device-alpha', 'Prior claimant must be preserved');
-      assert.strictEqual(memStore.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-01', 'Single known device must be auto-bound');
+      // Tasks without claimant remain quarantined in queued without auto-binding
+      assert.strictEqual(memStore.getTask(legacySingle.taskId)?.targetDeviceId, undefined, 'Unproven task is quarantined, not auto-bound');
+      assert.strictEqual(memStore.getTask(legacySingle.taskId)?.status, 'queued');
 
-      // Reset legacyAmbiguous to have no targetDeviceId and simulate multi-device environment
+      // Admin explicitly assigns quarantined task to sole-device-01
+      memStore.assignQuarantinedTasks('sole-device-01', [legacySingle.taskId]);
+      assert.strictEqual(memStore.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-01', 'Admin assignment explicitly binds task');
+
+      // In multi-device environment, ambiguous legacy task remains quarantined, neither failed nor stolen
       const taskAmb = memStore.getTask(legacyAmbiguous.taskId)!;
-      taskAmb.targetDeviceId = undefined;
-      taskAmb.status = 'queued';
-
-      memStore.migrateLegacyUnassignedTasks(['device-1', 'device-2']);
-      assert.strictEqual(memStore.getTask(taskAmb.taskId)?.status, 'failed', 'Ambiguous legacy task must fail closed');
-      assert.strictEqual((memStore.getTask(taskAmb.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+      assert.strictEqual(taskAmb.status, 'queued', 'Ambiguous legacy task is safely held in queued without destruction');
+      assert.strictEqual(taskAmb.targetDeviceId, undefined);
+      // Imposters strictly cannot claim it
+      assert.strictEqual(memStore.claimTask('device-1', ['local:read_file']), undefined);
+      assert.strictEqual(memStore.claimTask('device-2', ['local:read_file']), undefined);
 
       // 4. Verify that once targeted, task cannot be stolen on retry
       const targetedTask = memStore.createTask({
@@ -1044,9 +1049,11 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
         payload: { path: 'legacy.txt' }
       });
       assert.strictEqual(legacyTaskInStorage.targetDeviceId, undefined);
-      serverState1.taskStore.migrateLegacyUnassignedTasks(['dev-1', 'dev-2']);
-      assert.strictEqual(serverState1.taskStore.getTask(legacyTaskInStorage.taskId)?.status, 'failed');
-      assert.strictEqual((serverState1.taskStore.getTask(legacyTaskInStorage.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+      serverState1.taskStore.migrateLegacyUnassignedTasks();
+      assert.strictEqual(serverState1.taskStore.getTask(legacyTaskInStorage.taskId)?.status, 'queued', 'Must remain safely quarantined in queued without destruction');
+      assert.strictEqual(serverState1.taskStore.getTask(legacyTaskInStorage.taskId)?.targetDeviceId, undefined);
+      assert.strictEqual(serverState1.taskStore.claimTask('dev-1', ['local:read_file']), undefined);
+      assert.strictEqual(serverState1.taskStore.claimTask('dev-2', ['local:read_file']), undefined);
 
       // State 2: 1 registered, 0 online -> Auto-binds to sole registered device
       const serverState2 = new GatewayServer({
@@ -1207,17 +1214,16 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       assert.ok(claimedPrior);
       assert.strictEqual(claimedPrior.taskId, legacyPrior.taskId);
 
-      // 9. Verify single-device auto-migration and multi-device fail-closed behavior
+      // 9. Verify explicit administrative assignment of quarantined tasks (no automatic guessing)
       const legacySingle = store.createTask({ backend: 'local', capability: 'local:read_file', payload: { path: 'single.txt' } });
-      const migSingle = store.migrateLegacyUnassignedTasks(['sole-device-beta']);
-      assert.strictEqual(migSingle.migrated, 3, 'All previously preserved unassigned tasks and the new task are migrated');
-      assert.strictEqual(store.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-beta');
+      const migUnassigned = store.migrateLegacyUnassignedTasks();
+      assert.strictEqual(migUnassigned.migrated, 0, 'Tasks without claimant are NOT auto-migrated');
+      assert.strictEqual(migUnassigned.quarantined >= 1, true, 'Unassigned tasks are safely quarantined in queued');
 
-      const legacyMulti = store.createTask({ backend: 'local', capability: 'local:read_file', payload: { path: 'multi.txt' } });
-      const migMulti = store.migrateLegacyUnassignedTasks(['dev-1', 'dev-2']);
-      assert.strictEqual(migMulti.failedAmbiguous, 1);
-      assert.strictEqual(store.getTask(legacyMulti.taskId)?.status, 'failed');
-      assert.strictEqual((store.getTask(legacyMulti.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+      // Admin explicitly assigns quarantined tasks to sole-device-beta
+      const assignRes = store.assignQuarantinedTasks('sole-device-beta');
+      assert.strictEqual(assignRes.assigned >= 1, true, 'Quarantined tasks are assigned to designated device');
+      assert.strictEqual(store.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-beta');
 
       // 10. Verify SQLite persistence and Durable Object Cold Start path
       const sql = new TestSqlStorage();
@@ -1254,10 +1260,9 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       // Imposter agent strictly cannot claim it
       assert.strictEqual((doColdInstance as any).taskStore.claimTask('imposter-agent', ['local:read_file']), undefined);
 
-      // When the authoritative old agent reconnects:
+      // When the authoritative old agent reconnects and admin assigns:
       (doColdInstance as any).authManager.rememberAuthenticatedDevice('token-bootstrap-1', 'win11-arm64-workstation', 'Old PC', ['local:read_file']);
-      const activeDevs = (doColdInstance as any).authManager.listDevices().map((d: any) => d.deviceId);
-      (doColdInstance as any).taskStore.migrateLegacyUnassignedTasks(activeDevs);
+      (doColdInstance as any).taskStore.assignQuarantinedTasks('win11-arm64-workstation');
       const reconnectedLoaded = (doColdInstance as any).taskStore.getTask('do-cold-legacy-01');
       assert.strictEqual(reconnectedLoaded?.targetDeviceId, 'win11-arm64-workstation');
       const claimed = (doColdInstance as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
@@ -1353,15 +1358,311 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
         })
       );
 
-      // 5. Verify unassigned task is automatically and safely bound to the sole reconnected agent
+      // 5. Verify unassigned task remains safely quarantined even after old agent reconnects (no auto-theft)
       const taskAfterReconnect = (doCold as any).taskStore.getTask('legacy-cold-queued-01');
-      assert.strictEqual(taskAfterReconnect?.targetDeviceId, 'win11-arm64-workstation');
+      assert.strictEqual(taskAfterReconnect?.targetDeviceId, undefined, 'Connecting alone does NOT auto-bind unassigned tasks');
       assert.strictEqual(taskAfterReconnect?.status, 'queued');
 
-      // 6. Old agent polls and claims it successfully
+      // 6. Admin assigns quarantined tasks to authoritative device
+      const assignRes = (doCold as any).taskStore.assignQuarantinedTasks('win11-arm64-workstation');
+      assert.strictEqual(assignRes.assigned, 1);
+      assert.strictEqual((doCold as any).taskStore.getTask('legacy-cold-queued-01')?.targetDeviceId, 'win11-arm64-workstation');
+
+      // 7. Old agent polls and claims it successfully
       const claimed = (doCold as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
       assert.ok(claimed);
       assert.strictEqual(claimed.taskId, 'legacy-cold-queued-01');
+    });
+
+    await test('Task B18: New device connecting first must NOT acquire quarantined unassigned tasks', async () => {
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doGateway = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      // Pre-existing unassigned legacy task in SQLite
+      await (doGateway as any).storage.saveTask({
+        taskId: 'legacy-unassigned-t18',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'queued',
+        priority: 0,
+        payload: { path: 'secret-doc.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        createdAt: Date.now() - 60000,
+        updatedAt: Date.now() - 60000
+      });
+      await (doGateway as any).initializeFromDurableStorage();
+
+      // Register and connect NEW device first
+      const auth = (doGateway as any).authManager;
+      const { token: newToken } = auth.registerDevice('New Workstation', 'windows', ['local:read'], 'win11-arm64-workstation-2');
+
+      const wsNew: any = { _att: null, serializeAttachment: (a: any) => { wsNew._att = a; }, deserializeAttachment: () => wsNew._att, send: () => {}, close: () => {} };
+      await (doGateway as any).webSocketMessage(wsNew, JSON.stringify({
+        type: 'AGENT_REGISTER',
+        messageId: 'reg-new-1',
+        deviceId: 'win11-arm64-workstation-2',
+        name: 'New Workstation',
+        token: newToken,
+        capabilities: ['local:read_file']
+      }));
+
+      // Verify unassigned task was NOT bound to new device
+      const task = (doGateway as any).taskStore.getTask('legacy-unassigned-t18');
+      assert.strictEqual(task?.targetDeviceId, undefined, 'New device connecting first must NOT acquire legacy unassigned task');
+      assert.strictEqual(task?.status, 'queued');
+
+      // New device polling strictly fails closed
+      const claimRes = (doGateway as any).taskStore.claimTask('win11-arm64-workstation-2', ['local:read_file']);
+      assert.strictEqual(claimRes, undefined, 'New device cannot claim unassigned legacy task');
+    });
+
+    await test('Task B19: Old device connecting first only claims tasks with prior claimant or matching targetDeviceId', async () => {
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doGateway = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      // Task with verifiable historical claimant (win11-arm64-workstation)
+      await (doGateway as any).storage.saveTask({
+        taskId: 'task-with-claimant',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'queued',
+        priority: 0,
+        payload: { path: 'claimant-task.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 1, backoffMs: 2000, requeueOnStale: true },
+        attempts: [{
+          id: 'att-19',
+          attemptNumber: 1,
+          claimedBy: 'win11-arm64-workstation',
+          claimedAt: Date.now() - 50000,
+          completedAt: Date.now() - 10000,
+          status: 'interrupted'
+        }],
+        createdAt: Date.now() - 60000,
+        updatedAt: Date.now() - 10000
+      });
+
+      // Pure unassigned task without claimant
+      await (doGateway as any).storage.saveTask({
+        taskId: 'task-without-claimant',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'queued',
+        priority: 0,
+        payload: { path: 'unassigned-task.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        createdAt: Date.now() - 60000,
+        updatedAt: Date.now() - 60000
+      });
+
+      await (doGateway as any).initializeFromDurableStorage();
+
+      // Task with claimant is automatically bound to historical claimant
+      assert.strictEqual((doGateway as any).taskStore.getTask('task-with-claimant')?.targetDeviceId, 'win11-arm64-workstation');
+      // Task without claimant remains quarantined
+      assert.strictEqual((doGateway as any).taskStore.getTask('task-without-claimant')?.targetDeviceId, undefined);
+
+      // Old device connects
+      (doGateway as any).authManager.rememberAuthenticatedDevice('token-old', 'win11-arm64-workstation', 'Old PC', ['local:read_file']);
+
+      // Old device claims task-with-claimant successfully
+      const claim1 = (doGateway as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
+      assert.ok(claim1);
+      assert.strictEqual(claim1.taskId, 'task-with-claimant');
+
+      // Old device cannot claim task-without-claimant (quarantined)
+      const claim2 = (doGateway as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
+      assert.strictEqual(claim2, undefined, 'Old device cannot claim unassigned task without explicit assignment');
+    });
+
+    await test('Task B20: New device registered while old device offline cannot claim quarantined legacy tasks', async () => {
+      const store = new TaskStore();
+      const quarantined = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { file: 'offline-test.txt' }
+      });
+      assert.strictEqual(quarantined.targetDeviceId, undefined);
+
+      // New device is online and registered; old device is offline
+      const claimResult = store.claimTask('win11-arm64-workstation-2', ['local:read_file']);
+      assert.strictEqual(claimResult, undefined);
+
+      const claimByIdResult = store.claimTaskById(quarantined.taskId, 'win11-arm64-workstation-2');
+      assert.strictEqual(claimByIdResult, undefined);
+    });
+
+    await test('Task B21: Simultaneous multi-device reconnection preserves targetDeviceId separation without cross-claim', async () => {
+      const store = new TaskStore();
+      const taskDev1 = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { file: 'dev1.txt' },
+        targetDeviceId: 'device-alpha'
+      });
+      const taskDev2 = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { file: 'dev2.txt' },
+        targetDeviceId: 'device-beta'
+      });
+
+      // Device alpha claims
+      const claimAlpha = store.claimTask('device-alpha', ['local:read_file']);
+      assert.ok(claimAlpha);
+      assert.strictEqual(claimAlpha.taskId, taskDev1.taskId);
+      assert.strictEqual(claimAlpha.targetDeviceId, 'device-alpha');
+
+      // Device beta claims
+      const claimBeta = store.claimTask('device-beta', ['local:read_file']);
+      assert.ok(claimBeta);
+      assert.strictEqual(claimBeta.taskId, taskDev2.taskId);
+      assert.strictEqual(claimBeta.targetDeviceId, 'device-beta');
+
+      // Cross-claim is strictly blocked
+      assert.strictEqual(store.claimTask('device-alpha', ['local:read_file']), undefined);
+      assert.strictEqual(store.claimTask('device-beta', ['local:read_file']), undefined);
+    });
+
+    await test('Task B22: Quarantined legacy tasks require explicit admin assignment via POST /admin/tasks/assign-legacy', async () => {
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doGateway = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      // Create unassigned legacy task
+      await (doGateway as any).storage.saveTask({
+        taskId: 'task-admin-assign-01',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'queued',
+        priority: 0,
+        payload: { path: 'admin-test.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        createdAt: Date.now() - 5000,
+        updatedAt: Date.now() - 5000
+      });
+      await (doGateway as any).initializeFromDurableStorage();
+
+      // Register device
+      (doGateway as any).authManager.registerDevice('Target Workstation', 'windows', ['local:read'], 'win11-arm64-workstation');
+
+      // 1. Unauthenticated admin call fails
+      const unauthReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation' })
+      });
+      const unauthRes = await doGateway.fetch(unauthReq);
+      assert.strictEqual(unauthRes.status, 401);
+
+      // 2. Invalid device fails
+      const invalidDevReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'non-existent-device' })
+      });
+      const invalidDevRes = await doGateway.fetch(invalidDevReq);
+      assert.strictEqual(invalidDevRes.status, 400);
+
+      // 3. Valid admin assignment succeeds
+      const validReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation' })
+      });
+      const validRes = await doGateway.fetch(validReq);
+      assert.strictEqual(validRes.status, 200);
+      const resJson = await validRes.json() as any;
+      assert.strictEqual(resJson.ok, true);
+      assert.strictEqual(resJson.assignedCount, 1);
+
+      // 4. Task is now bound and claimable by target device
+      const assignedTask = (doGateway as any).taskStore.getTask('task-admin-assign-01');
+      assert.strictEqual(assignedTask?.targetDeviceId, 'win11-arm64-workstation');
+
+      const claimed = (doGateway as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
+      assert.ok(claimed);
+      assert.strictEqual(claimed.taskId, 'task-admin-assign-01');
+    });
+
+    await test('Task B23: Durable Object cold start preserves quarantined tasks without auto-binding', async () => {
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doInstance1 = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      // Save unassigned task in SQLite
+      await (doInstance1 as any).storage.saveTask({
+        taskId: 'do-cold-test-23',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'queued',
+        priority: 0,
+        payload: { path: 'cold-test.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        createdAt: Date.now() - 50000,
+        updatedAt: Date.now() - 50000
+      });
+
+      // Cold start second DO instance
+      const doCold = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+      await (doCold as any).initializeFromDurableStorage();
+
+      const task = (doCold as any).taskStore.getTask('do-cold-test-23');
+      assert.strictEqual(task?.status, 'queued', 'Task must remain queued');
+      assert.strictEqual(task?.targetDeviceId, undefined, 'Task targetDeviceId must remain undefined');
+      assert.strictEqual((doCold as any).taskStore.claimTask('any-device', ['local:read_file']), undefined);
+    });
+
+    await test('Task B24: Multi-device disconnect, lease expiration, and stale recovery strictly preserves targetDeviceId', async () => {
+      const store = new TaskStore();
+      const task = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'lease-recovery.txt' },
+        targetDeviceId: 'device-gamma'
+      });
+
+      // Device gamma claims task
+      const claimed = store.claimTask('device-gamma', ['local:read_file'], 50);
+      assert.ok(claimed);
+      assert.strictEqual(claimed.status, 'claimed');
+      assert.strictEqual(claimed.targetDeviceId, 'device-gamma');
+
+      // Simulate lease expiration
+      if (claimed.lease) {
+        claimed.lease.leaseExpiresAt = Date.now() - 1000;
+      }
+
+      // Recover stale task
+      const recovered = store.recoverStaleTasks();
+      assert.ok(recovered.recoveredCount >= 1);
+
+      // Task is back in queued, but targetDeviceId REMAINS device-gamma
+      const recoveredTask = store.getTask(task.taskId);
+      assert.strictEqual(recoveredTask?.status, 'queued');
+      assert.strictEqual(recoveredTask?.targetDeviceId, 'device-gamma');
+
+      // Other device (device-delta) strictly CANNOT claim it
+      assert.strictEqual(store.claimTask('device-delta', ['local:read_file']), undefined);
+
+      // Original device (device-gamma) claims it again
+      const reclaimed = store.claimTask('device-gamma', ['local:read_file']);
+      assert.ok(reclaimed);
+      assert.strictEqual(reclaimed.taskId, task.taskId);
     });
 
   } finally {
@@ -1374,4 +1675,14 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
   }
 
   return { passed, failed };
+}
+
+if (require.main === module) {
+  runMultiDeviceRoutingTests().then(res => {
+    console.log(`Multi-Device Routing Tests: ${res.passed} passed, ${res.failed} failed`);
+    process.exit(res.failed > 0 ? 1 : 0);
+  }).catch(err => {
+    console.error('Test run failed:', err);
+    process.exit(1);
+  });
 }

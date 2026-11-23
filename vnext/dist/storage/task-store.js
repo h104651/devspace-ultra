@@ -386,42 +386,63 @@ class TaskStore {
         this.saveTask(task);
         return task;
     }
-    migrateLegacyUnassignedTasks(knownDeviceIds) {
+    migrateLegacyUnassignedTasks(options) {
         let migrated = 0;
+        let quarantined = 0;
         let failedAmbiguous = 0;
+        let trustedLegacyDeviceId = undefined;
+        if (options) {
+            if (Array.isArray(options)) {
+                // If an array was passed, do NOT assume knownDeviceIds[0] is the owner unless trusted
+                // Only accept if exactly one device is passed and it was explicitly designated
+            }
+            else if (typeof options === 'object') {
+                trustedLegacyDeviceId = options.trustedLegacyDeviceId;
+            }
+        }
         for (const task of this.tasks.values()) {
             if (task.backend === 'local' && !task.targetDeviceId) {
-                const priorClaimant = task.lease?.claimedBy || (task.attempts && task.attempts.find(a => a.claimedBy)?.claimedBy);
+                // 1. Verifiable historical evidence: Lease or Attempt claimant
+                const priorClaimant = task.lease?.claimedBy || (task.attempts && [...task.attempts].reverse().find(a => a.claimedBy)?.claimedBy);
                 if (priorClaimant) {
                     task.targetDeviceId = priorClaimant;
                     this.saveTask(task);
                     migrated++;
                     continue;
                 }
-                if (task.status === 'queued') {
-                    if (knownDeviceIds.length === 1) {
-                        task.targetDeviceId = knownDeviceIds[0];
-                        this.saveTask(task);
-                        migrated++;
-                    }
-                    else if (knownDeviceIds.length > 1) {
-                        task.status = 'failed';
-                        task.error = {
-                            code: 'AMBIGUOUS_LEGACY_TASK',
-                            message: `Legacy task was created without targetDeviceId and cannot be safely routed in a multi-device environment (${knownDeviceIds.join(', ')}).`
-                        };
-                        task.completedAt = Date.now();
-                        this.saveTask(task);
-                        failedAmbiguous++;
-                    }
-                    // Note: When knownDeviceIds.length === 0, the task remains queued without targetDeviceId.
-                    // Because claimTask() strictly requires targetDeviceId === deviceId, no agent can claim it.
-                    // When an authoritative agent reconnects (knownDeviceIds.length === 1), it is safely bound.
-                    // If multiple devices register before connection (knownDeviceIds.length > 1), it fails closed.
+                // 2. Explicit trusted legacy device ID provided by admin / configuration
+                if (trustedLegacyDeviceId) {
+                    task.targetDeviceId = trustedLegacyDeviceId;
+                    this.saveTask(task);
+                    migrated++;
+                    continue;
                 }
+                // 3. Unproven ownership: MUST remain in unclaimable quarantine state in 'queued'
+                // DO NOT auto-bind to any device simply because it connected first or was the sole registered device.
+                // DO NOT mark as failed unconditionally.
+                // Because claimTask() and claimTaskById() strictly require task.targetDeviceId === deviceId,
+                // this task can NEVER be claimed by any agent until explicitly assigned.
+                quarantined++;
             }
         }
-        return { migrated, failedAmbiguous };
+        return { migrated, quarantined, failedAmbiguous };
+    }
+    assignQuarantinedTasks(targetDeviceId, taskIds) {
+        let assigned = 0;
+        const assignedTaskIds = [];
+        const targetSet = taskIds && taskIds.length > 0 ? new Set(taskIds) : undefined;
+        for (const task of this.tasks.values()) {
+            if (task.backend === 'local' && !task.targetDeviceId) {
+                if (targetSet && !targetSet.has(task.taskId)) {
+                    continue;
+                }
+                task.targetDeviceId = targetDeviceId;
+                this.saveTask(task);
+                assigned++;
+                assignedTaskIds.push(task.taskId);
+            }
+        }
+        return { assigned, taskIds: assignedTaskIds };
     }
     acknowledgeTask(taskId, deviceId) {
         const task = this.tasks.get(taskId);

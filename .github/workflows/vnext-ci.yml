@@ -12,6 +12,27 @@ on:
       - 'vnext/**'
       - '.github/workflows/vnext-ci.yml'
   workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: 'Explicit confirmation to deploy to Cloudflare production'
+        type: boolean
+        required: true
+        default: false
+      target_commit_sha:
+        description: 'Target commit SHA to deploy (must match checked out GITHUB_SHA)'
+        type: string
+        required: false
+        default: ''
+      preflight_inventory_confirmed:
+        description: 'Confirm that read-only task inventory and migration risk review are complete'
+        type: boolean
+        required: true
+        default: false
+      operator_name:
+        description: 'Operator username authorizing this production deploy'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -42,7 +63,7 @@ jobs:
   deploy-production:
     name: Deploy Cloudflare production
     needs: verify-vnext
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.deploy_production == true && inputs.preflight_inventory_confirmed == true
     runs-on: ubuntu-latest
     concurrency:
       group: devspace-ultra-vnext-production
@@ -52,6 +73,18 @@ jobs:
         working-directory: vnext
     steps:
       - uses: actions/checkout@v4
+      - name: Validate Deployment Authorization & Target SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Production Deployment Authorization Gate ==="
+          if [ -n "${{ inputs.target_commit_sha }}" ] && [ "${{ inputs.target_commit_sha }}" != "$GITHUB_SHA" ]; then
+            echo "::error::Target commit SHA '${{ inputs.target_commit_sha }}' does not match checked out GITHUB_SHA '$GITHUB_SHA'. Aborting."
+            exit 1
+          fi
+          echo "Deployment authorized by: ${{ inputs.operator_name || github.actor }}"
+          echo "Preflight inventory confirmed: true"
+          echo "Target SHA: $GITHUB_SHA"
       - uses: actions/setup-node@v4
         with:
           node-version: '22.x'

@@ -149,10 +149,8 @@ export class ConnectionManager {
       this.sockets.set(socket, agent);
       this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, (msg.platform as any) || 'windows');
       this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online', ip);
-      const activeDevices = this.authManager.listDevices().filter(d => d.status !== 'revoked').map(d => d.deviceId);
-      if (activeDevices.length === 1 && activeDevices[0] === authoritativeDeviceId) {
-        this.taskStore.migrateLegacyUnassignedTasks([authoritativeDeviceId]);
-      }
+      // NOTE: Connecting does NOT grant ownership of unassigned legacy tasks.
+      // Tasks without verifiable claimant remain safely quarantined in queued state.
       this.auditLogger.log({
         actor: authoritativeDeviceId,
         actorType: 'device',

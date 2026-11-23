@@ -36,13 +36,16 @@
 - **測試結果**: 456 Tests Passed / 0 Failed
 - **Wrangler Dry Run**: PASS (Exit code 0)
 
-### 2. 本次最終 P0 / P1 安全修正本機驗收 (Local Verification)
+### 2. 本次最終 P0 安全修復本機驗收 (Local Verification)
 - **執行環境**: Windows 11 (ARM64 Workstation)
 - **Node.js**: v24.18.0
 - **TypeScript 建置 (`npm run build`)**: PASS (Exit code 0)
-- **完整回歸測試**: 460 Passed / 0 Failed (Exit code 0, 連續 3 次通過)
-- **Wrangler Deploy 預檢 (`npx wrangler deploy --dry-run`)**: PASS (Exit code 0)
+- **完整回歸測試**: 519 Passed / 0 Failed (42 套件, Exit code 0, 連續 3 次 100% 通過)
+- **Wrangler Deploy 預檢 (`npx wrangler deploy --dry-run`)**: PASS (Exit code 0, Total Upload: 464.73 KiB / gzip: 93.14 KiB)
 - **關鍵安全性項目驗證**:
+  - `Task 1 (B18~B24)`: 歷史任務不自動綁定第一台連線裝置，無歷史認領者之任務安全維持在 `queued` 隔離佇列（Zero Task Loss），任何 Agent 均無法認領；新增 `POST /admin/tasks/assign-legacy` 授權指派 API。
+  - `Task 2 (盤點單元測試 30 項)`: 實作 `scripts/inventory-tasks.ts` 唯讀盤點 CLI 工具，自動過濾機密、偵測舊版 DO 結構並提供 Wrangler DO SQLite 備援查詢，於未配置管理金鑰時回傳 Exit Code 2（BLOCKED）。
+  - `Task 3 (部署門禁單元測試 22 項)`: `.github/workflows/vnext-ci.yml` 解耦生產部署，Push/PR Merge 僅執行驗證與 Dry Run，正式部署需透過手動 `workflow_dispatch` 配合雙勾選與 SHA 鎖定放行。
   - `Task B17`: 0 註冊裝置冷啟動時非破壞性保留未綁定任務，待舊電腦連線時自動安全綁定並成功認領執行（Zero Task Loss 驗證通過）。
   - `Task B16`: 舊 Agent 使用 Bootstrap Token 上線相容性、重連保持有效、禁止管理端以同 ID 補登（拋出 `DEVICE_ID_CONFLICT`），及撤銷重註冊導致舊憑證失效（`TOKEN_SUPERSEDED`）之資安驗證全數通過。
   - `Task B15`: 歷史無綁定本地任務拒絕認領、單裝置自動綁定、多裝置環境 fail-closed 標記失敗、SQLite 持久化與 Durable Object 水合等 10 項邊界驗證全數通過。

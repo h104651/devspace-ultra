@@ -158,9 +158,13 @@ class CloudflareSqliteStorageAdapter {
             params.push(filter.capability);
         }
         query += ' ORDER BY priority DESC, createdAt DESC';
-        if (filter.limit) {
+        if (filter.limit !== undefined) {
             query += ' LIMIT ?';
             params.push(filter.limit);
+            if (filter.offset !== undefined) {
+                query += ' OFFSET ?';
+                params.push(filter.offset);
+            }
         }
         return this.sql.exec(query, ...params).toArray().map(r => this.rowToTask(r));
     }

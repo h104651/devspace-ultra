@@ -32,7 +32,7 @@
 | 15 | Integration: Remote MCP Transport (HTTP POST /mcp) | 整合測試 | 8 | PASS | 68ms | /mcp 端點工具調用與 OAuth 攔截 |
 | 16 | Integration: Agent Lifecycle & Durability | 整合測試 | 19 | PASS | 1597ms | Agent 斷線、重連、心跳與清理 |
 | 17 | Integration: Local Multi-Project Named Routing | 整合測試 | 29 | PASS | 804ms | 具名專案路由與許可權控制 |
-| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **26** | **PASS** | **1721ms** | **本次修復重點 (含 A1~A8, B1~B17)** |
+| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **33** | **PASS** | **2081ms** | **本次修復重點 (含 A1~A8, B1~B24)** |
 | 19 | Integration: Local Workspace Discovery & Nested Operations | 整合測試 | 15 | PASS | 42104ms | 遞迴工作區探索與檔案列舉 |
 | 20 | Integration: Kaggle Mock Backend | 整合測試 | 3 | PASS | 116ms | Kaggle 模擬後端執行 |
 | 21 | Integration: Pre-Migration Kaggle Restart Recovery | 整合測試 | 1 | PASS | 1ms | 遷移前歷史重啟恢復 |
@@ -55,7 +55,9 @@
 | 38 | Cloudflare: OAuth 2.1 & Protected Resource Metadata | Cloudflare | 20 | PASS | 2ms | OAuth 2.1 協定與安全端點元數據 |
 | 39 | Security: Zero Trust, Injections, Shell & Rate Limits | 安全測試 | 13 | PASS | 79ms | 零信任防護、指令注入、頻率限制 |
 | 40 | Security: Bootstrap Token Security & Redaction | 安全測試 | 3 | PASS | 2ms | 開機引導憑證安全脫敏 |
-| **總計** | **40 個測試套件** | — | **460** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
+| 41 | **Unit: Read-Only Task Inventory & Preflight Verification** | **單元測試** | **30** | **PASS** | **4ms** | **Task 2 唯讀任務盤點 CLI、舊版 DO 偵測、Wrangler SQL 備援、機密脫敏** |
+| 42 | **Unit: GitHub Actions Deployment Gate & Authorization** | **單元測試** | **22** | **PASS** | **2ms** | **Task 3 PR Merge 與生產部署完全解耦、手動雙確認與 SHA 鎖定門禁** |
+| **總計** | **42 個測試套件** | — | **519** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
 
 ---
 
@@ -89,6 +91,13 @@
 | **Task B15** | Strict P0 verification of legacy unassigned tasks, zero-device cold start, and claim protections | 覆蓋 10 項邊界檢驗：無綁定拒絕認領、歷史認領者自動綁定、單裝置自動綁定、多裝置/0裝置 fail-closed 標記 failed、SQLite 持久化與 Durable Object 冷啟動路徑 | PASS |
 | **Task B16** | Old agent Bootstrap Token compatibility and prohibition of re-registration | 驗證舊 Agent 使用 Bootstrap Token 上線相容性、重連保持有效、禁止管理端以同 ID 補登（拋出 DEVICE_ID_CONFLICT），及撤銷重註冊導致舊憑證失效（TOKEN_SUPERSEDED）之資安驗證 | PASS |
 | **Task B17** | Gateway cold start with zero registered devices preserves legacy queued tasks until single agent reconnects | 驗證 0 註冊裝置冷啟動時非破壞性保留未綁定任務（queued 狀態，防止冒牌 Agent 偷領），並在唯一的舊 Agent 重新連線時自動安全綁定並成功認領執行（Zero Task Loss） | PASS |
+| **Task B18** | New device connecting first must NOT acquire quarantined unassigned legacy tasks | 新裝置先上線時絕不自動獲取歷史未指派任務，任務嚴格維持在 queued 隔離狀態，任何裝置均無法領取（Task 1 防冒領保證） | PASS |
+| **Task B19** | Old device connecting first only claims tasks with verifiable prior claimant | 舊裝置先上線時僅能領取歷史 lease/attempts 證明曾由其認領之任務，無證明之任務維持隔離待管理員指派 | PASS |
+| **Task B20** | New device registered while old device offline cannot claim quarantined tasks | 新裝置註冊且舊裝置離線時，新裝置輪詢或按 ID 領取隔離中舊任務一律遭拒絕（Fail Closed） | PASS |
+| **Task B21** | Simultaneous multi-device reconnection preserves targetDeviceId separation | 雙機同時重新連線時，嚴格維護各自 targetDeviceId 獨立路由，隔離中任務保持不可認領 | PASS |
+| **Task B22** | Quarantined legacy tasks require explicit admin assignment via POST /admin/tasks/assign-legacy | 隔離佇列中之歷史任務需經由具備 ADMIN_SECRET 之管理端 API 明確指派至已註冊裝置後方可開放認領 | PASS |
+| **Task B23** | Durable Object cold start preserves quarantined tasks without auto-binding | Gateway Durable Object 冷啟動水合時，歷史無認領記錄之任務安全維持在 queued 隔離狀態，絕不依賴連線自動綁定 | PASS |
+| **Task B24** | Multi-device disconnect, lease expiration, and stale recovery strictly preserves targetDeviceId | 多裝置斷線與租約過期回收情境下，targetDeviceId 與隔離狀態完全保留，重試計數正確累加 | PASS |
 
 ---
 
@@ -97,17 +106,17 @@
 依規範連續執行三次完整測試套件，確認無間歇性失敗 (Flaky Tests)：
 
 1. **第一次完整執行**:
-   - 測試案例: 460 Passed / 0 Failed
+   - 測試案例: 519 Passed / 0 Failed
    - Exit Code: 0
-   - 執行耗時: 66,238 ms
+   - 執行耗時: 66,742 ms
 2. **第二次完整執行**:
-   - 測試案例: 460 Passed / 0 Failed
+   - 測試案例: 519 Passed / 0 Failed
    - Exit Code: 0
-   - 執行耗時: 65,842 ms
+   - 執行耗時: 65,910 ms
 3. **第三次完整執行**:
-   - 測試案例: 460 Passed / 0 Failed
+   - 測試案例: 519 Passed / 0 Failed
    - Exit Code: 0
-   - 執行耗時: 65,971 ms
+   - 執行耗時: 66,120 ms
 
 ---
 
@@ -116,7 +125,7 @@
 ```text
  ⛅️ wrangler 4.129.0 (update available 4.166.0)
 ───────────────────────────────────────────────
-Total Upload: 459.24 KiB / gzip: 91.98 KiB
+Total Upload: 464.73 KiB / gzip: 93.14 KiB
 Your Worker has access to the following bindings:
 Binding                                                  Resource                  
 env.GATEWAY_DO (GatewayDurableObject)                    Durable Object            

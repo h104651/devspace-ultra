@@ -37,85 +37,112 @@
 
 ---
 
-## 三、正式部署實施步驟 (Deployment SOP)
+## 三、正式部署實施步驟 (Formal Deployment Sequence)
 
-### 步驟 1：合併 Draft PR 至 `main`
-- 將 PR #23 的 Draft 狀態轉為 Ready for Review。
-- 採用 Squash and Merge 或 Rebase Merge 合併至 `main` 分支。
-- GitHub Actions 自動觸發正式部署 Workflow。
+正式上線嚴格遵守十階段防護門禁序列 (A ~ J)，禁止跨階段執行：
 
-### 步驟 2：監控生產環境 SQLite Schema 自動遷移
-- Cloudflare Gateway Worker 部署完成後，第一個請求將喚醒 `GatewayDurableObject`。
-- `CloudflareSqliteStorageAdapter` 會自動執行：
-  ```sql
-  ALTER TABLE devices ADD COLUMN activeTokenId TEXT;
+### 階段 A：最新 PR CI PASS
+- GitHub Actions 之 `CI` 與 `vNext CI & Production Deploy`（驗證階段）全數通過（含 TypeScript Build、全量測試與 Wrangler Dry Run）。
+
+### 階段 B：驗證 Deployment Gate 已阻止未授權正式部署
+- 確認 `.github/workflows/vnext-ci.yml` 門禁生效：普通 Push 至 `main` 或 PR Merge 絕不觸發 `deploy-production`。
+- 正式部署必須透過手動 `workflow_dispatch`，且嚴格要求在 `refs/heads/main`、`deploy_production == true`、`preflight_inventory_confirmed == true` 並校驗 `target_commit_sha`。
+
+### 階段 C：取得正式環境完整唯讀盤點及遷移風險報告
+- 在維護窗口內，由持有正式 `ADMIN_SECRET` 之運維人員執行唯讀任務盤點：
+  ```bash
+  npm run inventory:tasks -- --gateway-url https://devspace-ultra-gateway.abdul-hsu.workers.dev --admin-secret "$PROD_ADMIN_SECRET"
   ```
-- 既有 `devices` 記錄維持完整，水合過程自動完成舊任務遷移（`migrateLegacyUnassignedTasks`）。
+- 或透過 Cloudflare Wrangler 直接執行唯讀 SQL 查詢：
+  ```bash
+  npx wrangler durable-objects sql query DEVSPACE_GATEWAY_DO \
+    "SELECT taskId, status, backend, targetDeviceId, leaseJson, attemptsJson FROM tasks WHERE status IN ('queued', 'claimed', 'running', 'retrying')"
+  ```
+- 確認是否有懸空未指派（quarantined）任務；若有，必須透過 `POST /admin/tasks/assign-legacy` 指定目標裝置，或等待其執行完成。未完成盤點前，正式部署標記為 **NO-GO**。
 
-### 步驟 3：透過受保護的管理介面註冊新電腦 (僅限最小唯讀權限)
-使用受保護的管理密鑰向正式 Gateway 請求註冊新裝置（新 Windows 電腦初次驗收嚴格限定唯讀權限）：
-```bash
-curl -X POST https://devspace-ultra-gateway.abdul-hsu.workers.dev/admin/devices \
-  -H "Content-Type: application/json" \
-  -H "X-Admin-Secret: <YOUR_ADMIN_SECRET>" \
-  -d '{
-    "name": "New Windows Workstation",
-    "platform": "windows",
-    "deviceId": "win11-arm64-workstation-2",
-    "capabilities": ["local:read", "artifacts:read"]
-  }'
-```
-- 初次驗收**嚴格限定最小唯讀範圍 `["local:read", "artifacts:read"]`**，絕不自動給予 `local:write`、`local:exec` 或 Raw Shell 權限。
-- 回應標頭嚴格包含 `Cache-Control: no-store` 與 `Pragma: no-cache`，防止 Token 在代理伺服器或快取中洩漏。
-- 記錄回傳之一次性 `token`，妥善存入新電腦本機環境變數或啟動腳本。
-- 確認日誌中無明文 Token 殘留。
+### 階段 D：確認舊 Windows Bootstrap Token、裝置身分及任務擁有權相容性
+- 確認舊電腦 `win11-arm64-workstation` 之 Bootstrap Token 在升級後無縫相容。
+- **嚴格禁止透過 `POST /admin/devices` 重新簽發或註冊舊電腦**，避免造成 `TOKEN_SUPERSEDED` 導致舊 Agent 斷線。
 
-### 步驟 4：在新電腦啟動第二台 Local Agent
-在 `agent-cli.ts` 規格中，認證連線參數由環境變數讀取，專案設定檔透過 `--projects-config` 指定（移除未被 CLI 解析之 `start` 參數）。請在新 Windows 電腦以 PowerShell 執行：
-```powershell
-# 1. 切換至 vnext 目錄
-cd C:\Users\testuser\DevSpace\devspace-ultra\vnext
+### 階段 E：經使用者明確核准才 Merge PR #23
+- 取得工程師與主管明確核准後，將 PR #23 合併至 `main`。
+- 此時 GitHub Actions 僅執行驗證流程，不會部署生產環境。
 
-# 2. 設定連線認證與安全變數
-$env:GATEWAY_URL = "wss://devspace-ultra-gateway.abdul-hsu.workers.dev/ws/agent"
-$env:AGENT_ID = "win11-arm64-workstation-2"
-$env:AGENT_TOKEN = "<NEW_DEVICE_TOKEN>"
-$env:ALLOW_RAW_SHELL = "false"
+### 階段 F：維護窗口內經獨立授權執行唯一一次正式部署
+- 在維護窗口期間，授權人員前往 GitHub Actions 手動觸發 `vNext CI & Production Deploy`，提供：
+  - `deploy_production`: `true`
+  - `preflight_inventory_confirmed`: `true`
+  - `target_commit_sha`: `<MERGED_MAIN_SHA>`
+  - `operator_name`: `<OPERATOR_ID>`
+- 執行單次正式部署。
 
-# 3. 啟動 Outbound Local Agent (嚴格以專案白名單執行)
-node dist/cli/agent-cli.js --projects-config "$HOME\DevSpace\agent-config\projects.json"
-```
+### 階段 G：驗證既有 Windows Agent 正常在線
+- 部署完成後，確認舊電腦 `win11-arm64-workstation` WebSocket 連線正常，健康檢查通過：
+  ```powershell
+  Invoke-RestMethod https://devspace-ultra-gateway.abdul-hsu.workers.dev/health
+  # 回傳 { "ok": true }
+  ```
 
-### 步驟 5：雙 Agent 同時在線驗收
-透過 MCP 調用 `device_status`，確認：
-- `totalConnections: 2`
-- `win11-arm64-workstation` 狀態為 `online`。
-- `win11-arm64-workstation-2` 狀態為 `online`。
-- 分別提交各指定一台電腦的讀取任務，確認任務精準送達各自專案目錄，無跨電腦錯配。
+### 階段 H：確認資料庫遷移與舊任務狀態正確
+- Durable Object 啟動水合時自動完成 `activeTokenId` 欄位增補。
+- 歷史有 Claimant 之任務自動保留原目標裝置；無 Claimant 任務維持隔離佇列，絕不發生跨電腦錯派。
+
+### 階段 I：核發新 Windows 最小唯讀 Token，啟動第二台 Agent
+- 透過受保護管理介面註冊新電腦，嚴格限定最小唯讀權限：
+  ```bash
+  curl -X POST https://devspace-ultra-gateway.abdul-hsu.workers.dev/admin/devices \
+    -H "Content-Type: application/json" \
+    -H "X-Admin-Secret: <PROD_ADMIN_SECRET>" \
+    -d '{
+      "name": "New Windows Workstation",
+      "platform": "windows",
+      "deviceId": "win11-arm64-workstation-2",
+      "capabilities": ["local:read", "artifacts:read"]
+    }'
+  ```
+- 在新電腦設定環境變數並啟動 Agent：
+  ```powershell
+  $env:GATEWAY_URL = "wss://devspace-ultra-gateway.abdul-hsu.workers.dev/ws/agent"
+  $env:AGENT_ID = "win11-arm64-workstation-2"
+  $env:AGENT_TOKEN = "<NEW_DEVICE_TOKEN>"
+  $env:ALLOW_RAW_SHELL = "false"
+  node dist/cli/agent-cli.js --projects-config "$HOME\DevSpace\agent-config\projects.json"
+  ```
+
+### 階段 J：完成雙電腦唯讀端到端驗收
+- 透過 MCP 呼叫 `device_status`，確認雙裝置均在線。
+- 分別提交指定各裝置之唯讀任務，確認定向路由 100% 正確。
 
 ---
 
 ## 四、正式環境歷史任務安全升級與舊 Agent 相容性報告
 
 ### 1. 部署前唯讀任務盤點設計與狀態 (Pre-Deployment Read-Only Task Inventory)
-- **盤點介面**: Gateway 具備唯讀任務盤點端點 `GET /admin/tasks`（需帶 `X-Admin-Secret` 標頭）。該端點直接向 SQLite 查詢 `tasks` 資料表，不修改、不刪除、不觸發任何任務狀態機流轉。
-- **盤點執行限制**: 由於本機為新受管環境，依最小權限與零洩漏原則，未配置正式環境 `ADMIN_SECRET`，且禁止發送正式寫入或探測請求。
-- **預檢判定**: **PRODUCTION PREFLIGHT BLOCKED**。
-  - **不得假設正式環境任務數量為零**。
-  - 在無法從本機直接調用 `/admin/tasks` 盤點正式資料庫的情況下，必須在系統架構層面確保**即便存在歷史未完成任務，升級時亦 100% 不會造成任務遺失或錯配**。
+- **盤點工具與腳本**: 專案已建立實際可執行之盤點腳本 `vnext/scripts/inventory-tasks.ts`（可透過 `npm run inventory:tasks` 執行）。
+- **盤點安全保證**:
+  - **嚴格唯讀**: 僅查詢 `tasks` 資料表，絕不觸發 Migration、Claim、Reopen 或 Recovery。
+  - **敏感資訊脫敏**: 絕不輸出 Payload 內之程式碼、機密字串或 Token。
+  - **分頁與全量支援**: 支援 `limit` 與 `offset`，杜絕單頁 100 筆之靜默截斷。
+  - **明確 Exit Codes**:
+    - `0`: SUCCESS / READY（所有任務皆有明確目標裝置，無懸空任務）。
+    - `1`: ERROR（網路錯誤或認證失敗）。
+    - `2`: BLOCKED / MANUAL_REVIEW_REQUIRED（存在 quarantined 任務或未提供正式金鑰）。
+- **預檢現況判定**: **PRODUCTION PREFLIGHT BLOCKED**。
+  - 因本機環境未持有正式環境 `ADMIN_SECRET`，查詢遠端 Gateway 遭阻擋。
+  - **嚴禁假設正式環境任務為零**，正式部署前必須在維護窗口由運維人員實際執行此腳本或直接 SQL 查詢盤點。
 
-### 2. 歷史未完成任務遷移安全性 (Zero Task Loss Architecture)
+### 2. 歷史未完成任務遷移安全性 (Zero Task Loss & No Automatic Binding)
 針對正式 SQLite 中可能存在的未完成任務（Queued、Claimed、Running、Retrying）：
 - **存在歷史 Claimant 的任務**:
   - `TaskStore.migrateLegacyUnassignedTasks` 會依序檢查 `task.lease?.claimedBy` 與 `task.attempts` 中的歷史認領者。
   - 一旦存在歷史 Claimant，**即便系統當前 0 台裝置在線，亦無條件保留並綁定回原目標電腦 (`win11-arm64-workstation`)**。
   - 任務不會被改派，也不會轉為失敗。
-- **純排隊中且無歷史 Claimant 的歷史任務 (Queued without Claimant)**:
-  - 在過去的實作中，0 註冊裝置時會直接標記為 `failed`。
-  - **最新安全修復**: 當 `knownDeviceIds.length === 0`（冷啟動時 0 台註冊裝置）時，`migrateLegacyUnassignedTasks([])` **不會將其標記為 failed，而是安全保留在 queued 狀態**（非破壞性隔離）。
-  - 同時，因為 `claimTask` 嚴格要求本地任務必須包含相符之 `targetDeviceId`，任何新接入的未授權 Agent 均無法認領此懸空任務（Fail Closed 認領保護）。
-  - 當舊電腦 `win11-arm64-workstation` 重新建立 WebSocket 連線時，Gateway 自動執行 `rememberAuthenticatedDevice`，識別出系統中唯一的合法裝置，隨後自動觸發 `migrateLegacyUnassignedTasks(['win11-arm64-workstation'])`，將該任務安全綁定給舊電腦並由其順利認領執行，達到 **Zero Task Loss**。
-  - 若管理員在舊電腦上線前先註冊了多台新電腦（`knownDeviceIds.length > 1`），此時任務才因目標模糊而轉為 `failed`（`AMBIGUOUS_LEGACY_TASK`），確保多裝置環境下絕不錯配。
+- **無歷史 Claimant 的歷史任務 (Quarantined Tasks)**:
+  - **嚴禁自動綁定第一台連線裝置**: 不論舊電腦或新電腦誰先連線，連線本身**絕不構成任務擁有權之證明**。
+  - 未經證明的歷史任務在冷啟動與連線後，一律安全保留在 `status: 'queued'` 且 `targetDeviceId: undefined` 的隔離狀態。
+  - 因 `claimTask` 與 `claimTaskById` 嚴格要求本地任務之 `targetDeviceId === deviceId`，任何 Agent（包含新舊電腦）均無法領取此任務，徹底杜絕跨裝置搶單或錯派。
+  - **管理員核准指派機制**: 管理員於盤點確認後，可呼叫受保護端點 `POST /admin/tasks/assign-legacy`，指定合法裝置 ID（如 `win11-arm64-workstation`），受管指派後原舊 Agent 即可安全領取執行。
+  - 系統絕不無條件刪除或將未綁定任務標記為失敗，達成真正零任務遺失。
 
 ### 3. 舊電腦正式狀態 (`totalRegistered: 0 / totalOnline: 1`) 與嚴禁補登說明
 - **根本原因深入分析**：

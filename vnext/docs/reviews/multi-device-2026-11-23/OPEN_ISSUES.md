@@ -35,6 +35,20 @@
 12. **[RESOLVED] PR #23 中 Kaggle 變更來源釐清與保留依賴 (P1)**:
    - 查明 Kaggle 相關代碼與測試唯一來源為工作分支基準 Commit `8187c14`，非多裝置開發中無故引入。
    - 為避免破壞已通過之 12 項 Kaggle 冷啟動調和測試，且嚴守不使用 Force Push 原則，予以保留並詳實記錄於審查報告。
+13. **[RESOLVED] P0 歷史任務不可自動綁定第一台連線裝置 (Task 1)**:
+   - 移除 `AGENT_REGISTER` 中自動呼叫 `migrateLegacyUnassignedTasks([deviceId])` 之邏輯，連線電腦不代表任務擁有權。
+   - 僅以歷史 Lease 或 Attempts 中的合法認領者綁定原主；無憑據者保留於 `queued` 隔離佇列（`targetDeviceId: undefined`），任何 Agent 均無法認領，保證 Zero Task Loss。
+   - 實作具備 `ADMIN_SECRET` 之 `POST /admin/tasks/assign-legacy` 授權指派 API。
+   - 新增 Task B18 ~ B24 共 7 項測試覆蓋全情境（雙機重連、新機先連、舊機離線、冷啟動、租約逾期）。
+14. **[RESOLVED] P0 可執行之正式任務唯讀盤點 CLI 工具 (Task 2)**:
+   - 建立 `scripts/inventory-tasks.ts`（`npm run inventory:tasks`），支援分頁、過濾、機密脫敏與狀態統計。
+   - 支援舊版生產 DO（`v2.1.0 @ 1a933d3`）結構偵測與 Wrangler DO SQLite 唯讀備援查詢指令輸出。
+   - 嚴格退出碼防護：`0`（READY）、`1`（ERROR）、`2`（BLOCKED）。
+   - 新增 `tests/unit/inventory-tasks.test.ts` 30 項單元測試。
+15. **[RESOLVED] P0 PR Merge 與 Cloudflare 生產部署完全解耦 (Task 3)**:
+   - 調整 `.github/workflows/vnext-ci.yml`，Push 或 PR Merge 至 `main` 分支僅執行 CI 驗證與 Dry Run，絕不觸發任何正式部署。
+   - 正式部署限由手動 `workflow_dispatch` 觸發，需強制輸入 `deploy_production: true`、`preflight_inventory_confirmed: true` 與精確比對 `target_commit_sha`。
+   - 新增 `tests/unit/workflow-deployment-gate.test.ts` 22 項單元測試。
 
 ---
 
@@ -42,9 +56,9 @@
 
 | 項目說明 | 影響範圍 | 風險等級 | 是否阻擋 Merge | 是否阻擋 Production Deploy | 是否阻擋新 Agent 上線 | 說明 / 處置方式 |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **正式環境歷史任務唯讀盤點** | 正式 Cloudflare Gateway | Medium | **否** | **是 (PREFLIGHT BLOCKED)** | **是** | 本地機器無正式 `ADMIN_SECRET`，依零洩漏原則禁止探測正式 SQLite，標記為 PREFLIGHT BLOCKED。需由架構師在部署時調用 `GET /admin/tasks` 盤點。 |
+| **正式環境歷史任務唯讀盤點** | 正式 Cloudflare Gateway | Medium | **否** | **是 (PREFLIGHT BLOCKED)** | **是** | 本機環境依零洩漏原則未配置正式 `ADMIN_SECRET`，執行盤點腳本精確回傳 Exit Code 2（BLOCKED）。部署前需由操作員於安全終端執行 `npm run inventory:tasks` 或 Wrangler 備援 SQL 盤點。 |
 | **正式生產環境 Device Token 簽發** | 新 Windows 電腦 | Low | **否** | **否** | **是** | 依資安授權邊界，本輪禁止簽發正式憑證。需待 PR 合併並部署後，由管理員在安全管理介面手動簽發一次性 Token。 |
-| **生產環境雙實機同時連線驗收** | 舊電腦與新電腦 | Low | **否** | **否** | **是** | 本機模擬測試（460 項）已全數 PASS，真實雙實機連線驗收需待正式部署完成後依 SOP 啟動。 |
+| **生產環境雙實機同時連線驗收** | 舊電腦與新電腦 | Low | **否** | **否** | **是** | 本機模擬測試（519 項）已全數 PASS，真實雙實機連線驗收需待正式部署完成後依 SOP 啟動。 |
 | **ChatGPT MCP 端點實際對接測試** | ChatGPT 客戶端 | Low | **否** | **否** | **是** | 需於正式 Gateway 升級並加入第二台 Agent 後，由 ChatGPT 操作並指定 `targetDeviceId` 進行端對端驗收。 |
 
 ---
@@ -52,18 +66,18 @@
 ## 三、風險等級總評估 (Overall Risk Assessment)
 
 - **代碼回歸風險**: **極低 (Very Low)**
-  - 460 項全套自動化測試 100% 通過（連續三次確認無間歇性失敗）。
+  - 519 項全套自動化測試 100% 通過（連續三次確認無間歇性失敗）。
   - 單電腦環境保留自動綁定機制，100% 向後相容。
 - **資料庫遷移風險**: **極低 (Very Low)**
   - SQLite 採非破壞性 `ALTER TABLE ADD COLUMN` 腳本，具備安全錯誤捕獲，不會損壞舊資料。
 - **安全性與權限邊界**: **極高安全性 (Hardened Zero Trust)**
-  - Scope 白名單、Idempotency 參數全校驗、Master Secret 嚴格隔離、已撤銷憑證永久失效。
+  - Scope 白名單、Idempotency 參數全校驗、Master Secret 嚴格隔離、已撤銷憑證永久失效、部署門禁手動雙確認與 SHA 鎖定。
 
 ---
 
 ## 四、最終決策建議 (Recommendation)
 
-- **CODE 判定**: **GO** (代碼完全合規、安全修復到位、460 測試通過)
+- **CODE 判定**: **GO** (代碼完全合規、安全修復到位、519 測試通過)
 - **CI 判定**: **GO** (跨平臺多矩陣與 vNext Verify 綠燈)
-- **MERGE 判定**: **GO** (Draft PR 已就緒，可由 ChatGPT 獨立審查後合併)
-- **PRODUCTION DEPLOY 判定**: **HOLD / PREFLIGHT BLOCKED** (等待正式任務盤點確認與 ChatGPT 人工審核，嚴禁未經確認前自動部署)
+- **MERGE 判定**: **GO** (Draft PR 已就緒，可由 ChatGPT 獨立審查後合併至 main)
+- **PRODUCTION DEPLOY 判定**: **NO-GO / PREFLIGHT BLOCKED** (嚴格阻擋生產部署，直至維護窗口由授權操作員執行前置任務盤點確認並完成手動工作流簽核)

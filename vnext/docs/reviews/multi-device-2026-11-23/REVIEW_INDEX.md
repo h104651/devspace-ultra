@@ -13,65 +13,73 @@
 
 ## 二、本次修復與交付目標
 
-1. **修復 GitHub CI 真實失敗 (Task B7)**:
-   - 解決 Task B7 在 GitHub Actions Linux 虛擬機上因即時 Agent 輪詢搶先執行 Stale Recovery 導致的非同步競態斷言問題。
-   - 補齊隔離測試 `Task B7b`，驗證 Stale Recovery 在無背景干擾下的精準回收與重試耗盡終態。
-2. **補齊最後的路由安全與相容性問題**:
-   - 完整五種裝置狀態路由矩陣（0註冊/0在線、1註冊/0在線、2註冊/0在線、1在線/2註冊、2在線/2註冊），杜絕模糊派工。
-   - 強化 Idempotency Replay 防護：禁止未授權請求透過 Idempotency 繞過權限；完整比對 `targetDeviceId`、`backend`、`capability`、`payload` 參數衝突。
-   - 舊任務遷移保證 Zero Task Loss 與 Fail Closed：在 0 註冊裝置冷啟動時非破壞性保留於 queued 狀態，待唯一的舊 Agent 重新連線時自動安全綁定；多裝置註冊時則 Fail Closed 標記失敗（`AMBIGUOUS_LEGACY_TASK`）。
-   - `claimTask` 與 `claimTaskById` 嚴格限制本地任務只有明確指定且匹配該裝置之 `targetDeviceId` 方可領取（Fail Closed）。
-   - 嚴格禁止使用 `POST /admin/devices` 補登舊電腦 ID（防止 `TOKEN_SUPERSEDED` 導致斷線），新舊 Agent 憑證機制 100% 平滑向下相容。
-   - 詳查 PR #23 中 Kaggle 變更來源（源自工作分支基準 Commit `8187c14`），提供逐檔分析與保留依賴證據。
-3. **完成全套回歸測試與 Wrangler Dry Run**:
-   - 460 / 460 測試 PASS（0 失敗，連續 3 次通過）。
+1. **Task 1 (P0) — 歷史任務不可自動綁定第一台連線裝置**:
+   - 移除 `AGENT_REGISTER` 與連線時單裝置自動獲取歷史任務之漏洞。連線本身**絕不構成任務擁有權之證明**。
+   - 歷史任務優先依可驗證之歷史 Lease / Attempt 記錄恢復原擁有者 (`targetDeviceId = priorClaimant`)。
+   - 無法證明擁有權之任務，安全隔離於 `queued` 狀態且 `targetDeviceId: undefined`，`claimTask` 嚴格拒絕領取（Fail Closed）。
+   - 提供受保護的管理員指派端點 `POST /admin/tasks/assign-legacy`，經身分驗證與目標裝置合法性校驗後方可指派。
+   - 擴充測試矩陣：舊裝置先上線、新裝置先上線、新裝置已註冊舊裝置離線、雙裝置同時連線、有 Claimant、無 Claimant、DO 冷啟動、多裝置斷線與租約回收等 8 大情境（`Task B18` ~ `Task B24`，Suite 18 擴充至 33 項測試）。
+2. **Task 2 (P0) — 真正可使用的唯讀任務盤點方案**:
+   - 在 Gateway DO 與 Server 實作分頁與全量盤點介面（`/admin/tasks?view=inventory`），提供 Target Device、Claimant、Lease 與 Attempt 摘要，嚴格唯讀且全域脫敏。
+   - 建立實際可執行腳本 `vnext/scripts/inventory-tasks.ts`（支援 `npm run inventory:tasks`），自動識別舊版 Schema、提供 Wrangler Direct SQL 查詢備援、支援 Exit Code 0/1/2。
+   - 建立獨立單元測試套件 `vnext/tests/unit/inventory-tasks.test.ts`（30 項測試）。
+   - 明確標示當前正式環境盤點為 **PRODUCTION PREFLIGHT BLOCKED**，未完成盤點前正式部署一律標記為 **NO-GO**。
+3. **Task 3 (P0) — 改正 GitHub 自動部署順序與門禁**:
+   - 修改 `.github/workflows/vnext-ci.yml`，將 `deploy-production` 嚴格限制為手動 `workflow_dispatch`，普通 `main` Push 或 PR Merge 絕不自動部署。
+   - 部署條件限制：必須在 `refs/heads/main`、`deploy_production == true`、`preflight_inventory_confirmed == true`，並在 Step 中校驗 `target_commit_sha`。
+   - 建立門禁邏輯單元測試套件 `vnext/tests/unit/workflow-deployment-gate.test.ts`（22 項測試）。
+4. **Task 4 — 修正正式部署 SOP**:
+   - 確立十階段防護門禁序列 (A ~ J)，明確禁止為舊 Agent 重新註冊或簽發 Token。
+5. **完成全套回歸測試與 Wrangler Dry Run**:
+   - 519 / 519 測試 PASS（42 個測試套件，0 失敗）。
    - Wrangler 部署預檢 PASS。
-4. **交付 7 份審查技術文件**:
+6. **交付 7 份審查技術文件**:
    - 保存在 `vnext/docs/reviews/multi-device-2026-11-23/`，供 ChatGPT 與審查工程師完整閱讀與評估。
 
 ---
 
 ## 三、修改檔案清單 (Modified Files)
 
-- `vnext/src/gateway/task-router.ts`:
-  - 調整執行順序：Kill Switch -> Scope Authorization -> 裝置定向路由 -> Idempotency 檢查。
-  - 強化 Idempotency 參數比對（`targetDeviceId`、`backend`、`capability`、`payload`），拋出 `IDEMPOTENCY_CONFLICT`。
-  - 當存在多台裝置時，無 `targetDeviceId` 任務嚴格拒絕（拋出 `AMBIGUOUS_DEVICE_TARGET`）。
-- `vnext/src/security/auth-manager.ts`:
-  - `ALLOWED_DEVICE_SCOPES` 白名單檢驗，嚴格禁止賦予 `admin` 等非本機權限。
-  - 裝置名稱、平臺、ID 格式輸入校驗；`expiresInMs` 限制 60 秒至 365 天。
-  - 重新註冊時舊 Token 永久作廢（`activeTokenId` 追蹤與置換）。
-- `vnext/src/cloudflare/sqlite-storage-adapter.ts`:
-  - 非破壞性 SQLite 遷移 `ALTER TABLE devices ADD COLUMN activeTokenId TEXT`。
-- `vnext/src/cloudflare/gateway-durable-object.ts` & `vnext/src/gateway/server.ts`:
-  - 冷啟動時自動執行 `migrateLegacyUnassignedTasks`。
-  - 重新註冊時調用 `killSwitch.unrevokeDevice`，撤銷時註銷 `activeTokenId`。
 - `vnext/src/storage/task-store.ts`:
-  - `migrateLegacyUnassignedTasks`: 歷史認領優先綁定、單裝置自動綁定、多裝置安全失敗（`AMBIGUOUS_LEGACY_TASK`）。
-  - `claimTask` / `claimTaskById`: 嚴格限制只有符合 `targetDeviceId` 的裝置才可領取。
+  - `migrateLegacyUnassignedTasks`: 僅自動遷移具備歷史 Claimant 之任務；無證明者保留隔離佇列，絕不任意綁定或直接失敗。
+  - 新增 `assignQuarantinedTasks`: 供管理員手動指定目標裝置。
+- `vnext/src/gateway/connection-manager.ts` & `vnext/src/cloudflare/gateway-durable-object.ts`:
+  - 徹底移除 `AGENT_REGISTER` 時根據在線裝置自動綁定歷史任務之邏輯。
+  - 增設 `POST /admin/tasks/assign-legacy` 受保護端點。
+  - 增設 `GET /admin/tasks?view=inventory` 唯讀盤點介面（支援分頁與統計）。
+- `vnext/src/gateway/server.ts`:
+  - 同步增設 `/admin/tasks` 盤點介面與 `/admin/tasks/assign-legacy` 端點。
+- `vnext/src/cloudflare/sqlite-storage-adapter.ts` & `src/storage/storage-adapter.interface.ts`:
+  - `listTasks` 支援 `offset` 分頁查詢。
+- `vnext/scripts/inventory-tasks.ts`:
+  - 新增唯讀任務盤點與預檢 CLI 腳本。
+- `.github/workflows/vnext-ci.yml`:
+  - 修正部署門禁，完全解耦 PR Merge 與生產環境部署。
 - `vnext/tests/integration/multi-device-routing.test.ts`:
-  - 修復 Task B7 斷言與租約回收流程。
-  - 新增 `Task B7b`（隔離環境租約回收與耗盡測試）。
-  - 新增 `Task B13`（Idempotency 參數衝突與權限繞過防護測試）。
-  - 新增 `Task B14`（五種裝置狀態路由安全矩陣測試）。
+  - 增補 Task B18 至 B24（涵蓋 8 大連線與所有權場景）。
+- `vnext/tests/unit/inventory-tasks.test.ts`:
+  - 盤點腳本功能、輸出脫敏、舊版相容與 Exit Code 測試（30 tests）。
+- `vnext/tests/unit/workflow-deployment-gate.test.ts`:
+  - GitHub Actions 部署門禁與條件驗證測試（22 tests）。
+- `vnext/tests/security/security.test.ts`:
+  - 改用動態可用連接埠（`port: 0`），徹底避免 Windows 系統連接埠衝突。
 
 ---
 
 ## 四、審查文件索引 (Review Documents Index)
 
-1. [ROOT_CAUSE_AND_FIX.md](ROOT_CAUSE_AND_FIX.md): B7 失敗根因分析、P0/P1 安全收尾、代碼修復與前後行為比對。
-2. [TEST_MATRIX.md](TEST_MATRIX.md): 458+ 項全套測試矩陣、連續 3 次 PASS 執行記錄、Wrangler 預檢結果。
-3. [SECURITY_AND_COMPATIBILITY.md](SECURITY_AND_COMPATIBILITY.md): 零信任資安架構、Token 限制、權限白名單、快取標頭、相容性與回歸分析。
-4. [DEPLOYMENT_AND_ROLLBACK.md](DEPLOYMENT_AND_ROLLBACK.md): Cloudflare 正式部署 SOP、CLI 啟動規格、正式狀態差異分析、緊急回滾方案與不可逆資料保護。
-5. [CI_EVIDENCE.md](CI_EVIDENCE.md): 原始失敗 CI Run、修復後本機與遠端 CI 驗收證據。
-6. [OPEN_ISSUES.md](OPEN_ISSUES.md): 已解決與尚未解決項目、風險等級、Merge 與 Deploy 阻擋評估。
+1. [ROOT_CAUSE_AND_FIX.md](ROOT_CAUSE_AND_FIX.md): 歷史任務不可自動綁定第一台裝置分析、零遺失隔離架構、代碼修復與前後比對。
+2. [TEST_MATRIX.md](TEST_MATRIX.md): 519 項全套測試矩陣（42 個套件）、連續 PASS 執行記錄、Wrangler 預檢結果。
+3. [SECURITY_AND_COMPATIBILITY.md](SECURITY_AND_COMPATIBILITY.md): 零信任資安架構、Token 限制、權限白名單、部署門禁相容性分析。
+4. [DEPLOYMENT_AND_ROLLBACK.md](DEPLOYMENT_AND_ROLLBACK.md): 十階段正式部署 SOP (A ~ J)、唯讀盤點操作指引、緊急回滾方案與不可逆資料保護。
+5. [CI_EVIDENCE.md](CI_EVIDENCE.md): 本機與 GitHub Actions 双 CI Run 驗收證據。
+6. [OPEN_ISSUES.md](OPEN_ISSUES.md): 已解決項目、正式環境盤點 BLOCKED 說明、4 級 GO/NO-GO 判定。
 
 ---
 
 ## 五、最終結論判定 (GO / NO-GO)
 
-- **程式碼修復與安全強化**: **GO** (100% 完成且經單元/整合驗證)
-- **本機 Windows ARM64 測試**: **GO** (460/460 PASS)
-- **Cloudflare 部署預檢 (Dry Run)**: **GO** (Exit code 0, 資源 Binding 完整)
-- **GitHub PR Merge 資格**: **GO** (代碼完整、Draft PR 就緒、審查文件齊全)
-- **正式環境部署資格 (Production Deploy)**: **CONDITIONAL GO** (等待 ChatGPT 人工完成 GitHub 審查，並由管理者簽發正式 Device Token 後方可執行)
+- **程式碼修復與架構審查 (Code Review)**: **GO** (所有漏洞修復完成且具備完整單元/整合驗證)
+- **自動化測試 (Automated CI)**: **GO** (519/519 PASS，42 套件全綠)
+- **GitHub PR Merge 資格 (PR Merge to main)**: **GO** (代碼與文檔完整，PR #23 就緒，Merge 不會觸發部署)
+- **正式環境部署資格 (Production Deploy)**: **NO-GO** (嚴格維持 **NO-GO / PREFLIGHT BLOCKED**，必須於維護窗口由運維人員完成正式環境盤點後方可人工放行)

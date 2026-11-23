@@ -135,7 +135,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     ).toArray().map(r => this.rowToTask(r));
   }
 
-  async listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number }): Promise<DurableTask[]> {
+  async listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number; offset?: number }): Promise<DurableTask[]> {
     // The no-filter call is the Durable Object cold-start working-set hydration path.
     // Historical terminal rows are loaded lazily by primary key instead of on every eviction/restart.
     if (!filter) return this.listActiveTasks();
@@ -146,7 +146,14 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     if (filter.backend) { query += ' AND backend = ?'; params.push(filter.backend); }
     if (filter.capability) { query += ' AND capability = ?'; params.push(filter.capability); }
     query += ' ORDER BY priority DESC, createdAt DESC';
-    if (filter.limit) { query += ' LIMIT ?'; params.push(filter.limit); }
+    if (filter.limit !== undefined) {
+      query += ' LIMIT ?';
+      params.push(filter.limit);
+      if (filter.offset !== undefined) {
+        query += ' OFFSET ?';
+        params.push(filter.offset);
+      }
+    }
     return this.sql.exec(query, ...params).toArray().map(r => this.rowToTask(r));
   }
 

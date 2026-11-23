@@ -233,6 +233,115 @@ export class GatewayServer {
       res.json({ ok: true, deviceId, status: 'revoked' });
     });
 
+    this.app.get('/admin/tasks', this.authenticate('admin'), (req: Request, res: Response) => {
+      const isInventoryView = req.path.includes('/inventory') || req.query.view === 'inventory';
+      const limit = req.query.limit ? Math.min(Math.max(1, parseInt(req.query.limit as string, 10) || 100), 5000) : (isInventoryView ? 1000 : 100);
+      const offset = req.query.offset ? Math.max(0, parseInt(req.query.offset as string, 10) || 0) : 0;
+      const backendParam = req.query.backend as string | undefined;
+      const statusParam = req.query.status as string | undefined;
+
+      const allTasks = this.taskStore.listTasks();
+      const filteredTasks = allTasks.filter(t => {
+        if (backendParam && t.backend !== backendParam) return false;
+        if (statusParam === 'active') {
+          return !['completed', 'failed', 'cancelled'].includes(t.status);
+        }
+        if (statusParam && statusParam !== 'all' && t.status !== statusParam) return false;
+        return true;
+      });
+
+      const paginatedTasks = filteredTasks.slice(offset, offset + limit);
+      const localTasks = allTasks.filter(t => t.backend === 'local');
+      const activeLocal = localTasks.filter(t => !['completed', 'failed', 'cancelled'].includes(t.status));
+      const targetedLocal = activeLocal.filter(t => !!t.targetDeviceId);
+      const quarantinedLocal = activeLocal.filter(t => !t.targetDeviceId);
+      const withPriorClaimant = quarantinedLocal.filter(t => !!(t.lease?.claimedBy || (t.attempts && t.attempts.find(a => a.claimedBy)?.claimedBy)));
+
+      const byTargetDevice: Record<string, number> = {};
+      for (const t of targetedLocal) {
+        if (t.targetDeviceId) byTargetDevice[t.targetDeviceId] = (byTargetDevice[t.targetDeviceId] || 0) + 1;
+      }
+      const byStatus: Record<string, number> = {};
+      for (const t of activeLocal) {
+        byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+      }
+
+      res.json({
+        ok: true,
+        total: filteredTasks.length,
+        offset,
+        limit,
+        hasMore: offset + limit < filteredTasks.length,
+        summary: {
+          totalActiveLocal: activeLocal.length,
+          totalTargeted: targetedLocal.length,
+          totalQuarantined: quarantinedLocal.length,
+          totalWithPriorClaimant: withPriorClaimant.length,
+          byTargetDevice,
+          byStatus
+        },
+        tasks: paginatedTasks.map(t => {
+          const priorClaimant = t.lease?.claimedBy || (t.attempts && [...t.attempts].reverse().find(a => a.claimedBy)?.claimedBy);
+          return {
+            taskId: t.taskId,
+            backend: t.backend,
+            capability: t.capability,
+            status: t.status,
+            targetDeviceId: t.targetDeviceId || undefined,
+            priorClaimant: priorClaimant || undefined,
+            isQuarantined: t.backend === 'local' && !t.targetDeviceId,
+            lease: t.lease ? {
+              claimedBy: t.lease.claimedBy,
+              expiresAt: t.lease.leaseExpiresAt,
+              workerId: (t.lease as any).workerId
+            } : undefined,
+            attemptCount: t.attempts ? t.attempts.length : 0,
+            attemptsSummary: (t.attempts || []).map(a => ({
+              attemptId: a.id,
+              claimedBy: a.claimedBy,
+              status: a.status,
+              startedAt: a.startedAt,
+              completedAt: a.completedAt
+            })),
+            createdAt: t.createdAt,
+            startedAt: t.startedAt,
+            completedAt: t.completedAt,
+            updatedAt: t.updatedAt
+          };
+        })
+      });
+    });
+
+    this.app.get('/admin/tasks/inventory', this.authenticate('admin'), (req: Request, res: Response) => {
+      (req.query as any).view = 'inventory';
+      (this.app as any)._router.handle(req, res, () => {});
+    });
+
+    this.app.post('/admin/tasks/assign-legacy', this.authenticate('admin'), (req: Request, res: Response) => {
+      const { targetDeviceId, taskIds } = req.body || {};
+      if (!targetDeviceId || typeof targetDeviceId !== 'string') {
+        return res.status(400).json({ ok: false, error: 'INVALID_REQUEST: targetDeviceId is required and must be a string' });
+      }
+      const dev = this.authManager.getDevice(targetDeviceId);
+      if (!dev || dev.status === 'revoked') {
+        return res.status(400).json({ ok: false, error: `INVALID_DEVICE: targetDeviceId ${targetDeviceId} is not a valid registered active device` });
+      }
+      const result = this.taskStore.assignQuarantinedTasks(targetDeviceId, Array.isArray(taskIds) ? taskIds : undefined);
+      this.auditLogger.log({
+        actor: (req as any).auth?.subjectId || 'admin',
+        actorType: 'admin',
+        action: 'ADMIN_ASSIGN_LEGACY_TASKS',
+        resource: targetDeviceId,
+        result: 'SUCCESS',
+        details: {
+          targetDeviceId,
+          count: result.assigned,
+          taskIds: result.taskIds
+        }
+      });
+      return res.json({ ok: true, assignedCount: result.assigned, assignedTaskIds: result.taskIds });
+    });
+
     const handleRemoteMcp = async (req: Request, res: Response) => {
       const auth: TokenPayload = (req as any).auth;
       const body = req.body;
@@ -337,8 +446,8 @@ export class GatewayServer {
     const port = this.config.port ?? 4000;
     const host = this.config.host || '0.0.0.0';
     this.leaseMonitor.start();
-    const activeDevices = this.authManager.listDevices().filter(d => d.status !== 'revoked').map(d => d.deviceId);
-    this.taskStore.migrateLegacyUnassignedTasks(activeDevices);
+    // Only migrate tasks with verifiable prior claimant. Unassigned tasks remain quarantined.
+    this.taskStore.migrateLegacyUnassignedTasks();
     return new Promise((resolve, reject) => {
       const onError = (error: Error) => {
         this.httpServer.off('listening', onListening);

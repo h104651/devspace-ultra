@@ -100,12 +100,18 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
   - ChatGPT 既有單電腦操作習慣 100% 維持運作，不會因未傳 `targetDeviceId` 而中斷。
 - 當管理員透過 API 註冊第二台裝置（如 `win11-arm64-workstation-2`）後，系統自動升級為多裝置防護模式，強制要求明確指定目標。
 
-### 2. 升級前歷史任務安全遷移 (`migrateLegacyUnassignedTasks`)
-- Gateway 在啟動或冷啟動水合時，自動審視歷史留存任務：
-  - **有歷史認領者**: 綁定至該次租約認領者，確保重試不會送錯電腦。
-  - **單裝置環境**: 自動補齊唯一裝置 ID。
-  - **零註冊裝置冷啟動環境**: 歷史未綁定任務非破壞性保留於 `queued` 狀態，透過 `claimTask` 嚴格拒絕認領防止冒牌 Agent 偷領，待唯一的舊 Agent 重新連線時自動安全綁定（Zero Task Loss）。
-  - **多裝置環境**: 歷史未綁定任務直接標記為失敗（`AMBIGUOUS_LEGACY_TASK`），嚴守 Fail Closed 原則，防止目標模糊錯配。
+### 2. 升級前歷史任務安全遷移 (`migrateLegacyUnassignedTasks`) 與隔離佇列架構 (Quarantine Architecture)
+- **歷史任務歸屬判定原則 (Strict Ownership Evidence)**:
+  - Gateway 在啟動或冷啟動水合時，自動審視歷史留存任務。
+  - **具備可驗證歷史認領者**: 優先以歷史租約（`task.lease?.claimedBy`）或執行記錄（`task.attempts` 中的 `claimedBy`）鎖定原擁有者，確保重試不會送錯電腦。
+  - **無歷史認領者或無法證明擁有權**:
+    - **嚴禁自動綁定第一台連線或在線裝置**：`GatewayDurableObject` 與 `ConnectionManager` 在 `AGENT_REGISTER` 時**不再**調用 `migrateLegacyUnassignedTasks([deviceId])`。新電腦先連線、或舊電腦離線時新電腦連線，絕不自動搶奪舊任務。
+    - **隔離佇列保護 (Quarantined in Queued, Zero Task Loss)**: 任務維持在 `status: 'queued'` 且 `targetDeviceId: undefined`。因本地任務認領要求 `t.backend === 'local' && (!t.targetDeviceId || t.targetDeviceId !== deviceId)` 判定，無 `targetDeviceId` 之任務嚴禁任何 Agent 認領（Fail Closed）。
+    - **非破壞性零遺失**: 系統絕不無條件將歷史排隊任務標記為失敗或刪除，確保任務不遺失。
+  - **管理員安全指派 API (`POST /admin/tasks/assign-legacy`)**:
+    - 需具備 `ADMIN_SECRET` 方可調用。
+    - 強制校驗目標裝置必須為已註冊且未被撤銷（Non-Revoked）之裝置。
+    - 可批次或指定 `taskIds` 安全將隔離任務綁定至目標裝置，並寫入結構化稽核日誌。
 
 ### 3. 資料庫 Schema 遷移相容性
 - 在 `devices` 資料表新增 `activeTokenId TEXT` 欄位。
@@ -124,3 +130,29 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
 - 本次升級完全不開放 Raw Shell。
 - Local Agent 預設 `allowRawShell: false`。
 - 本機專案目錄限制僅授權登記於 `projects.json` 的路徑，不得存取未授權磁碟分割區。
+
+---
+
+## 四、正式環境任務盤點 CLI 工具 (`scripts/inventory-tasks.ts`)
+
+- **功能與介面**:
+  - 提供 `npm run inventory:tasks` 唯讀盤點腳本，支援分頁（`--limit`、`--offset`）、過濾（`--backend`、`--status`）、格式切換（`--format table|json`）與就緒檢查（`--check-readiness`）。
+  - 自動偵測舊版生產端點（`v2.1.0 @ 1a933d3`）：若缺少 `targetDeviceId` 欄位，自動輸出防禦告警與直接查詢 Cloudflare DO SQLite 之唯讀 Wrangler SQL 指令備援。
+  - 嚴格資料脫敏：自動過濾任務代碼與敏感憑證，僅呈現狀態、裝置 ID、認領歷程與摘要統計。
+  - 明確退出碼：`0`（READY，無未綁定任務）、`1`（ERROR，網路或授權錯誤）、`2`（BLOCKED，存在隔離/未綁定任務，阻擋正式部署）。
+- **受控單元測試覆蓋**:
+  - `tests/unit/inventory-tasks.test.ts` 包含 30 項測試，覆蓋遺失密鑰拒絕、網路超時、401 拒絕、舊版 DO 偵測、脫敏保證與就緒驗收。
+
+---
+
+## 五、GitHub Actions 生產部署門禁解耦安全架構
+
+- **解耦核心原則**:
+  - **Push / Merge to `main` 絕不觸發生產部署**：僅執行 CI 跨平臺矩陣驗證與 Cloudflare deploy `--dry-run`。
+  - **生產部署僅限手動觸發 (`workflow_dispatch`)**:
+    - 限由授權操作員於 `refs/heads/main` 手動觸發。
+    - 必須明確勾選 `deploy_production: true`。
+    - 必須明確勾選 `preflight_inventory_confirmed: true`（確認已完成前置任務盤點且無風險）。
+    - 必須填寫 `target_commit_sha`，工作流比對該 SHA 必須與目標 Commit 完全吻合，防止併發推播導致錯誤部署。
+- **受控單元測試覆蓋**:
+  - `tests/unit/workflow-deployment-gate.test.ts` 包含 22 項測試，涵蓋 PR 阻擋、Push 阻擋、缺少確認阻擋、非 main 分支阻擋與 SHA 吻合放行驗證。

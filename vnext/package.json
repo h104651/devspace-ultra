@@ -10,7 +10,8 @@
     "test": "ts-node tests/run-all-tests.ts",
     "test:unit": "ts-node tests/run-unit-tests.ts",
     "test:integration": "ts-node tests/run-integration-tests.ts",
-    "test:security": "ts-node tests/run-security-tests.ts"
+    "test:security": "ts-node tests/run-security-tests.ts",
+    "inventory:tasks": "ts-node scripts/inventory-tasks.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

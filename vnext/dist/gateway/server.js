@@ -252,6 +252,111 @@ class GatewayServer {
             this.connectionManager.disconnectDevice(deviceId, reason);
             res.json({ ok: true, deviceId, status: 'revoked' });
         });
+        this.app.get('/admin/tasks', this.authenticate('admin'), (req, res) => {
+            const isInventoryView = req.path.includes('/inventory') || req.query.view === 'inventory';
+            const limit = req.query.limit ? Math.min(Math.max(1, parseInt(req.query.limit, 10) || 100), 5000) : (isInventoryView ? 1000 : 100);
+            const offset = req.query.offset ? Math.max(0, parseInt(req.query.offset, 10) || 0) : 0;
+            const backendParam = req.query.backend;
+            const statusParam = req.query.status;
+            const allTasks = this.taskStore.listTasks();
+            const filteredTasks = allTasks.filter(t => {
+                if (backendParam && t.backend !== backendParam)
+                    return false;
+                if (statusParam === 'active') {
+                    return !['completed', 'failed', 'cancelled'].includes(t.status);
+                }
+                if (statusParam && statusParam !== 'all' && t.status !== statusParam)
+                    return false;
+                return true;
+            });
+            const paginatedTasks = filteredTasks.slice(offset, offset + limit);
+            const localTasks = allTasks.filter(t => t.backend === 'local');
+            const activeLocal = localTasks.filter(t => !['completed', 'failed', 'cancelled'].includes(t.status));
+            const targetedLocal = activeLocal.filter(t => !!t.targetDeviceId);
+            const quarantinedLocal = activeLocal.filter(t => !t.targetDeviceId);
+            const withPriorClaimant = quarantinedLocal.filter(t => !!(t.lease?.claimedBy || (t.attempts && t.attempts.find(a => a.claimedBy)?.claimedBy)));
+            const byTargetDevice = {};
+            for (const t of targetedLocal) {
+                if (t.targetDeviceId)
+                    byTargetDevice[t.targetDeviceId] = (byTargetDevice[t.targetDeviceId] || 0) + 1;
+            }
+            const byStatus = {};
+            for (const t of activeLocal) {
+                byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+            }
+            res.json({
+                ok: true,
+                total: filteredTasks.length,
+                offset,
+                limit,
+                hasMore: offset + limit < filteredTasks.length,
+                summary: {
+                    totalActiveLocal: activeLocal.length,
+                    totalTargeted: targetedLocal.length,
+                    totalQuarantined: quarantinedLocal.length,
+                    totalWithPriorClaimant: withPriorClaimant.length,
+                    byTargetDevice,
+                    byStatus
+                },
+                tasks: paginatedTasks.map(t => {
+                    const priorClaimant = t.lease?.claimedBy || (t.attempts && [...t.attempts].reverse().find(a => a.claimedBy)?.claimedBy);
+                    return {
+                        taskId: t.taskId,
+                        backend: t.backend,
+                        capability: t.capability,
+                        status: t.status,
+                        targetDeviceId: t.targetDeviceId || undefined,
+                        priorClaimant: priorClaimant || undefined,
+                        isQuarantined: t.backend === 'local' && !t.targetDeviceId,
+                        lease: t.lease ? {
+                            claimedBy: t.lease.claimedBy,
+                            expiresAt: t.lease.leaseExpiresAt,
+                            workerId: t.lease.workerId
+                        } : undefined,
+                        attemptCount: t.attempts ? t.attempts.length : 0,
+                        attemptsSummary: (t.attempts || []).map(a => ({
+                            attemptId: a.id,
+                            claimedBy: a.claimedBy,
+                            status: a.status,
+                            startedAt: a.startedAt,
+                            completedAt: a.completedAt
+                        })),
+                        createdAt: t.createdAt,
+                        startedAt: t.startedAt,
+                        completedAt: t.completedAt,
+                        updatedAt: t.updatedAt
+                    };
+                })
+            });
+        });
+        this.app.get('/admin/tasks/inventory', this.authenticate('admin'), (req, res) => {
+            req.query.view = 'inventory';
+            this.app._router.handle(req, res, () => { });
+        });
+        this.app.post('/admin/tasks/assign-legacy', this.authenticate('admin'), (req, res) => {
+            const { targetDeviceId, taskIds } = req.body || {};
+            if (!targetDeviceId || typeof targetDeviceId !== 'string') {
+                return res.status(400).json({ ok: false, error: 'INVALID_REQUEST: targetDeviceId is required and must be a string' });
+            }
+            const dev = this.authManager.getDevice(targetDeviceId);
+            if (!dev || dev.status === 'revoked') {
+                return res.status(400).json({ ok: false, error: `INVALID_DEVICE: targetDeviceId ${targetDeviceId} is not a valid registered active device` });
+            }
+            const result = this.taskStore.assignQuarantinedTasks(targetDeviceId, Array.isArray(taskIds) ? taskIds : undefined);
+            this.auditLogger.log({
+                actor: req.auth?.subjectId || 'admin',
+                actorType: 'admin',
+                action: 'ADMIN_ASSIGN_LEGACY_TASKS',
+                resource: targetDeviceId,
+                result: 'SUCCESS',
+                details: {
+                    targetDeviceId,
+                    count: result.assigned,
+                    taskIds: result.taskIds
+                }
+            });
+            return res.json({ ok: true, assignedCount: result.assigned, assignedTaskIds: result.taskIds });
+        });
         const handleRemoteMcp = async (req, res) => {
             const auth = req.auth;
             const body = req.body;
@@ -365,8 +470,8 @@ class GatewayServer {
         const port = this.config.port ?? 4000;
         const host = this.config.host || '0.0.0.0';
         this.leaseMonitor.start();
-        const activeDevices = this.authManager.listDevices().filter(d => d.status !== 'revoked').map(d => d.deviceId);
-        this.taskStore.migrateLegacyUnassignedTasks(activeDevices);
+        // Only migrate tasks with verifiable prior claimant. Unassigned tasks remain quarantined.
+        this.taskStore.migrateLegacyUnassignedTasks();
         return new Promise((resolve, reject) => {
             const onError = (error) => {
                 this.httpServer.off('listening', onListening);

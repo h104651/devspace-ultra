@@ -23,6 +23,8 @@ import { runLocalWorkspaceDiscoveryIntegrationTests } from './integration/local-
 import { runSecurityTests } from './security/security.test';
 import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-security.test';
 import { runMultiDeviceRoutingTests } from './integration/multi-device-routing.test';
+import { runInventoryTasksUnitTests } from './unit/inventory-tasks.test';
+import { runWorkflowDeploymentGateTests } from './unit/workflow-deployment-gate.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
 import { runWorkerRoutingRecoveryTests } from './cloudflare/worker-routing-recovery.test';
 import { runRemoteTaskWaitProductionTests } from './cloudflare/remote-task-wait-production.test';
@@ -86,7 +88,9 @@ async function main() {
     { name: 'Cloudflare: MCP OAuth Insufficient-Scope Step-Up', runner: runMcpInsufficientScopeTests },
     { name: 'Cloudflare: OAuth 2.1 & Protected Resource Metadata', runner: runOAuthTests },
     { name: 'Security: Zero Trust, Injections, Shell & Rate Limits', runner: runSecurityTests },
-    { name: 'Security: Bootstrap Token Security & Redaction', runner: runBootstrapTokenSecurityTests }
+    { name: 'Security: Bootstrap Token Security & Redaction', runner: runBootstrapTokenSecurityTests },
+    { name: 'Unit: Read-Only Task Inventory & Preflight Verification', runner: runInventoryTasksUnitTests },
+    { name: 'Unit: GitHub Actions Deployment Gate & Authorization', runner: runWorkflowDeploymentGateTests }
   ];
 
   for (const suite of suites) {
@@ -108,8 +112,12 @@ async function main() {
   console.log(`Total Tests Passed: ${totalPassed}`);
   console.log(`Total Tests Failed: ${totalFailed}`);
   console.log('====================================================');
-  if (totalFailed > 0) process.exit(1);
+  if (totalFailed > 0) {
+    process.exit(1);
+  }
   console.log('\x1b[32mAll test suites passed successfully!\x1b[0m\n');
+  // Allow pending handle closures (sockets/servers) to flush through libuv on Windows
+  await new Promise(resolve => setTimeout(resolve, 300));
   process.exit(0);
 }
 
