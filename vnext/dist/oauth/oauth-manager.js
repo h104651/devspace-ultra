@@ -14,6 +14,7 @@ exports.CHATGPT_LEAST_PRIVILEGE_SCOPES = [
     'kaggle:submit',
     'kaggle:read',
     'local:read',
+    'local:write',
     'local:test',
     'swarm:dispatch'
 ];

@@ -22,7 +22,8 @@ export async function runStaleRecoveryIntegrationTests(): Promise<{ passed: numb
       backend: 'local',
       capability: 'local:test',
       payload: { cmd: 'run' },
-      maxRetries: 2
+      maxRetries: 2,
+      targetDeviceId: 'crashed-worker'
     });
 
     // 2. Claim by worker
@@ -43,11 +44,11 @@ export async function runStaleRecoveryIntegrationTests(): Promise<{ passed: numb
     passed++;
 
     // 6. Claim and expire remaining retries
-    server.taskStore.claimTask('crashed-worker-2', ['local:test'], 50);
+    server.taskStore.claimTask('crashed-worker', ['local:test'], 50);
     await new Promise(r => setTimeout(r, 80));
     server.leaseMonitor.tick(); // retryCount = 2
 
-    server.taskStore.claimTask('crashed-worker-3', ['local:test'], 50);
+    server.taskStore.claimTask('crashed-worker', ['local:test'], 50);
     await new Promise(r => setTimeout(r, 80));
     server.leaseMonitor.tick(); // max retries exceeded -> stale terminal status
 

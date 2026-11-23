@@ -44,6 +44,14 @@ class McpHandlers {
     gateway;
     constructor(gateway) {
         this.gateway = gateway;
+        if (this.gateway?.taskRouter) {
+            if (!this.gateway.taskRouter.getAuthManager?.() && this.gateway.authManager) {
+                this.gateway.taskRouter.setAuthManager?.(this.gateway.authManager);
+            }
+            if (!this.gateway.taskRouter.getConnectionManager?.() && this.gateway.connectionManager) {
+                this.gateway.taskRouter.setConnectionManager?.(this.gateway.connectionManager);
+            }
+        }
     }
     requireCaller(caller) {
         if (!caller)
@@ -62,10 +70,27 @@ class McpHandlers {
             capability: args.capability,
             payload: args.payload,
             priority: args.priority,
-            clientRequestId: args.clientRequestId
+            clientRequestId: args.clientRequestId,
+            targetDeviceId: args.targetDeviceId
         }, auth.scopes, auth.subjectId);
         if (args.backend === 'local') {
             const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+            if (args.targetDeviceId) {
+                const isTargetOnline = connected.some((c) => c.deviceId === args.targetDeviceId);
+                if (!isTargetOnline) {
+                    return {
+                        taskId: result.taskId,
+                        status: result.status,
+                        backend: args.backend,
+                        capability: args.capability,
+                        targetDeviceId: args.targetDeviceId,
+                        waitingForEligibleDevice: true,
+                        reason: 'TARGET_DEVICE_OFFLINE',
+                        isReplay: !!result.isReplay,
+                        message: `Task queued specifically for targeted device '${args.targetDeviceId}', which is currently offline.`
+                    };
+                }
+            }
             if (connected.length === 0) {
                 return {
                     taskId: result.taskId,
@@ -78,7 +103,11 @@ class McpHandlers {
                     message: 'Task queued, but no local agents are currently connected.'
                 };
             }
-            const eligible = connected.some((c) => c.capabilities?.includes(args.capability));
+            const eligible = connected.some((c) => {
+                if (args.targetDeviceId && c.deviceId !== args.targetDeviceId)
+                    return false;
+                return c.capabilities?.includes(args.capability);
+            });
             if (!eligible) {
                 return {
                     taskId: result.taskId,
@@ -88,7 +117,9 @@ class McpHandlers {
                     waitingForEligibleDevice: true,
                     reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
                     isReplay: !!result.isReplay,
-                    message: `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
+                    message: args.targetDeviceId
+                        ? `Task queued, but targeted device '${args.targetDeviceId}' is not authorized for capability '${args.capability}'.`
+                        : `Task queued, but currently connected devices are not authorized for capability '${args.capability}'.`
                 };
             }
         }
@@ -189,19 +220,37 @@ class McpHandlers {
             message: 'Kaggle task submitted. Query kaggle_status for execution progress.'
         };
     }
+    async reconcileKaggleTaskIfNeeded(taskId) {
+        if (!taskId)
+            return;
+        const task = this.gateway.taskStore.getTask(taskId);
+        if (task && (task.backend === 'kaggle' || task.externalRun?.provider === 'kaggle') && !['succeeded', 'failed', 'cancelled'].includes(task.status)) {
+            if (this.gateway.kaggleBackend && typeof this.gateway.kaggleBackend.reconcileTask === 'function') {
+                try {
+                    await this.gateway.kaggleBackend.reconcileTask(task.taskId, false);
+                }
+                catch (err) {
+                    console.warn(`[KaggleSync] On-demand reconcile error for ${task.taskId}:`, err?.message || err);
+                }
+            }
+        }
+    }
     async handleKaggleStatus(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        await this.reconcileKaggleTaskIfNeeded(args?.taskId);
         return this.handleRemoteTaskStatus(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
     }
     async handleKaggleLogs(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        await this.reconcileKaggleTaskIfNeeded(args?.taskId);
         return this.handleRemoteTaskLogs(args, { ...auth, scopes: [...auth.scopes, 'tasks:read'] });
     }
     async handleKaggleResult(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'kaggle:read', 'tasks:read');
+        await this.reconcileKaggleTaskIfNeeded(args?.taskId);
         const elevatedRead = { ...auth, scopes: [...auth.scopes, 'tasks:read', 'artifacts:read'] };
         const status = await this.handleRemoteTaskStatus(args, elevatedRead);
         const artifacts = await this.handleRemoteTaskArtifacts(args, elevatedRead);
@@ -1081,9 +1130,14 @@ class McpHandlers {
             }))
         };
     }
-    async handleDeviceStatus(caller) {
+    async handleDeviceStatus(args, caller) {
+        if (!caller && args && (args.scopes || args.subjectId)) {
+            caller = args;
+            args = undefined;
+        }
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'local:read', 'admin:*');
+        const filterId = typeof args?.targetDeviceId === 'string' ? args.targetDeviceId.trim() : (typeof args?.deviceId === 'string' ? args.deviceId.trim() : undefined);
         const devices = this.gateway.authManager.listDevices();
         const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
         // Group connected sockets by deviceId
@@ -1140,11 +1194,12 @@ class McpHandlers {
                 deviceResults.push(entry);
             }
         }
+        const filteredResults = filterId ? deviceResults.filter(d => d.deviceId === filterId) : deviceResults;
         return {
             totalRegistered: devices.length,
             totalOnline: connectedByDevice.size,
             totalConnections: connected.length,
-            devices: deviceResults
+            devices: filteredResults
         };
     }
     async handleKillSwitchTrigger(args, caller) {
@@ -1916,7 +1971,8 @@ class McpHandlers {
             capability: options.capability,
             payload: options.payload,
             clientRequestId: options.clientRequestId,
-            idempotencyKey: options.idempotencyKey
+            idempotencyKey: options.idempotencyKey,
+            targetDeviceId: options.targetDeviceId
         }, auth.scopes, auth.subjectId);
         const taskId = submitResult.taskId;
         // 2. Check if already terminal (e.g. cached completed idempotent replay)
@@ -1950,31 +2006,11 @@ class McpHandlers {
                 };
             }
         }
-        // 3. Preflight check: live connected agents (PR #5 source of truth)
-        const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
-        if (connected.length === 0) {
-            return {
-                taskId,
-                status: submitResult.status || 'queued',
-                pending: true,
-                waitingForEligibleDevice: true,
-                reason: 'NO_ONLINE_DEVICE',
-                isReplay: !!submitResult.isReplay,
-                message: 'Task queued, but no local agents are currently connected.'
-            };
-        }
-        const eligible = connected.some((c) => c.capabilities?.includes(options.capability));
-        if (!eligible) {
-            return {
-                taskId,
-                status: submitResult.status || 'queued',
-                pending: true,
-                waitingForEligibleDevice: true,
-                reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
-                isReplay: !!submitResult.isReplay,
-                message: `Task queued, but currently connected devices are not authorized for capability '${options.capability}'.`
-            };
-        }
+        // 3. Bounded wait absorbs transient Local Agent disconnect/reconnect gaps.
+        // The task is already durable at this point, so do not return NO_ONLINE_DEVICE
+        // or NO_ELIGIBLE_DEVICE_CAPABILITY immediately based on a momentary snapshot.
+        // A reconnecting agent may still claim and complete the queued task within the
+        // caller's bounded wait window.
         // 4. Bounded wait for eligible live agent execution
         const startTime = Date.now();
         while (Date.now() - startTime < boundedWaitMs) {
@@ -2010,12 +2046,65 @@ class McpHandlers {
                 };
             }
         }
-        // 5. Bounded wait timeout: return pending=true, directResult=false (do NOT cancel task)
+        // 5. Bounded wait timeout: inspect the latest device snapshot only now.
+        // The durable task remains authoritative and is never cancelled here.
+        const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+        const eligible = connected.some((c) => {
+            if (options.targetDeviceId && c.deviceId !== options.targetDeviceId)
+                return false;
+            return c.capabilities?.includes(options.capability);
+        });
+        const status = currentTask?.status || 'queued';
+        if (status === 'queued') {
+            if (options.targetDeviceId) {
+                const isTargetOnline = connected.some((c) => c.deviceId === options.targetDeviceId);
+                if (!isTargetOnline) {
+                    return {
+                        taskId,
+                        status,
+                        targetDeviceId: options.targetDeviceId,
+                        pending: true,
+                        directResult: false,
+                        waitingForEligibleDevice: true,
+                        reason: 'TARGET_DEVICE_OFFLINE',
+                        isReplay: !!submitResult.isReplay,
+                        message: `Task remains queued specifically for targeted device '${options.targetDeviceId}', which is currently offline.`
+                    };
+                }
+            }
+            if (connected.length === 0) {
+                return {
+                    taskId,
+                    status,
+                    pending: true,
+                    directResult: false,
+                    waitingForEligibleDevice: true,
+                    reason: 'NO_ONLINE_DEVICE',
+                    isReplay: !!submitResult.isReplay,
+                    message: 'Task remains queued after the bounded wait because no local agents are currently connected.'
+                };
+            }
+            if (!eligible) {
+                return {
+                    taskId,
+                    status,
+                    pending: true,
+                    directResult: false,
+                    waitingForEligibleDevice: true,
+                    reason: 'NO_ELIGIBLE_DEVICE_CAPABILITY',
+                    isReplay: !!submitResult.isReplay,
+                    message: options.targetDeviceId
+                        ? `Task remains queued because targeted device '${options.targetDeviceId}' is not authorized for capability '${options.capability}'.`
+                        : `Task remains queued after the bounded wait because currently connected devices are not authorized for capability '${options.capability}'.`
+                };
+            }
+        }
         return {
             taskId,
-            status: currentTask?.status || 'queued',
+            status,
             pending: true,
             directResult: false,
+            isReplay: !!submitResult.isReplay,
             message: 'Task is still executing; query remote_task_status using this taskId.'
         };
     }
@@ -2025,7 +2114,8 @@ class McpHandlers {
         return this.submitLocalTaskAndWait({
             capability: 'local:list_projects',
             payload: args || {},
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalProjectStatus(args, caller) {
@@ -2037,7 +2127,8 @@ class McpHandlers {
         return this.submitLocalTaskAndWait({
             capability: 'local:project_status',
             payload: { projectId: args.projectId },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalReadFile(args, caller) {
@@ -2053,7 +2144,8 @@ class McpHandlers {
                 relativePath: args.relativePath,
                 limit: args.limit
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalWriteFile(args, caller) {
@@ -2072,7 +2164,8 @@ class McpHandlers {
                 relativePath: args.relativePath,
                 content: args.content
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalPatchFile(args, caller) {
@@ -2095,7 +2188,8 @@ class McpHandlers {
                 expectedSha256: args.expectedSha256,
                 patches: args.patches
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalListDirectory(args, caller) {
@@ -2111,7 +2205,8 @@ class McpHandlers {
                 relativePath: args.relativePath || '.',
                 maxEntries: args.maxEntries
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalFindFiles(args, caller) {
@@ -2132,7 +2227,8 @@ class McpHandlers {
                 maxResults: args.maxResults,
                 type: args.type || 'all'
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalSearchText(args, caller) {
@@ -2153,7 +2249,8 @@ class McpHandlers {
                 maxDepth: args.maxDepth,
                 maxResults: args.maxResults
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalFindRepositories(args, caller) {
@@ -2169,7 +2266,8 @@ class McpHandlers {
                 relativePath: args.relativePath || '.',
                 maxDepth: args.maxDepth
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalCreateDirectory(args, caller) {
@@ -2184,7 +2282,8 @@ class McpHandlers {
                 projectId: args.projectId,
                 relativePath: args.relativePath
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalGitStatus(args, caller) {
@@ -2199,7 +2298,8 @@ class McpHandlers {
                 projectId: args.projectId,
                 repoRelativePath: args?.repoRelativePath
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
     async handleLocalRunTests(args, caller) {
@@ -2217,7 +2317,8 @@ class McpHandlers {
                 runnerId: args?.runnerId || 'npm',
                 workingRelativePath: args?.workingRelativePath || '.'
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth.scopes, auth.subjectId);
     }
     async handleLocalBuildProject(args, caller) {
@@ -2235,7 +2336,8 @@ class McpHandlers {
                 commandId: args?.commandId || 'npm',
                 workingRelativePath: args?.workingRelativePath || '.'
             },
-            clientRequestId: args?.clientRequestId
+            clientRequestId: args?.clientRequestId,
+            targetDeviceId: args?.targetDeviceId
         }, auth.scopes, auth.subjectId);
     }
 }

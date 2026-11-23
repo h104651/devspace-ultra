@@ -53,7 +53,9 @@ const swarm_orchestrator_1 = require("../swarm/swarm-orchestrator");
 const chat_swarm_compat_1 = require("../swarm/chat-swarm-compat");
 const handlers_1 = require("../mcp/handlers");
 const tools = __importStar(require("../mcp/tools"));
+const reliability_tools_1 = require("../mcp/reliability-tools");
 const oauth_manager_1 = require("../oauth/oauth-manager");
+const task_1 = require("../types/task");
 const protocol_1 = require("../mcp/protocol");
 const DEFAULT_PUBLIC_BASE_URL = 'https://devspace-ultra-gateway.abdul-hsu.workers.dev';
 const KAGGLE_POLLS_STORAGE_KEY = 'devspace:kaggle-polls:v1';
@@ -130,7 +132,21 @@ class GatewayDurableObject {
         this.artifactStore = new artifact_store_1.ArtifactStore(undefined, 50 * 1024 * 1024, this.storage, persistArtifactPayload);
         this.kaggleBackend = new backend_1.KaggleBackend(this.taskStore, this.artifactStore, this.kaggleHttpClient, undefined, DEFAULT_KAGGLE_POLL_MS, { schedule: (taskId, kernelSlug, delayMs) => this.scheduleKagglePoll(taskId, kernelSlug, delayMs) });
         this.swarmOrchestrator = new swarm_orchestrator_1.SwarmOrchestrator(this.taskStore);
-        this.taskRouter = new task_router_1.TaskRouter(this.taskStore, this.idempotencyStore, this.kaggleBackend, this.swarmOrchestrator, this.killSwitch, this.auditLogger);
+        const connectionManagerFacade = {
+            getConnectedAgents: () => (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).map((ws) => {
+                const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) || {};
+                return {
+                    deviceId: att.deviceId || 'unknown',
+                    name: att.name || att.deviceId || 'unknown',
+                    platform: att.platform || 'windows',
+                    capabilities: att.capabilities || [],
+                    connectedAt: att.connectedAt || Date.now(),
+                    lastHeartbeatAt: Date.now(),
+                    socket: ws
+                };
+            }).filter((a) => a.deviceId !== 'unknown')
+        };
+        this.taskRouter = new task_router_1.TaskRouter(this.taskStore, this.idempotencyStore, this.kaggleBackend, this.swarmOrchestrator, this.killSwitch, this.auditLogger, connectionManagerFacade, this.authManager);
         const gatewayFacade = {
             taskRouter: this.taskRouter,
             taskStore: this.taskStore,
@@ -139,20 +155,7 @@ class GatewayDurableObject {
             swarmOrchestrator: this.swarmOrchestrator,
             authManager: this.authManager,
             killSwitch: this.killSwitch,
-            connectionManager: {
-                getConnectedAgents: () => (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).map((ws) => {
-                    const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) || {};
-                    return {
-                        deviceId: att.deviceId || 'unknown',
-                        name: att.name || att.deviceId || 'unknown',
-                        platform: att.platform || 'windows',
-                        capabilities: att.capabilities || [],
-                        connectedAt: att.connectedAt || Date.now(),
-                        lastHeartbeatAt: Date.now(),
-                        socket: ws
-                    };
-                }).filter((a) => a.deviceId !== 'unknown')
-            }
+            connectionManager: connectionManagerFacade
         };
         this.mcpHandlers = new handlers_1.McpHandlers(gatewayFacade);
         this.ready = this.initializeFromDurableStorage();
@@ -161,6 +164,13 @@ class GatewayDurableObject {
         }
     }
     async initializeFromDurableStorage() {
+        try {
+            this.authManager.hydrateDevices(await this.storage.listDevices());
+            this.authManager.hydrateClients(await this.storage.listClients());
+        }
+        catch (err) {
+            console.error('Failed to hydrate auth devices/clients from storage:', err);
+        }
         try {
             await this.killSwitch.hydrate();
         }
@@ -176,6 +186,8 @@ class GatewayDurableObject {
         try {
             this.taskStore.hydrate(await this.storage.listTasks());
             this.taskStore.recoverStaleTasks();
+            // Only migrate tasks with verifiable prior claimant. Unassigned tasks remain quarantined.
+            this.taskStore.migrateLegacyUnassignedTasks();
             this.kaggleBackend.reconcileDanglingTasks().catch(err => console.warn('[DO] Background Kaggle reconciliation warning:', err));
         }
         catch (err) {
@@ -293,14 +305,13 @@ class GatewayDurableObject {
         if (!candidate) {
             return Response.json({ error: 'AUTH_REQUIRED', message: 'Admin credential required (X-Admin-Secret header)' }, { status: 401, headers: this.corsHeaders() });
         }
-        // Explicitly reject token-signing master secret when used as admin credential
         if (this.env.MASTER_SECRET && this.timingSafeEqualStr(candidate, this.env.MASTER_SECRET)) {
             return Response.json({ error: 'FORBIDDEN: token signing master secret cannot be used as admin credential' }, { status: 403, headers: this.corsHeaders() });
         }
         if (!this.timingSafeEqualStr(candidate, adminSecret)) {
             return Response.json({ error: 'AUTH_INVALID', message: 'Invalid admin credential' }, { status: 401, headers: this.corsHeaders() });
         }
-        return undefined; // Authorized!
+        return undefined;
     }
     async parseJsonRequest(request) {
         try {
@@ -649,6 +660,22 @@ class GatewayDurableObject {
                 }
                 else if (action === 'REVOKE_DEVICE' && targetId) {
                     await this.killSwitch.revokeDevice(targetId, reason);
+                    this.authManager.revokeDevice(targetId, reason);
+                    const dev = this.authManager.getDevice(targetId);
+                    if (dev)
+                        await this.storage.saveDevice(dev);
+                    if (this.ctx.getWebSockets) {
+                        for (const ws of this.ctx.getWebSockets()) {
+                            const att = typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null;
+                            if (att && att.deviceId === targetId) {
+                                try {
+                                    ws.send(JSON.stringify({ type: 'ERROR', error: 'DEVICE_REVOKED: Device revoked by admin' }));
+                                    ws.close(1008, 'Device revoked');
+                                }
+                                catch { }
+                            }
+                        }
+                    }
                 }
                 else if (action === 'REVOKE_CLIENT' && targetId) {
                     await this.killSwitch.revokeClient(targetId, reason);
@@ -676,26 +703,232 @@ class GatewayDurableObject {
                 }
                 return Response.json({ ok: true, action, state: this.killSwitch.getState() });
             }
-            if ((url.pathname === '/admin/tasks' || url.pathname === '/api/admin/tasks') && request.method === 'GET') {
+            if ((url.pathname === '/admin/devices' || url.pathname === '/api/admin/devices') && request.method === 'POST') {
                 const adminAuthError = this.authenticateAdmin(request);
                 if (adminAuthError)
                     return adminAuthError;
-                const tasks = await this.storage.listTasks({ limit: 100 });
-                return Response.json({
-                    total: tasks.length,
-                    tasks: tasks.map(t => ({
+                try {
+                    const body = await request.json();
+                    const name = typeof body?.name === 'string' ? body.name.trim() : 'Local Agent';
+                    const platform = body?.platform || 'windows';
+                    const capabilities = Array.isArray(body?.capabilities) && body.capabilities.length > 0 ? body.capabilities : ['local:read', 'artifacts:read'];
+                    const customDeviceId = typeof body?.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : undefined;
+                    const expiresInMs = typeof body?.expiresInMs === 'number' ? body.expiresInMs : undefined;
+                    const reg = this.authManager.registerDevice(name, platform, capabilities, customDeviceId, expiresInMs);
+                    await this.killSwitch.unrevokeDevice(reg.deviceId);
+                    await this.storage.saveDevice(reg.record);
+                    this.auditLogger.log({ actor: 'admin', actorType: 'client', action: 'DEVICE_REGISTERED', resource: reg.deviceId, result: 'SUCCESS' });
+                    return Response.json({
+                        ok: true,
+                        deviceId: reg.deviceId,
+                        token: reg.token,
+                        device: {
+                            deviceId: reg.record.deviceId,
+                            name: reg.record.name,
+                            platform: reg.record.platform,
+                            status: reg.record.status,
+                            capabilities: reg.record.capabilities,
+                            registeredAt: reg.record.registeredAt
+                        },
+                        message: 'Device registered successfully. Save token securely; it cannot be retrieved again.'
+                    }, {
+                        status: 201,
+                        headers: {
+                            'Cache-Control': 'no-store',
+                            'Pragma': 'no-cache'
+                        }
+                    });
+                }
+                catch (err) {
+                    const isConflict = err.message?.includes('DEVICE_ID_CONFLICT');
+                    return Response.json({ error: err.message }, { status: isConflict ? 409 : 400 });
+                }
+            }
+            if ((url.pathname === '/admin/devices' || url.pathname === '/api/admin/devices') && request.method === 'GET') {
+                const adminAuthError = this.authenticateAdmin(request);
+                if (adminAuthError)
+                    return adminAuthError;
+                const liveSockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
+                const onlineIds = new Set(liveSockets.map((ws) => {
+                    const att = typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null;
+                    return att?.deviceId;
+                }).filter(Boolean));
+                const devices = this.authManager.listDevices().map(d => ({
+                    deviceId: d.deviceId,
+                    name: d.name,
+                    platform: d.platform,
+                    status: d.status === 'revoked' ? 'revoked' : (onlineIds.has(d.deviceId) ? 'online' : 'offline'),
+                    capabilities: d.capabilities,
+                    registeredAt: d.registeredAt,
+                    lastConnectedAt: d.lastConnectedAt,
+                    revokedAt: d.revokedAt,
+                    revocationReason: d.revocationReason
+                }));
+                return Response.json({ total: devices.length, devices });
+            }
+            if (url.pathname.startsWith('/admin/devices/') && url.pathname.endsWith('/revoke') && request.method === 'POST') {
+                const adminAuthError = this.authenticateAdmin(request);
+                if (adminAuthError)
+                    return adminAuthError;
+                const targetId = url.pathname.replace('/admin/devices/', '').replace('/revoke', '');
+                const body = (await request.json().catch(() => ({})));
+                const reason = body?.reason || 'Admin action';
+                await this.killSwitch.revokeDevice(targetId, reason);
+                this.authManager.revokeDevice(targetId, reason);
+                const dev = this.authManager.getDevice(targetId);
+                if (dev) {
+                    await this.storage.saveDevice(dev);
+                    if (dev.activeTokenId)
+                        await this.storage.revokeToken(dev.activeTokenId);
+                }
+                if (this.ctx.getWebSockets) {
+                    for (const ws of this.ctx.getWebSockets()) {
+                        const att = typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null;
+                        if (att && att.deviceId === targetId) {
+                            try {
+                                ws.send(JSON.stringify({ type: 'ERROR', error: 'DEVICE_REVOKED: Device revoked by admin' }));
+                                ws.close(1008, 'Device revoked');
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                return Response.json({ ok: true, deviceId: targetId, status: 'revoked' });
+            }
+            if ((url.pathname === '/admin/tasks' || url.pathname === '/api/admin/tasks' || url.pathname === '/admin/tasks/inventory' || url.pathname === '/api/admin/tasks/inventory') && request.method === 'GET') {
+                const adminAuthError = this.authenticateAdmin(request);
+                if (adminAuthError)
+                    return adminAuthError;
+                const limitParam = url.searchParams.get('limit');
+                const offsetParam = url.searchParams.get('offset');
+                const backendParam = url.searchParams.get('backend');
+                const statusParam = url.searchParams.get('status');
+                const isInventoryView = url.pathname.includes('/inventory') || url.searchParams.get('view') === 'inventory';
+                const limit = limitParam ? Math.min(Math.max(1, parseInt(limitParam, 10) || 100), 5000) : (isInventoryView ? 1000 : 100);
+                const offset = offsetParam ? Math.max(0, parseInt(offsetParam, 10) || 0) : 0;
+                const filter = {};
+                if (backendParam)
+                    filter.backend = backendParam;
+                if (statusParam && statusParam !== 'active' && statusParam !== 'all')
+                    filter.status = statusParam;
+                const allTasks = await this.storage.listTasks(Object.keys(filter).length > 0 ? filter : undefined);
+                const filteredTasks = allTasks.filter(t => {
+                    if (backendParam && t.backend !== backendParam)
+                        return false;
+                    if (statusParam === 'active') {
+                        return task_1.ACTIVE_TASK_STATUSES.has(t.status);
+                    }
+                    if (statusParam && statusParam !== 'all' && t.status !== statusParam)
+                        return false;
+                    return true;
+                });
+                const paginatedTasks = filteredTasks.slice(offset, offset + limit);
+                const localTasks = allTasks.filter(t => t.backend === 'local');
+                const activeLocal = localTasks.filter(t => task_1.ACTIVE_TASK_STATUSES.has(t.status));
+                const targetedLocal = activeLocal.filter(t => !!t.targetDeviceId);
+                const quarantinedLocal = activeLocal.filter(t => !t.targetDeviceId);
+                const withPriorClaimant = quarantinedLocal.filter(t => !!(t.lease?.claimedBy || (t.attempts && t.attempts.find(a => a.claimedBy)?.claimedBy)));
+                const byTargetDevice = {};
+                for (const t of targetedLocal) {
+                    if (t.targetDeviceId) {
+                        byTargetDevice[t.targetDeviceId] = (byTargetDevice[t.targetDeviceId] || 0) + 1;
+                    }
+                }
+                const byStatus = {};
+                for (const t of activeLocal) {
+                    byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+                }
+                const mappedTasks = paginatedTasks.map(t => {
+                    const priorClaimant = t.lease?.claimedBy || (t.attempts && [...t.attempts].reverse().find(a => a.claimedBy)?.claimedBy);
+                    const isQuarantined = t.backend === 'local' && !t.targetDeviceId;
+                    return {
                         taskId: t.taskId,
                         backend: t.backend,
                         capability: t.capability,
                         status: t.status,
+                        targetDeviceId: t.targetDeviceId || undefined,
+                        priorClaimant: priorClaimant || undefined,
+                        isQuarantined,
+                        lease: t.lease ? {
+                            claimedBy: t.lease.claimedBy,
+                            expiresAt: t.lease.leaseExpiresAt,
+                            workerId: t.lease.workerId
+                        } : undefined,
+                        attemptCount: t.attempts ? t.attempts.length : 0,
+                        attemptsSummary: (t.attempts || []).map(a => ({
+                            attemptId: a.id,
+                            claimedBy: a.claimedBy,
+                            status: a.status,
+                            startedAt: a.startedAt,
+                            completedAt: a.completedAt
+                        })),
                         createdAt: t.createdAt,
                         startedAt: t.startedAt,
                         completedAt: t.completedAt,
+                        updatedAt: t.updatedAt,
                         clientRequestId: t.clientRequestId,
                         kernelSlug: t.payload?.kernelSlug,
                         codeSize: t.payload?.code ? (typeof t.payload.code === 'string' ? t.payload.code.length : JSON.stringify(t.payload.code).length) : undefined
-                    }))
+                    };
                 });
+                return Response.json({
+                    ok: true,
+                    total: filteredTasks.length,
+                    offset,
+                    limit,
+                    hasMore: offset + limit < filteredTasks.length,
+                    summary: {
+                        totalActiveLocal: activeLocal.length,
+                        totalTargeted: targetedLocal.length,
+                        totalQuarantined: quarantinedLocal.length,
+                        totalWithPriorClaimant: withPriorClaimant.length,
+                        byTargetDevice,
+                        byStatus
+                    },
+                    tasks: mappedTasks
+                });
+            }
+            if ((url.pathname === '/admin/tasks/assign-legacy' || url.pathname === '/api/admin/tasks/assign-legacy') && request.method === 'POST') {
+                const adminAuthError = this.authenticateAdmin(request);
+                if (adminAuthError)
+                    return adminAuthError;
+                let body = {};
+                try {
+                    body = await request.json();
+                }
+                catch {
+                    return Response.json({ ok: false, error: 'INVALID_JSON: Failed to parse JSON body' }, { status: 400 });
+                }
+                const { targetDeviceId, taskIds } = body;
+                if (!targetDeviceId || typeof targetDeviceId !== 'string') {
+                    return Response.json({ ok: false, error: 'INVALID_REQUEST: targetDeviceId is required and must be a string' }, { status: 400 });
+                }
+                if (!Array.isArray(taskIds) || taskIds.length === 0 || !taskIds.every(id => typeof id === 'string' && id.trim().length > 0)) {
+                    return Response.json({ ok: false, error: 'INVALID_REQUEST: taskIds is required and must be a non-empty array of task IDs' }, { status: 400 });
+                }
+                const dev = this.authManager.getDevice(targetDeviceId);
+                if (!dev || dev.status === 'revoked') {
+                    return Response.json({ ok: false, error: `INVALID_DEVICE: targetDeviceId ${targetDeviceId} is not a valid registered active device` }, { status: 400 });
+                }
+                const res = this.taskStore.assignQuarantinedTasks(targetDeviceId, taskIds);
+                for (const tId of res.taskIds) {
+                    const t = this.taskStore.getTask(tId);
+                    if (t)
+                        await this.storage.saveTask(t);
+                }
+                this.auditLogger.log({
+                    actor: 'admin',
+                    actorType: 'admin',
+                    action: 'ADMIN_ASSIGN_LEGACY_TASKS',
+                    resource: targetDeviceId,
+                    result: 'SUCCESS',
+                    details: {
+                        targetDeviceId,
+                        count: res.assigned,
+                        taskIds: res.taskIds
+                    }
+                });
+                return Response.json({ ok: true, assignedCount: res.assigned, assignedTaskIds: res.taskIds });
             }
             if ((url.pathname === '/mcp' || url.pathname === '/api/mcp/v1') && request.method === 'GET') {
                 if (request.headers.get('MCP-Protocol-Version') === protocol_1.MCP_2026_VERSION) {
@@ -829,6 +1062,14 @@ class GatewayDurableObject {
                     return;
                 }
                 const authoritativeDeviceId = val.payload.subjectId;
+                if (this.killSwitch.isDeviceRevoked(authoritativeDeviceId) || this.authManager.getDevice(authoritativeDeviceId)?.status === 'revoked') {
+                    ws.send(JSON.stringify({
+                        type: 'ERROR',
+                        error: 'DEVICE_REVOKED: Device is revoked'
+                    }));
+                    ws.close(1008, 'Device revoked');
+                    return;
+                }
                 const requestedCaps = (Array.isArray(msg.capabilities) && msg.capabilities.length > 0)
                     ? msg.capabilities
                     : [...capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES];
@@ -839,6 +1080,12 @@ class GatewayDurableObject {
                     return scope_checker_1.ScopeChecker.hasScope(val.payload.scopes, requiredScope);
                 });
                 this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, msg.platform || 'windows');
+                const devRecord = this.authManager.getDevice(authoritativeDeviceId);
+                if (devRecord) {
+                    await this.storage.saveDevice(devRecord);
+                }
+                // NOTE: Connecting does NOT grant ownership of unassigned legacy tasks.
+                // Tasks without verifiable claimant remain safely quarantined in queued state.
                 ws.serializeAttachment({
                     deviceId: authoritativeDeviceId,
                     name: msg.name || authoritativeDeviceId,
@@ -862,6 +1109,11 @@ class GatewayDurableObject {
             }
             const authenticatedDeviceId = attachment.deviceId;
             const authorizedCapabilities = attachment.capabilities || [];
+            if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
+                ws.send(JSON.stringify({ type: 'ERROR', error: 'DEVICE_REVOKED: Device is revoked' }));
+                ws.close(1008, 'Device revoked');
+                return;
+            }
             if (msg.type === 'AGENT_HEARTBEAT') {
                 this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);
                 if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
@@ -998,7 +1250,7 @@ class GatewayDurableObject {
         return { payload };
     }
     getToolsList() {
-        return tools.getCanonicalToolsList();
+        return [...tools.getCanonicalToolsList(), reliability_tools_1.REMOTE_TASK_WAIT_TOOL];
     }
     requireSwarmScope(auth) {
         if (!scope_checker_1.ScopeChecker.hasScope(auth.scopes, 'swarm:dispatch')) {
@@ -1176,6 +1428,9 @@ class GatewayDurableObject {
                             break;
                         case 'remote_task_status':
                             result = await this.mcpHandlers.handleRemoteTaskStatus(args, caller);
+                            break;
+                        case 'remote_task_wait':
+                            result = await (0, reliability_tools_1.handleRemoteTaskWait)(this.taskStore, args, caller.scopes);
                             break;
                         case 'remote_task_logs':
                             result = await this.mcpHandlers.handleRemoteTaskLogs(args, caller);

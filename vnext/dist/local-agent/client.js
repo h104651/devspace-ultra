@@ -36,11 +36,15 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.LocalAgentClient = void 0;
 const ws_1 = require("ws");
 const crypto = __importStar(require("crypto"));
+const fs = __importStar(require("fs"));
 const task_executor_1 = require("./task-executor");
 const environment_probe_1 = require("./environment-probe");
 class LocalAgentClient {
     config;
     executor;
+    executorConfig;
+    executorConfigRevision;
+    rejectedExecutorConfigRevision;
     ws;
     isRunning = false;
     reconnectTimeout;
@@ -54,13 +58,15 @@ class LocalAgentClient {
             heartbeatIntervalMs: config.heartbeatIntervalMs || 10000,
             pollIntervalMs: config.pollIntervalMs || 3000
         };
-        this.executor = new task_executor_1.TaskExecutor({
+        this.executorConfig = {
             allowedWorkspaces: config.allowedWorkspaces,
             projects: config.projects,
             projectRegistry: config.projectRegistry,
             projectsConfigFile: config.projectsConfigFile,
             allowRawShell: config.allowRawShell
-        });
+        };
+        this.executor = new task_executor_1.TaskExecutor(this.executorConfig);
+        this.executorConfigRevision = this.computeExecutorConfigRevision();
     }
     start() {
         this.isRunning = true;
@@ -79,6 +85,57 @@ class LocalAgentClient {
             this.ws = undefined;
         }
     }
+    /**
+     * Returns a content revision for the only executor configuration source that
+     * can legitimately change while this long-lived process is running.
+     *
+     * Explicit in-memory ProjectRegistry ownership is intentionally excluded: its
+     * caller owns mutation/lifecycle and replacing it behind that caller's back
+     * would violate the object boundary.
+     */
+    computeExecutorConfigRevision() {
+        if (this.executorConfig.projectRegistry || !this.executorConfig.projectsConfigFile) {
+            return undefined;
+        }
+        try {
+            const raw = fs.readFileSync(this.executorConfig.projectsConfigFile);
+            return crypto.createHash('sha256').update(raw).digest('hex');
+        }
+        catch {
+            // Missing/unreadable transient writes keep the last good executor. The
+            // next readable file will produce a revision and be considered normally.
+            return undefined;
+        }
+    }
+    /**
+     * Hot-refresh the project-backed TaskExecutor only at an idle boundary.
+     *
+     * This is the vNext equivalent of upstream daemon config-revision handling:
+     * changed configuration becomes live without a process restart, but active
+     * work is never interrupted. Invalid/partial writes fail open to the last
+     * known-good executor and the same rejected bytes are not retried every poll.
+     */
+    refreshExecutorConfigIfIdle() {
+        if (this.activeTasks.size > 0)
+            return false;
+        const nextRevision = this.computeExecutorConfigRevision();
+        if (!nextRevision || nextRevision === this.executorConfigRevision || nextRevision === this.rejectedExecutorConfigRevision) {
+            return false;
+        }
+        try {
+            const nextExecutor = new task_executor_1.TaskExecutor(this.executorConfig);
+            this.executor = nextExecutor;
+            this.executorConfigRevision = nextRevision;
+            this.rejectedExecutorConfigRevision = undefined;
+            console.log('[AGENT] Reloaded changed local project configuration without restarting the agent.');
+            return true;
+        }
+        catch (err) {
+            this.rejectedExecutorConfigRevision = nextRevision;
+            console.warn(`[AGENT] Ignoring invalid changed project configuration; keeping last good executor: ${err?.message || err}`);
+            return false;
+        }
+    }
     connect() {
         if (!this.isRunning)
             return;
@@ -87,6 +144,7 @@ class LocalAgentClient {
         this.ws = new WSClass(this.config.gatewayUrl);
         this.ws.on('open', () => {
             this.reconnectAttempts = 0;
+            this.refreshExecutorConfigIfIdle();
             this.registerWithGateway(probe);
             this.startHeartbeat();
             this.startPollLoop(probe.capabilities);
@@ -154,6 +212,7 @@ class LocalAgentClient {
         if (this.pollTimer)
             clearInterval(this.pollTimer);
         this.pollTimer = setInterval(() => {
+            this.refreshExecutorConfigIfIdle();
             this.send({
                 type: 'TASK_CLAIM_POLL',
                 messageId: crypto.randomUUID(),
@@ -166,6 +225,10 @@ class LocalAgentClient {
     handleGatewayMessage(msg) {
         if (msg.type === 'TASK_ASSIGNED') {
             const task = msg.task;
+            if (task.targetDeviceId && task.targetDeviceId !== this.config.deviceId) {
+                console.warn(`[AGENT] Task '${task.taskId}' was targeted to '${task.targetDeviceId}', but this agent is '${this.config.deviceId}'. Ignoring misrouted task.`);
+                return;
+            }
             this.activeTasks.set(task.taskId, task);
             // Send ACK
             this.send({
@@ -236,6 +299,7 @@ class LocalAgentClient {
         }
         finally {
             this.activeTasks.delete(task.taskId);
+            this.refreshExecutorConfigIfIdle();
         }
     }
 }

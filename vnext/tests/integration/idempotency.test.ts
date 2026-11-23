@@ -26,7 +26,8 @@ export async function runIdempotencyIntegrationTests(): Promise<{ passed: number
         backend: 'local',
         capability: 'local:read_file',
         payload: { file: 'test.txt' },
-        clientRequestId
+        clientRequestId,
+        targetDeviceId: 'mock-device'
       },
       ['admin'],
       'client-1'
@@ -35,13 +36,14 @@ export async function runIdempotencyIntegrationTests(): Promise<{ passed: number
     assert.strictEqual(res1.isReplay, false);
     passed++;
 
-    // 2. Second submission with SAME clientRequestId
+    // 2. Second submission with SAME clientRequestId and same targetDeviceId
     const res2 = await server.taskRouter.routeTaskSubmit(
       {
         backend: 'local',
         capability: 'local:read_file',
         payload: { file: 'test.txt' },
-        clientRequestId
+        clientRequestId,
+        targetDeviceId: 'mock-device'
       },
       ['admin'],
       'client-1'
@@ -51,7 +53,27 @@ export async function runIdempotencyIntegrationTests(): Promise<{ passed: number
     assert.strictEqual(res2.taskId, res1.taskId, 'Should return identical taskId');
     passed++;
 
-    // 3. Verify total tasks count in TaskStore is exactly 1 (no duplicate task created)
+    // 3. Third submission with SAME clientRequestId but DIFFERENT targetDeviceId throws IDEMPOTENCY_CONFLICT
+    let conflictThrown = false;
+    try {
+      await server.taskRouter.routeTaskSubmit(
+        {
+          backend: 'local',
+          capability: 'local:read_file',
+          payload: { file: 'test.txt' },
+          clientRequestId,
+          targetDeviceId: 'different-device'
+        },
+        ['admin'],
+        'client-1'
+      );
+    } catch (err: any) {
+      if (err.message?.includes('IDEMPOTENCY_CONFLICT')) conflictThrown = true;
+    }
+    assert.strictEqual(conflictThrown, true, 'Idempotency key reuse across different targetDeviceId must throw IDEMPOTENCY_CONFLICT');
+    passed++;
+
+    // 4. Verify total tasks count in TaskStore is exactly 1 (no duplicate task created)
     const allTasks = server.taskStore.listTasks();
     assert.strictEqual(allTasks.length, 1, 'Only one durable task should be stored');
     passed++;

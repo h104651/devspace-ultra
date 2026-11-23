@@ -22,7 +22,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
         retryPolicyJson TEXT NOT NULL, leaseJson TEXT, resultJson TEXT, errorJson TEXT,
         artifactsJson TEXT NOT NULL, logsJson TEXT NOT NULL, metadataJson TEXT,
         startedAt INTEGER, completedAt INTEGER, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-        attemptsJson TEXT NOT NULL DEFAULT '[]', activeAttemptId TEXT, externalRunJson TEXT
+        attemptsJson TEXT NOT NULL DEFAULT '[]', activeAttemptId TEXT, externalRunJson TEXT, targetDeviceId TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_tasks_idemp ON tasks(idempotencyKey);
@@ -39,7 +39,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       CREATE TABLE IF NOT EXISTS devices (
         deviceId TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, status TEXT NOT NULL,
         capabilitiesJson TEXT NOT NULL, registeredAt INTEGER NOT NULL, lastConnectedAt INTEGER,
-        lastHeartbeatAt INTEGER, revokedAt INTEGER, revocationReason TEXT, tokenHash TEXT NOT NULL, ip TEXT
+        lastHeartbeatAt INTEGER, revokedAt INTEGER, revocationReason TEXT, tokenHash TEXT NOT NULL, ip TEXT,
+        activeTokenId TEXT
       );
       CREATE TABLE IF NOT EXISTS revoked_tokens (tokenId TEXT PRIMARY KEY, revokedAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS artifacts (
@@ -79,6 +80,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     try { this.sql.exec("ALTER TABLE tasks ADD COLUMN attemptsJson TEXT NOT NULL DEFAULT '[]'"); } catch {}
     try { this.sql.exec('ALTER TABLE tasks ADD COLUMN activeAttemptId TEXT'); } catch {}
     try { this.sql.exec('ALTER TABLE tasks ADD COLUMN externalRunJson TEXT'); } catch {}
+    try { this.sql.exec('ALTER TABLE tasks ADD COLUMN targetDeviceId TEXT'); } catch {}
+    try { this.sql.exec('ALTER TABLE devices ADD COLUMN activeTokenId TEXT'); } catch {}
   }
 
   private getFirstRow(query: string, ...params: any[]): any {
@@ -108,8 +111,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       `INSERT OR REPLACE INTO tasks (
         taskId, taskKey, idempotencyKey, clientRequestId, backend, capability, requiredScope, status, priority,
         payloadJson, retryPolicyJson, leaseJson, resultJson, errorJson, artifactsJson, logsJson, metadataJson,
-        startedAt, completedAt, createdAt, updatedAt, attemptsJson, activeAttemptId, externalRunJson
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        startedAt, completedAt, createdAt, updatedAt, attemptsJson, activeAttemptId, externalRunJson, targetDeviceId
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       task.taskId, task.taskKey || null, task.idempotencyKey || null, task.clientRequestId || null,
       task.backend, task.capability, task.requiredScope, task.status, task.priority,
       JSON.stringify(task.payload), JSON.stringify(task.retryPolicy), task.lease ? JSON.stringify(task.lease) : null,
@@ -118,7 +121,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       JSON.stringify(task.artifacts || []), JSON.stringify(task.logs || []),
       task.metadata ? JSON.stringify(task.metadata) : null, task.startedAt || null, task.completedAt || null,
       task.createdAt, task.updatedAt, JSON.stringify(task.attempts || []), task.activeAttemptId || null,
-      task.externalRun ? JSON.stringify(task.externalRun) : null
+      task.externalRun ? JSON.stringify(task.externalRun) : null,
+      task.targetDeviceId || null
     );
   }
 
@@ -131,7 +135,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     ).toArray().map(r => this.rowToTask(r));
   }
 
-  async listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number }): Promise<DurableTask[]> {
+  async listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number; offset?: number }): Promise<DurableTask[]> {
     // The no-filter call is the Durable Object cold-start working-set hydration path.
     // Historical terminal rows are loaded lazily by primary key instead of on every eviction/restart.
     if (!filter) return this.listActiveTasks();
@@ -142,13 +146,29 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     if (filter.backend) { query += ' AND backend = ?'; params.push(filter.backend); }
     if (filter.capability) { query += ' AND capability = ?'; params.push(filter.capability); }
     query += ' ORDER BY priority DESC, createdAt DESC';
-    if (filter.limit) { query += ' LIMIT ?'; params.push(filter.limit); }
+    if (filter.limit !== undefined) {
+      query += ' LIMIT ?';
+      params.push(filter.limit);
+      if (filter.offset !== undefined) {
+        query += ' OFFSET ?';
+        params.push(filter.offset);
+      }
+    }
     return this.sql.exec(query, ...params).toArray().map(r => this.rowToTask(r));
   }
 
   async deleteTask(taskId: string): Promise<boolean> { this.sql.exec('DELETE FROM tasks WHERE taskId = ?', taskId); return true; }
 
   private rowToTask(row: any): DurableTask {
+    let externalRun: any = undefined;
+    if (row.externalRunJson) {
+      try {
+        externalRun = JSON.parse(row.externalRunJson);
+      } catch (err) {
+        console.error(`Failed to parse externalRunJson for task ${row.taskId}:`, err);
+      }
+    }
+
     return {
       taskId: row.taskId, taskKey: row.taskKey || undefined, idempotencyKey: row.idempotencyKey || undefined,
       clientRequestId: row.clientRequestId || undefined, backend: row.backend, capability: row.capability,
@@ -160,7 +180,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       artifacts: JSON.parse(row.artifactsJson || '[]'), logs: JSON.parse(row.logsJson || '[]'),
       metadata: row.metadataJson ? JSON.parse(row.metadataJson) : undefined,
       attempts: JSON.parse(row.attemptsJson || '[]'), activeAttemptId: row.activeAttemptId || undefined,
-      externalRun: row.externalRunJson ? JSON.parse(row.externalRunJson) : undefined,
+      externalRun, targetDeviceId: row.targetDeviceId || undefined,
       startedAt: row.startedAt || undefined, completedAt: row.completedAt || undefined,
       createdAt: row.createdAt, updatedAt: row.updatedAt
     } as DurableTask;
@@ -190,13 +210,13 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     return row ? this.rowToDevice(row) : undefined;
   }
   async saveDevice(device: DeviceRecord): Promise<void> {
-    this.sql.exec(`INSERT OR REPLACE INTO devices (deviceId, name, platform, status, capabilitiesJson, registeredAt, lastConnectedAt, lastHeartbeatAt, revokedAt, revocationReason, tokenHash, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    this.sql.exec(`INSERT OR REPLACE INTO devices (deviceId, name, platform, status, capabilitiesJson, registeredAt, lastConnectedAt, lastHeartbeatAt, revokedAt, revocationReason, tokenHash, ip, activeTokenId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       device.deviceId, device.name, device.platform, device.status, JSON.stringify(device.capabilities), device.registeredAt,
-      device.lastConnectedAt || null, device.lastHeartbeatAt || null, device.revokedAt || null, device.revocationReason || null, device.tokenHash, device.ip || null);
+      device.lastConnectedAt || null, device.lastHeartbeatAt || null, device.revokedAt || null, device.revocationReason || null, device.tokenHash, device.ip || null, device.activeTokenId || null);
   }
   async listDevices(): Promise<DeviceRecord[]> { return this.sql.exec('SELECT * FROM devices').toArray().map(r => this.rowToDevice(r)); }
   private rowToDevice(r: any): DeviceRecord {
-    return { deviceId: r.deviceId, name: r.name, platform: r.platform, status: r.status, capabilities: JSON.parse(r.capabilitiesJson), registeredAt: r.registeredAt, lastConnectedAt: r.lastConnectedAt || undefined, lastHeartbeatAt: r.lastHeartbeatAt || undefined, revokedAt: r.revokedAt || undefined, revocationReason: r.revocationReason || undefined, tokenHash: r.tokenHash, ip: r.ip || undefined };
+    return { deviceId: r.deviceId, name: r.name, platform: r.platform, status: r.status, capabilities: JSON.parse(r.capabilitiesJson), registeredAt: r.registeredAt, lastConnectedAt: r.lastConnectedAt || undefined, lastHeartbeatAt: r.lastHeartbeatAt || undefined, revokedAt: r.revokedAt || undefined, revocationReason: r.revocationReason || undefined, tokenHash: r.tokenHash, ip: r.ip || undefined, activeTokenId: r.activeTokenId || undefined };
   }
 
   async isTokenRevoked(tokenId: string): Promise<boolean> { return !!this.getFirstRow('SELECT tokenId FROM revoked_tokens WHERE tokenId = ?', tokenId); }

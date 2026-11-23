@@ -4,6 +4,7 @@ export const REMOTE_TASK_SUBMIT_SCHEMA = {
     backend: { type: 'string', enum: ['kaggle', 'local', 'browser', 'swarm'], description: 'Target execution backend' },
     capability: { type: 'string', description: 'Capability name, e.g. kaggle:run, local:git_status, local:run_tests, swarm:dispatch' },
     payload: { type: 'object', description: 'Task specific payload dictionary' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID for local execution' },
     priority: { type: 'number', description: 'Task priority (higher runs first)' },
     clientRequestId: { type: 'string', description: 'Idempotency client request ID' }
   },
@@ -450,7 +451,14 @@ export const CHAT_SWARM_RUNTIME_STATUS_SCHEMA = { type: 'object', properties: {}
 export const CHAT_SWARM_RUNTIME_SCALE_SCHEMA = { type: 'object', properties: { workerCount: { type: 'number', minimum: 0, maximum: 32 } }, required: ['workerCount'], additionalProperties: false };
 export const CHAT_SWARM_RUNTIME_RECOVER_SCHEMA = { type: 'object', properties: { workerNumber: { type: 'number' } }, additionalProperties: false };
 
-export const DEVICE_STATUS_SCHEMA = { type: 'object', properties: {}, additionalProperties: false };
+export const DEVICE_STATUS_SCHEMA = {
+  type: 'object',
+  properties: {
+    deviceId: { type: 'string', description: 'Optional specific device ID to filter by' },
+    targetDeviceId: { type: 'string', description: 'Optional specific device ID to filter by' }
+  },
+  additionalProperties: false
+};
 export const KILL_SWITCH_TRIGGER_SCHEMA = {
   type: 'object',
   properties: {
@@ -466,6 +474,7 @@ export const KILL_SWITCH_TRIGGER_SCHEMA = {
 export const LOCAL_PROJECT_LIST_SCHEMA = {
   type: 'object',
   properties: {
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -476,6 +485,7 @@ export const LOCAL_PROJECT_STATUS_SCHEMA = {
   type: 'object',
   properties: {
     projectId: { type: 'string', description: 'Target registered project identifier (e.g. "astor-tuneup", "devspace-ultra")' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -489,6 +499,7 @@ export const LOCAL_READ_FILE_SCHEMA = {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     relativePath: { type: 'string', description: 'Relative path within the target project' },
     limit: { type: 'number', description: 'Maximum character limit to read' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -502,6 +513,7 @@ export const LOCAL_WRITE_FILE_SCHEMA = {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     relativePath: { type: 'string', description: 'Relative path within the target project' },
     content: { type: 'string', description: 'Content to write to the file' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -530,6 +542,7 @@ export const LOCAL_PATCH_FILE_SCHEMA = {
       },
       description: 'Ordered list of deterministic text replacement operations'
     },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -543,6 +556,7 @@ export const LOCAL_LIST_DIRECTORY_SCHEMA = {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     relativePath: { type: 'string', description: 'Relative path of directory inside workspace project to list', default: '.' },
     maxEntries: { type: 'number', description: 'Maximum number of directory entries to return (default 100, max 1000)', default: 100 },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -560,6 +574,7 @@ export const LOCAL_FIND_FILES_SCHEMA = {
     maxDepth: { type: 'number', description: 'Optional maximum subdirectory search depth' },
     maxResults: { type: 'number', description: 'Maximum search results to return (default 100, max 500)', default: 100 },
     type: { type: 'string', enum: ['file', 'directory', 'all'], description: 'Filter entries by type', default: 'all' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -578,6 +593,7 @@ export const LOCAL_SEARCH_TEXT_SCHEMA = {
     recursive: { type: 'boolean', description: 'Whether to search recursively', default: true },
     maxDepth: { type: 'number', description: 'Optional maximum subdirectory search depth (default 15)', default: 15 },
     maxResults: { type: 'number', description: 'Maximum matching lines to return (default 100, max 500)', default: 100 },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -591,6 +607,7 @@ export const LOCAL_FIND_REPOSITORIES_SCHEMA = {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     relativePath: { type: 'string', description: 'Optional starting relative sub-path in workspace', default: '.' },
     maxDepth: { type: 'number', description: 'Maximum search depth for repository discovery (default 10)', default: 10 },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -603,6 +620,7 @@ export const LOCAL_CREATE_DIRECTORY_SCHEMA = {
   properties: {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     relativePath: { type: 'string', description: 'Relative path of directory to create inside workspace project' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -615,6 +633,7 @@ export const LOCAL_GIT_STATUS_SCHEMA = {
   properties: {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     repoRelativePath: { type: 'string', description: 'Optional relative path of subproject Git repository within the workspace' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' },
     waitMs: { type: 'number', description: 'Optional maximum milliseconds to wait for direct execution (default 8000, max 15000)' }
   },
@@ -628,6 +647,7 @@ export const LOCAL_RUN_TESTS_SCHEMA = {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     runnerId: { type: 'string', description: 'Configured test runner ID or standard runner (npm, pytest, flutter)', default: 'npm' },
     workingRelativePath: { type: 'string', description: 'Optional subproject working directory relative to workspace root', default: '.' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' }
   },
   required: ['projectId'],
@@ -640,6 +660,7 @@ export const LOCAL_BUILD_PROJECT_SCHEMA = {
     projectId: { type: 'string', description: 'Target registered project identifier' },
     commandId: { type: 'string', description: 'Configured build command ID or standard command (npm, flutter)', default: 'npm' },
     workingRelativePath: { type: 'string', description: 'Optional subproject working directory relative to workspace root', default: '.' },
+    targetDeviceId: { type: 'string', description: 'Explicit target device ID' },
     clientRequestId: { type: 'string' }
   },
   required: ['projectId'],

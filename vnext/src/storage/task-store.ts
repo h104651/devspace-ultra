@@ -5,6 +5,8 @@ import {
   CreateTaskOptions,
   DurableTask,
   TaskStatus,
+  ACTIVE_TASK_STATUSES,
+  TERMINAL_TASK_STATUSES,
   TaskArtifactSummary,
   TaskAttempt,
   TaskAttemptStatus
@@ -12,7 +14,6 @@ import {
 import { ScopeChecker } from '../security/scope-checker';
 import { IStorageAdapter } from './storage-adapter.interface';
 
-const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['succeeded', 'failed', 'cancelled', 'stale']);
 const ACTIVE_ATTEMPT_STATUSES = new Set<TaskAttemptStatus>(['claimed', 'acknowledged', 'running']);
 const TASK_LOG_MAX_LINES = 2000;
 const TASK_LOG_MAX_ENTRY_BYTES = 4096;
@@ -247,6 +248,7 @@ export class TaskStore {
       attempts: [],
       artifacts: [],
       logs: [],
+      targetDeviceId: options.targetDeviceId ? options.targetDeviceId.trim() : undefined,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       metadata: options.metadata
@@ -348,7 +350,14 @@ export class TaskStore {
     this.recoverStaleTasks();
 
     const eligibleTasks = Array.from(this.tasks.values())
-      .filter(t => t.status === 'queued' && supportedCapabilities.includes(t.capability))
+      .filter(t => {
+        if (t.status !== 'queued') return false;
+        if (!supportedCapabilities.includes(t.capability)) return false;
+        if (t.backend === 'local') {
+          if (!t.targetDeviceId || t.targetDeviceId !== deviceId) return false;
+        }
+        return true;
+      })
       .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
 
     if (eligibleTasks.length === 0) return undefined;
@@ -358,6 +367,7 @@ export class TaskStore {
   public claimTaskById(taskId: string, deviceId: string, leaseDurationMs?: number): DurableTask | undefined {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'queued') return undefined;
+    if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId)) return undefined;
 
     const now = Date.now();
     const attempt = this.createAttempt(task, deviceId, now);
@@ -374,6 +384,81 @@ export class TaskStore {
 
     this.saveTask(task);
     return task;
+  }
+
+  public migrateLegacyUnassignedTasks(options?: { trustedLegacyDeviceId?: string } | string[]): { migrated: number; quarantined: number; failedAmbiguous: number } {
+    let migrated = 0;
+    let quarantined = 0;
+    let failedAmbiguous = 0;
+
+    let trustedLegacyDeviceId: string | undefined = undefined;
+    if (options) {
+      if (Array.isArray(options)) {
+        // If an array was passed, do NOT assume knownDeviceIds[0] is the owner unless trusted
+        // Only accept if exactly one device is passed and it was explicitly designated
+      } else if (typeof options === 'object') {
+        trustedLegacyDeviceId = options.trustedLegacyDeviceId;
+      }
+    }
+
+    for (const task of this.tasks.values()) {
+      if (task.backend === 'local' && !task.targetDeviceId) {
+        // 1. Verifiable historical evidence: Lease or Attempt claimant
+        const priorClaimant = task.lease?.claimedBy || (task.attempts && [...task.attempts].reverse().find(a => a.claimedBy)?.claimedBy);
+        if (priorClaimant) {
+          task.targetDeviceId = priorClaimant;
+          this.saveTask(task);
+          migrated++;
+          continue;
+        }
+
+        // 2. Explicit trusted legacy device ID provided by admin / configuration
+        if (trustedLegacyDeviceId) {
+          task.targetDeviceId = trustedLegacyDeviceId;
+          this.saveTask(task);
+          migrated++;
+          continue;
+        }
+
+        // 3. Unproven ownership: MUST remain in unclaimable quarantine state in 'queued'
+        // DO NOT auto-bind to any device simply because it connected first or was the sole registered device.
+        // DO NOT mark as failed unconditionally.
+        // Because claimTask() and claimTaskById() strictly require task.targetDeviceId === deviceId,
+        // this task can NEVER be claimed by any agent until explicitly assigned.
+        if (ACTIVE_TASK_STATUSES.has(task.status)) {
+          quarantined++;
+        }
+      }
+    }
+    return { migrated, quarantined, failedAmbiguous };
+  }
+
+  public assignQuarantinedTasks(targetDeviceId: string, taskIds: string[]): { assigned: number; taskIds: string[] } {
+    let assigned = 0;
+    const assignedTaskIds: string[] = [];
+    if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+      return { assigned: 0, taskIds: [] };
+    }
+    const targetSet = new Set(taskIds);
+    const now = Date.now();
+
+    for (const task of this.tasks.values()) {
+      // Must be local backend, unassigned, active (non-terminal), and explicitly in taskIds
+      if (task.backend === 'local' && !task.targetDeviceId && ACTIVE_TASK_STATUSES.has(task.status)) {
+        if (!targetSet.has(task.taskId)) {
+          continue;
+        }
+        // Guard: Cannot reassign a task that currently has an active unexpired lease held by a different claimant
+        if (task.lease && task.lease.leaseExpiresAt > now && task.lease.claimedBy && task.lease.claimedBy !== targetDeviceId) {
+          continue;
+        }
+        task.targetDeviceId = targetDeviceId;
+        this.saveTask(task);
+        assigned++;
+        assignedTaskIds.push(task.taskId);
+      }
+    }
+    return { assigned, taskIds: assignedTaskIds };
   }
 
   public acknowledgeTask(taskId: string, deviceId: string): boolean {

@@ -81,12 +81,12 @@ class ConnectionManager {
                 return;
             }
             const authoritativeDeviceId = auth.payload.subjectId;
-            if (this.killSwitch.isDeviceRevoked(authoritativeDeviceId)) {
+            if (this.killSwitch.isDeviceRevoked(authoritativeDeviceId) || this.authManager.getDevice(authoritativeDeviceId)?.status === 'revoked') {
                 socket.send(JSON.stringify({
                     type: 'ERROR',
                     messageId: msg.messageId,
                     timestamp: Date.now(),
-                    error: 'DEVICE_REVOKED: Device is revoked by Kill Switch'
+                    error: 'DEVICE_REVOKED: Device is revoked'
                 }));
                 socket.close();
                 return;
@@ -113,7 +113,10 @@ class ConnectionManager {
             };
             this.agents.set(authoritativeDeviceId, agent);
             this.sockets.set(socket, agent);
+            this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, msg.platform || 'windows');
             this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online', ip);
+            // NOTE: Connecting does NOT grant ownership of unassigned legacy tasks.
+            // Tasks without verifiable claimant remain safely quarantined in queued state.
             this.auditLogger.log({
                 actor: authoritativeDeviceId,
                 actorType: 'device',
@@ -142,6 +145,18 @@ class ConnectionManager {
         const agent = this.agents.get(authenticatedDeviceId);
         if (!agent)
             return;
+        if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
+            socket.send(JSON.stringify({
+                type: 'ERROR',
+                messageId: msg.messageId,
+                timestamp: Date.now(),
+                error: 'DEVICE_REVOKED: Device is revoked'
+            }));
+            socket.close();
+            this.agents.delete(authenticatedDeviceId);
+            this.sockets.delete(socket);
+            return;
+        }
         if (msg.type === 'AGENT_HEARTBEAT') {
             agent.lastHeartbeatAt = Date.now();
             this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);
@@ -276,6 +291,22 @@ class ConnectionManager {
     }
     getAgent(deviceId) {
         return this.agents.get(deviceId);
+    }
+    disconnectDevice(deviceId, reason = 'Device revoked') {
+        const agent = this.agents.get(deviceId);
+        if (agent) {
+            try {
+                agent.socket.send(JSON.stringify({
+                    type: 'ERROR',
+                    timestamp: Date.now(),
+                    error: `DEVICE_REVOKED: ${reason}`
+                }));
+                agent.socket.close(1008, reason);
+            }
+            catch { }
+            this.agents.delete(deviceId);
+            this.sockets.delete(agent.socket);
+        }
     }
     sendToAgent(deviceId, message) {
         const agent = this.agents.get(deviceId);

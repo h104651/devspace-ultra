@@ -33,10 +33,31 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AuthManager = void 0;
+exports.AuthManager = exports.ALLOWED_DEVICE_SCOPES = void 0;
 const crypto = __importStar(require("crypto"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+exports.ALLOWED_DEVICE_SCOPES = new Set([
+    'device:connect',
+    'local:read',
+    'local:write',
+    'local:test',
+    'local:exec',
+    'local:list_projects',
+    'local:project_status',
+    'local:read_file',
+    'local:write_file',
+    'local:patch_file',
+    'local:list_directory',
+    'local:find_files',
+    'local:search_text',
+    'local:find_repositories',
+    'local:create_directory',
+    'local:git_status',
+    'local:run_tests',
+    'local:build_project',
+    'artifacts:read'
+]);
 class AuthManager {
     masterSecret;
     clients = new Map();
@@ -114,20 +135,26 @@ class AuthManager {
             const payload = JSON.parse(Buffer.from(payloadBase64, 'base64url').toString('utf-8'));
             if (!payload.tokenId || !payload.subjectId || !Array.isArray(payload.scopes))
                 return { valid: false, error: 'CORRUPTED_PAYLOAD' };
-            if (this.revokedTokens.has(payload.tokenId))
-                return { valid: false, error: 'TOKEN_REVOKED' };
             if (Date.now() > payload.expiresAt)
                 return { valid: false, error: 'TOKEN_EXPIRED' };
             if (payload.type === 'device') {
                 const dev = this.devices.get(payload.subjectId);
                 if (dev?.status === 'revoked')
                     return { valid: false, error: 'DEVICE_REVOKED' };
+                if (dev && dev.activeTokenId && payload.tokenId !== dev.activeTokenId) {
+                    return { valid: false, error: 'TOKEN_SUPERSEDED: Token is no longer the active token for this device' };
+                }
+                if (dev && dev.tokenHash && this.hashToken(rawToken) !== dev.tokenHash) {
+                    return { valid: false, error: 'TOKEN_SUPERSEDED: Token hash mismatch' };
+                }
             }
             if (payload.type === 'client') {
                 const client = this.clients.get(payload.subjectId);
                 if (client?.status === 'revoked')
                     return { valid: false, error: 'CLIENT_REVOKED' };
             }
+            if (this.revokedTokens.has(payload.tokenId))
+                return { valid: false, error: 'TOKEN_REVOKED' };
             return { valid: true, payload };
         }
         catch {
@@ -142,10 +169,69 @@ class AuthManager {
         this.save();
         return { clientId, token, record };
     }
-    registerDevice(name, platform = 'windows', capabilities = ['local:read', 'local:write', 'local:test']) {
-        const deviceId = `dev-${crypto.randomBytes(6).toString('hex')}`;
-        const { token } = this.generateToken(deviceId, 'device', ['device:connect', ...capabilities]);
-        const record = { deviceId, name, platform, status: 'offline', capabilities, registeredAt: Date.now(), tokenHash: this.hashToken(token) };
+    registerDevice(name, platform = 'windows', capabilities = ['local:read', 'artifacts:read'], customDeviceId, expiresInMs) {
+        // 1. Name validation
+        if (typeof name !== 'string' || !name.trim() || name.trim().length > 100 || /[\x00-\x1F\x7F]/.test(name)) {
+            throw new Error('INVALID_ARGUMENT: name must be a non-empty string between 1 and 100 characters without control characters');
+        }
+        const trimmedName = name.trim();
+        // 2. Platform validation
+        const validPlatforms = ['windows', 'linux', 'darwin', 'cloud'];
+        if (!validPlatforms.includes(platform)) {
+            throw new Error(`INVALID_ARGUMENT: platform '${platform}' is invalid. Allowed: ${validPlatforms.join(', ')}`);
+        }
+        // 3. Expiration validation (min 1 min, max 365 days, default 90 days)
+        let validExpiresInMs = 90 * 24 * 3600 * 1000;
+        if (expiresInMs !== undefined && expiresInMs !== null) {
+            if (typeof expiresInMs !== 'number' || !Number.isFinite(expiresInMs) || expiresInMs < 60000 || expiresInMs > 365 * 24 * 3600 * 1000) {
+                throw new Error('INVALID_ARGUMENT: expiresInMs must be an integer between 60000 (1 min) and 31536000000 (365 days)');
+            }
+            validExpiresInMs = Math.floor(expiresInMs);
+        }
+        // 4. Device ID validation
+        const deviceId = customDeviceId ? customDeviceId.trim().toLowerCase() : `dev-${crypto.randomBytes(6).toString('hex')}`;
+        if (deviceId.length < 3 || deviceId.length > 64 || !/^[a-z0-9-_.]+$/.test(deviceId)) {
+            throw new Error(`INVALID_DEVICE_ID: Device ID '${deviceId}' is invalid. Length must be 3-64 characters using letters, numbers, hyphens, dots, or underscores.`);
+        }
+        // 5. Capability & Scope Whitelist enforcement (default minimal read-only if omitted)
+        const effectiveCapabilities = (capabilities === undefined || capabilities === null)
+            ? ['local:read', 'artifacts:read']
+            : capabilities;
+        if (!Array.isArray(effectiveCapabilities)) {
+            throw new Error('INVALID_ARGUMENT: capabilities must be an array of strings');
+        }
+        for (const cap of effectiveCapabilities) {
+            if (typeof cap !== 'string' || !exports.ALLOWED_DEVICE_SCOPES.has(cap)) {
+                throw new Error(`INVALID_DEVICE_SCOPE: Scope '${cap}' is not allowed for device registration. Devices are restricted to local execution scopes.`);
+            }
+        }
+        // 6. Check existing device & revoke old token on re-registration
+        const existing = this.devices.get(deviceId);
+        if (existing) {
+            if (existing.status !== 'revoked') {
+                throw new Error(`DEVICE_ID_CONFLICT: Device with ID '${deviceId}' already exists and is active`);
+            }
+            // Re-registering a revoked device ID: permanently invalidate prior token ID!
+            if (existing.activeTokenId) {
+                this.revokedTokens.add(existing.activeTokenId);
+            }
+        }
+        const scopes = ['device:connect'];
+        for (const cap of effectiveCapabilities) {
+            if (!scopes.includes(cap))
+                scopes.push(cap);
+        }
+        const { token, payload } = this.generateToken(deviceId, 'device', scopes, validExpiresInMs);
+        const record = {
+            deviceId,
+            name: trimmedName,
+            platform,
+            status: 'offline',
+            capabilities: effectiveCapabilities,
+            registeredAt: Date.now(),
+            tokenHash: this.hashToken(token),
+            activeTokenId: payload.tokenId
+        };
         this.devices.set(deviceId, record);
         this.save();
         return { deviceId, token, record };
@@ -162,6 +248,7 @@ class AuthManager {
             lastConnectedAt: Date.now(),
             lastHeartbeatAt: Date.now(),
             tokenHash: existing?.tokenHash || this.hashToken(rawToken),
+            activeTokenId: existing?.activeTokenId,
             revokedAt: existing?.revokedAt,
             revocationReason: existing?.revocationReason,
             ip: existing?.ip
@@ -178,6 +265,9 @@ class AuthManager {
             dev.status = 'revoked';
             dev.revokedAt = Date.now();
             dev.revocationReason = reason;
+            if (dev.activeTokenId) {
+                this.revokedTokens.add(dev.activeTokenId);
+            }
             this.save();
         }
     }

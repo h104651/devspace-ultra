@@ -40,6 +40,7 @@ export interface DeviceRecord {
   lastHeartbeatAt?: number;
   registeredAt: number;
   tokenHash: string;
+  activeTokenId?: string;
   revokedAt?: number;
   revocationReason?: string;
   ip?: string;
@@ -52,5 +53,6 @@ export interface ClientRecord {
   status: 'active' | 'revoked';
   createdAt: number;
   tokenHash: string;
+  activeTokenId?: string;
   revokedAt?: number;
 }

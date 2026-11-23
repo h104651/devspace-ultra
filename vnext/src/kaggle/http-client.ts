@@ -223,12 +223,19 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
       const data = await res.json() as any;
       const files: Array<{ name: string; content?: string; sizeBytes?: number }> = [];
 
-      if (data.log) {
-        let logText = typeof data.log === 'string' ? data.log : '';
+      const rawLog = (data.log !== undefined && data.log !== null && data.log !== '') ? data.log : data.logNullable;
+      let logText: string | undefined = undefined;
+
+      if (rawLog !== undefined && rawLog !== null && rawLog !== '') {
+        logText = typeof rawLog === 'string' ? rawLog : '';
         try {
-          const parsedLog = typeof data.log === 'string' ? JSON.parse(data.log) : data.log;
+          const parsedLog = typeof rawLog === 'string' ? JSON.parse(rawLog) : rawLog;
           if (Array.isArray(parsedLog)) {
-            logText = parsedLog.map((item: any) => item.data || '').join('');
+            logText = parsedLog.map((item: any) => {
+              if (typeof item === 'string') return item;
+              if (item && typeof item === 'object') return item.data || item.text || '';
+              return '';
+            }).join('');
           }
         } catch {}
         files.push({
@@ -259,7 +266,7 @@ export class CloudflareKaggleHttpClient implements IKaggleClient {
         }
       }
 
-      return { success: true, files, log: typeof data.log === 'string' ? data.log : undefined };
+      return { success: true, files, log: logText };
     } catch (err: any) {
       return { success: false, files: [], error: err.message };
     }

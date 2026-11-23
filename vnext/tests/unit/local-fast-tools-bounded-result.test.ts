@@ -24,7 +24,7 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
       'local:read',
       'local:write',
       'local:git_status'
-    ]);
+    ], deviceId);
 
     const liveCapabilities = [
       'local:list_projects',

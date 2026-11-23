@@ -22,6 +22,7 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     kaggleMockMode: true,
     kagglePollIntervalMs: 50
   });
+  server.authManager.registerDevice('HTTP Test Device', 'windows', ['local:read', 'local:git_status'], 'http-test-dev');
 
   const makeMcpRequest = (path: string, body: any, token?: string, extraHeaders?: Record<string, string>): Promise<{ statusCode: number; body: any }> => {
     return new Promise((resolve, reject) => {

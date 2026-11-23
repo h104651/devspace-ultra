@@ -9,6 +9,21 @@ export type TaskStatus =
   | 'retrying'
   | 'stale';
 
+export const ACTIVE_TASK_STATUSES = new Set<TaskStatus>([
+  'queued',
+  'claimed',
+  'acknowledged',
+  'running',
+  'retrying'
+]);
+
+export const TERMINAL_TASK_STATUSES = new Set<TaskStatus>([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'stale'
+]);
+
 export type TaskBackend = 'kaggle' | 'local' | 'browser' | 'swarm';
 
 export interface TaskLease {
@@ -105,6 +120,7 @@ export interface DurableTask<TPayload = any, TResult = any> {
   artifacts: TaskArtifactSummary[];
   logs: string[];
   externalRun?: ExternalRunInfo;
+  targetDeviceId?: string;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;
@@ -124,5 +140,6 @@ export interface CreateTaskOptions<TPayload = any> {
   payload: TPayload;
   maxRetries?: number;
   leaseDurationMs?: number;
+  targetDeviceId?: string;
   metadata?: Record<string, any>;
 }

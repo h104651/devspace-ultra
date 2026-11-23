@@ -16,33 +16,32 @@ export class TaskRouter {
     private kaggleBackend: KaggleBackend,
     private swarmOrchestrator: SwarmOrchestrator,
     private killSwitch: KillSwitch,
-    private auditLogger: AuditLogger
+    private auditLogger: AuditLogger,
+    private connectionManager?: { getConnectedAgents(): Array<{ deviceId: string }> } | any,
+    private authManager?: any
   ) {}
+
+  public setConnectionManager(cm: any): void {
+    this.connectionManager = cm;
+  }
+
+  public setAuthManager(am: any): void {
+    this.authManager = am;
+  }
+
+  public getConnectionManager(): any {
+    return this.connectionManager;
+  }
+
+  public getAuthManager(): any {
+    return this.authManager;
+  }
 
   public async routeTaskSubmit<TPayload = any>(
     options: CreateTaskOptions<TPayload>,
     callerScopes: string[],
     actorId: string
   ): Promise<{ taskId: string; status: string; task: DurableTask<TPayload>; isReplay: boolean }> {
-    const idempKey = options.idempotencyKey || options.clientRequestId || options.taskKey;
-    if (idempKey) {
-      const cached = await this.idempotencyStore.getDurable(idempKey);
-      if (cached) return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
-    }
-
-    if (options.backend === 'local') {
-      if (!isLocalExecutableCapability(options.capability)) {
-        this.auditLogger.log({
-          actor: actorId,
-          actorType: 'client',
-          action: 'TASK_SUBMIT_DENIED',
-          result: 'DENY',
-          details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
-        });
-        throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
-      }
-    }
-
     const killCheck = this.killSwitch.isExecutionAllowed(options.backend);
     if (!killCheck.allowed) {
       this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { reason: killCheck.reason, capability: options.capability } });
@@ -76,6 +75,62 @@ export class TaskRouter {
         if (missingCapabilityScope) missingList.push(`'${requiredScope}'`);
         throw new Error(`AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and '${requiredScope}'. Missing: ${missingList.join(', ')}`);
       }
+
+      if (!isLocalExecutableCapability(options.capability)) {
+        this.auditLogger.log({
+          actor: actorId,
+          actorType: 'client',
+          action: 'TASK_SUBMIT_DENIED',
+          result: 'DENY',
+          details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
+        });
+        throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+      }
+
+      // Multi-device targeted routing enforcement
+      const connected = (this.connectionManager && typeof this.connectionManager.getConnectedAgents === 'function')
+        ? (this.connectionManager.getConnectedAgents() || [])
+        : [];
+      const distinctDevices: string[] = Array.from(new Set<string>(connected.map((a: any) => String(a.deviceId)).filter(Boolean)));
+      const registeredDevices: any[] = (this.authManager && typeof this.authManager.listDevices === 'function')
+        ? this.authManager.listDevices().filter((d: any) => d.status !== 'revoked')
+        : [];
+
+      const allKnownDevices = Array.from(new Set<string>([
+        ...registeredDevices.map((d: any) => String(d.deviceId)),
+        ...distinctDevices
+      ]));
+
+      if (!options.targetDeviceId) {
+        if (allKnownDevices.length > 1) {
+          this.auditLogger.log({
+            actor: actorId,
+            actorType: 'client',
+            action: 'TASK_SUBMIT_DENIED',
+            result: 'DENY',
+            details: { reason: 'AMBIGUOUS_DEVICE_TARGET', registeredDevices: registeredDevices.map((d: any) => d.deviceId), connectedDevices: distinctDevices, capability: options.capability }
+          });
+          throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local devices exist (${allKnownDevices.join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
+        } else if (allKnownDevices.length === 1) {
+          // Exactly 1 registered or connected device: auto-bind safely for backwards compatibility
+          options.targetDeviceId = allKnownDevices[0];
+        } else {
+          // 0 registered, 0 online, no targetDeviceId specified -> fail closed!
+          this.auditLogger.log({
+            actor: actorId,
+            actorType: 'client',
+            action: 'TASK_SUBMIT_DENIED',
+            result: 'DENY',
+            details: { reason: 'DEVICE_TARGET_REQUIRED', registeredDevices: [], connectedDevices: [], capability: options.capability }
+          });
+          throw new Error(`DEVICE_TARGET_REQUIRED: No local agents are registered or online. You must register a device or explicitly specify 'targetDeviceId' for local tasks.`);
+        }
+      } else {
+        if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
+          throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
+        }
+        options.targetDeviceId = options.targetDeviceId.trim();
+      }
     } else {
       if (!hasCapabilityScope && !hasGenericSubmitScope) {
         this.auditLogger.log({
@@ -91,6 +146,43 @@ export class TaskRouter {
           }
         });
         throw new Error(`AUTH_FORBIDDEN: Required scope '${requiredScope}' or 'tasks:submit' not granted`);
+      }
+    }
+
+    // Idempotency resolution: checked after authorization and parameter normalization
+    const idempKey = options.idempotencyKey || options.clientRequestId || options.taskKey;
+    if (idempKey) {
+      const cached = await this.idempotencyStore.getDurable(idempKey);
+      if (cached) {
+        const reqTarget = options.targetDeviceId?.trim() || undefined;
+        const cachedTarget = cached.targetDeviceId?.trim() || undefined;
+        if (reqTarget !== cachedTarget) {
+          this.auditLogger.log({
+            actor: actorId,
+            actorType: 'client',
+            action: 'TASK_SUBMIT_DENIED',
+            result: 'DENY',
+            details: {
+              reason: 'IDEMPOTENCY_CONFLICT',
+              idempotencyKey: idempKey,
+              cachedTargetDeviceId: cachedTarget,
+              requestedTargetDeviceId: reqTarget
+            }
+          });
+          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to targetDeviceId '${cachedTarget}', but request specified '${reqTarget}'.`);
+        }
+        if (options.backend && cached.backend && options.backend !== cached.backend) {
+          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to backend '${cached.backend}', but request specified '${options.backend}'.`);
+        }
+        if (options.capability && cached.capability && options.capability !== cached.capability) {
+          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to capability '${cached.capability}', but request specified '${options.capability}'.`);
+        }
+        if (options.payload !== undefined && cached.payload !== undefined) {
+          if (JSON.stringify(options.payload) !== JSON.stringify(cached.payload)) {
+            throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' payload mismatch.`);
+          }
+        }
+        return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
       }
     }
 

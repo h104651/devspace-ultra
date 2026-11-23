@@ -8,7 +8,7 @@ export interface IStorageAdapter {
   getTask(taskId: string): Promise<DurableTask | undefined>;
   getTaskSync?(taskId: string): DurableTask | undefined;
   saveTask(task: DurableTask): Promise<void>;
-  listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number }): Promise<DurableTask[]>;
+  listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number; offset?: number }): Promise<DurableTask[]>;
   deleteTask(taskId: string): Promise<boolean>;
 
   // Idempotency

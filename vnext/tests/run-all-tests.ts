@@ -22,6 +22,9 @@ import { runLocalProjectRoutingIntegrationTests } from './integration/local-proj
 import { runLocalWorkspaceDiscoveryIntegrationTests } from './integration/local-workspace-discovery.test';
 import { runSecurityTests } from './security/security.test';
 import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-security.test';
+import { runMultiDeviceRoutingTests } from './integration/multi-device-routing.test';
+import { runInventoryTasksUnitTests } from './unit/inventory-tasks.test';
+import { runWorkflowDeploymentGateTests } from './unit/workflow-deployment-gate.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
 import { runWorkerRoutingRecoveryTests } from './cloudflare/worker-routing-recovery.test';
 import { runRemoteTaskWaitProductionTests } from './cloudflare/remote-task-wait-production.test';
@@ -36,6 +39,7 @@ import { runMcp2026Tests } from './mcp/mcp-2026.test';
 import { runKaggleProjectTests } from './integration/kaggle-project.test';
 import { runKaggleWorkspaceTests } from './integration/kaggle-workspace.test';
 import { runKaggleDatasetFileTests } from './integration/kaggle-dataset-file.test';
+import { runKaggleDurableReconciliationTests } from './integration/kaggle-durable-reconciliation.test';
 
 async function main() {
   console.log('====================================================');
@@ -62,12 +66,14 @@ async function main() {
     { name: 'Integration: Remote MCP Transport (HTTP POST /mcp)', runner: runRemoteMcpHttpTests },
     { name: 'Integration: Agent Lifecycle & Durability', runner: runAgentLifecycleDurabilityTests },
     { name: 'Integration: Local Multi-Project Named Routing', runner: runLocalProjectRoutingIntegrationTests },
+    { name: 'Integration: Multi-Device Targeted Routing & Registration', runner: runMultiDeviceRoutingTests },
     { name: 'Integration: Local Workspace Discovery & Nested Operations', runner: runLocalWorkspaceDiscoveryIntegrationTests },
     { name: 'Integration: Kaggle Mock Backend', runner: runKaggleIntegrationTests },
     { name: 'Integration: Pre-Migration Kaggle Restart Recovery', runner: runKaggleLegacyRecoveryTests },
     { name: 'Integration: Kaggle Persistent Project Control v1', runner: runKaggleProjectTests },
     { name: 'Integration: Kaggle Large Project Workspace Mode', runner: runKaggleWorkspaceTests },
     { name: 'Integration: Kaggle Dataset File Direct Read', runner: runKaggleDatasetFileTests },
+    { name: 'Integration: Kaggle Durable Persistence & Cold-Start Reconcile', runner: runKaggleDurableReconciliationTests },
     { name: 'Integration: Chat Swarm & Wake Bridge', runner: runSwarmIntegrationTests },
     { name: 'Integration: Stale Task Recovery', runner: runStaleRecoveryIntegrationTests },
     { name: 'Integration: Idempotency & Replays', runner: runIdempotencyIntegrationTests },
@@ -82,7 +88,9 @@ async function main() {
     { name: 'Cloudflare: MCP OAuth Insufficient-Scope Step-Up', runner: runMcpInsufficientScopeTests },
     { name: 'Cloudflare: OAuth 2.1 & Protected Resource Metadata', runner: runOAuthTests },
     { name: 'Security: Zero Trust, Injections, Shell & Rate Limits', runner: runSecurityTests },
-    { name: 'Security: Bootstrap Token Security & Redaction', runner: runBootstrapTokenSecurityTests }
+    { name: 'Security: Bootstrap Token Security & Redaction', runner: runBootstrapTokenSecurityTests },
+    { name: 'Unit: Read-Only Task Inventory & Preflight Verification', runner: runInventoryTasksUnitTests },
+    { name: 'Unit: GitHub Actions Deployment Gate & Authorization', runner: runWorkflowDeploymentGateTests }
   ];
 
   for (const suite of suites) {
@@ -104,8 +112,12 @@ async function main() {
   console.log(`Total Tests Passed: ${totalPassed}`);
   console.log(`Total Tests Failed: ${totalFailed}`);
   console.log('====================================================');
-  if (totalFailed > 0) process.exit(1);
+  if (totalFailed > 0) {
+    process.exit(1);
+  }
   console.log('\x1b[32mAll test suites passed successfully!\x1b[0m\n');
+  // Allow pending handle closures (sockets/servers) to flush through libuv on Windows
+  await new Promise(resolve => setTimeout(resolve, 300));
   process.exit(0);
 }
 

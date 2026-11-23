@@ -142,13 +142,14 @@ export async function runSecurityTests(): Promise<{ passed: number; failed: numb
     passed++;
 
     // 6. Public /health Hardening & /admin/health Scope Authorization
-    const port = 49200 + Math.floor(Math.random() * 1000);
     const testServer = new GatewayServer({
-      port,
+      port: 0,
       storageDir: testDir,
       masterSecret: 'test-secret'
     });
     await testServer.start();
+    const addr = testServer.httpServer.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
 
     try {
       // Unauthenticated GET /health returns only { ok: true }
