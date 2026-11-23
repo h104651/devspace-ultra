@@ -21,6 +21,22 @@ export class TaskRouter {
     private authManager?: any
   ) {}
 
+  public setConnectionManager(cm: any): void {
+    this.connectionManager = cm;
+  }
+
+  public setAuthManager(am: any): void {
+    this.authManager = am;
+  }
+
+  public getConnectionManager(): any {
+    return this.connectionManager;
+  }
+
+  public getAuthManager(): any {
+    return this.authManager;
+  }
+
   public async routeTaskSubmit<TPayload = any>(
     options: CreateTaskOptions<TPayload>,
     callerScopes: string[],
@@ -80,11 +96,13 @@ export class TaskRouter {
         ? this.authManager.listDevices().filter((d: any) => d.status !== 'revoked')
         : [];
 
+      const allKnownDevices = Array.from(new Set<string>([
+        ...registeredDevices.map((d: any) => String(d.deviceId)),
+        ...distinctDevices
+      ]));
+
       if (!options.targetDeviceId) {
-        if (registeredDevices.length > 1 || distinctDevices.length > 1) {
-          const deviceList = registeredDevices.length > 1
-            ? registeredDevices.map((d: any) => d.deviceId).join(', ')
-            : distinctDevices.join(', ');
+        if (allKnownDevices.length > 1) {
           this.auditLogger.log({
             actor: actorId,
             actorType: 'client',
@@ -92,13 +110,20 @@ export class TaskRouter {
             result: 'DENY',
             details: { reason: 'AMBIGUOUS_DEVICE_TARGET', registeredDevices: registeredDevices.map((d: any) => d.deviceId), connectedDevices: distinctDevices, capability: options.capability }
           });
-          throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local devices exist (${deviceList}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
-        } else if (registeredDevices.length === 1) {
-          // Exactly 1 registered device: auto-bind safely for backwards compatibility
-          options.targetDeviceId = registeredDevices[0].deviceId;
-        } else if (distinctDevices.length === 1) {
-          // Exactly 1 connected device: auto-bind safely
-          options.targetDeviceId = distinctDevices[0];
+          throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local devices exist (${allKnownDevices.join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
+        } else if (allKnownDevices.length === 1) {
+          // Exactly 1 registered or connected device: auto-bind safely for backwards compatibility
+          options.targetDeviceId = allKnownDevices[0];
+        } else {
+          // 0 registered, 0 online, no targetDeviceId specified -> fail closed!
+          this.auditLogger.log({
+            actor: actorId,
+            actorType: 'client',
+            action: 'TASK_SUBMIT_DENIED',
+            result: 'DENY',
+            details: { reason: 'DEVICE_TARGET_REQUIRED', registeredDevices: [], connectedDevices: [], capability: options.capability }
+          });
+          throw new Error(`DEVICE_TARGET_REQUIRED: No local agents are registered or online. You must register a device or explicitly specify 'targetDeviceId' for local tasks.`);
         }
       } else {
         if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {

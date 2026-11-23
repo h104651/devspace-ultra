@@ -26,7 +26,16 @@ export interface McpCallerContext {
 }
 
 export class McpHandlers {
-  constructor(private gateway: GatewayServer) {}
+  constructor(private gateway: GatewayServer) {
+    if (this.gateway?.taskRouter) {
+      if (!this.gateway.taskRouter.getAuthManager?.() && (this.gateway as any).authManager) {
+        this.gateway.taskRouter.setAuthManager?.((this.gateway as any).authManager);
+      }
+      if (!this.gateway.taskRouter.getConnectionManager?.() && (this.gateway as any).connectionManager) {
+        this.gateway.taskRouter.setConnectionManager?.((this.gateway as any).connectionManager);
+      }
+    }
+  }
 
   private requireCaller(caller?: McpCallerContext): McpCallerContext {
     if (!caller) throw new Error('AUTH_CONTEXT_REQUIRED: authenticated caller context is required');

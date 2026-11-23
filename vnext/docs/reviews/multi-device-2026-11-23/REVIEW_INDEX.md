@@ -20,8 +20,8 @@
    - 完整五種裝置狀態路由矩陣（0註冊/0在線、1註冊/0在線、2註冊/0在線、1在線/2註冊、2在線/2註冊），杜絕模糊派工。
    - 強化 Idempotency Replay 防護：禁止未授權請求透過 Idempotency 繞過權限；完整比對 `targetDeviceId`、`backend`、`capability`、`payload` 參數衝突。
    - 舊任務遷移保證 Fail Closed，禁止歷史未綁定任務被錯誤裝置領取。
-3. **完成 3 次全套回歸測試與 Wrangler Dry Run**:
-   - 456 / 456 測試 PASS（0 失敗）。
+3. **完成全套回歸測試與 Wrangler Dry Run**:
+   - 457 / 457 測試 PASS（0 失敗）。
    - Wrangler 部署預檢 PASS。
 4. **交付 7 份審查技術文件**:
    - 保存在 `vnext/docs/reviews/multi-device-2026-11-23/`，供 ChatGPT 與審查工程師完整閱讀與評估。
@@ -56,19 +56,19 @@
 
 ## 四、審查文件索引 (Review Documents Index)
 
-1. [ROOT_CAUSE_AND_FIX.md](file:///C:/Users/testuser/DevSpace/devspace-ultra/vnext/docs/reviews/multi-device-2026-11-23/ROOT_CAUSE_AND_FIX.md): B7 失敗根因分析、重現方式、代碼修復與前後行為比對。
-2. [TEST_MATRIX.md](file:///C:/Users/testuser/DevSpace/devspace-ultra/vnext/docs/reviews/multi-device-2026-11-23/TEST_MATRIX.md): 456 項全套測試矩陣、連續 3 次 PASS 執行記錄、Wrangler 預檢結果。
-3. [SECURITY_AND_COMPATIBILITY.md](file:///C:/Users/testuser/DevSpace/devspace-ultra/vnext/docs/reviews/multi-device-2026-11-23/SECURITY_AND_COMPATIBILITY.md): 零信任資安架構、Token 限制、權限白名單、相容性與回歸分析。
-4. [DEPLOYMENT_AND_ROLLBACK.md](file:///C:/Users/testuser/DevSpace/devspace-ultra/vnext/docs/reviews/multi-device-2026-11-23/DEPLOYMENT_AND_ROLLBACK.md): Cloudflare 正式部署 SOP、驗收步驟、緊急回滾方案與不可逆資料保護。
-5. [CI_EVIDENCE.md](file:///C:/Users/testuser/DevSpace/devspace-ultra/vnext/docs/reviews/multi-device-2026-11-23/CI_EVIDENCE.md): 原始失敗 CI Run、修復後本機與遠端 CI 驗收證據。
-6. [OPEN_ISSUES.md](file:///C:/Users/testuser/DevSpace/devspace-ultra/vnext/docs/reviews/multi-device-2026-11-23/OPEN_ISSUES.md): 已解決與尚未解決項目、風險等級、Merge 與 Deploy 阻擋評估。
+1. [ROOT_CAUSE_AND_FIX.md](ROOT_CAUSE_AND_FIX.md): B7 失敗根因分析、P0/P1 安全收尾、代碼修復與前後行為比對。
+2. [TEST_MATRIX.md](TEST_MATRIX.md): 458+ 項全套測試矩陣、連續 3 次 PASS 執行記錄、Wrangler 預檢結果。
+3. [SECURITY_AND_COMPATIBILITY.md](SECURITY_AND_COMPATIBILITY.md): 零信任資安架構、Token 限制、權限白名單、快取標頭、相容性與回歸分析。
+4. [DEPLOYMENT_AND_ROLLBACK.md](DEPLOYMENT_AND_ROLLBACK.md): Cloudflare 正式部署 SOP、CLI 啟動規格、正式狀態差異分析、緊急回滾方案與不可逆資料保護。
+5. [CI_EVIDENCE.md](CI_EVIDENCE.md): 原始失敗 CI Run、修復後本機與遠端 CI 驗收證據。
+6. [OPEN_ISSUES.md](OPEN_ISSUES.md): 已解決與尚未解決項目、風險等級、Merge 與 Deploy 阻擋評估。
 
 ---
 
 ## 五、最終結論判定 (GO / NO-GO)
 
 - **程式碼修復與安全強化**: **GO** (100% 完成且經單元/整合驗證)
-- **本機 Windows ARM64 測試**: **GO** (456/456 PASS, 3 連續成功)
+- **本機 Windows ARM64 測試**: **GO** (457/457 PASS)
 - **Cloudflare 部署預檢 (Dry Run)**: **GO** (Exit code 0, 資源 Binding 完整)
 - **GitHub PR Merge 資格**: **GO** (代碼完整、Draft PR 就緒、審查文件齊全)
 - **正式環境部署資格 (Production Deploy)**: **CONDITIONAL GO** (等待 ChatGPT 人工完成 GitHub 審查，並由管理者簽發正式 Device Token 後方可執行)

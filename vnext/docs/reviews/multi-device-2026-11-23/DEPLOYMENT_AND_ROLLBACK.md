@@ -60,22 +60,30 @@ curl -X POST https://devspace-ultra-gateway.abdul-hsu.workers.dev/admin/devices 
   -H "X-Admin-Secret: <YOUR_ADMIN_SECRET>" \
   -d '{
     "name": "New Windows Workstation",
-    "platform": "win32",
+    "platform": "windows",
     "deviceId": "win11-arm64-workstation-2",
     "capabilities": ["local:read", "local:write", "local:test"]
   }'
 ```
+- 若請求省略 `capabilities`，系統將預設為最小唯讀範圍 `["local:read", "artifacts:read"]`，絕不自動給予 `local:write`、`local:exec` 或 Raw Shell 權限。
+- 回應標頭嚴格包含 `Cache-Control: no-store` 與 `Pragma: no-cache`，防止 Token 在代理伺服器或快取中洩漏。
 - 記錄回傳之一次性 `token`，妥善存入新電腦本機環境變數或啟動腳本。
 - 確認日誌中無明文 Token 殘留。
 
 ### 步驟 4：在新電腦啟動第二台 Local Agent
-在新 Windows 電腦上，以獨立的 Device ID 與 Token 啟動 Agent：
+在 `agent-cli.ts` 規格中，認證連線參數由環境變數讀取，專案設定檔透過 `--projects-config` 指定。請在新 Windows 電腦以 PowerShell 執行：
 ```powershell
-node dist/cli/agent-cli.js start `
-  --gateway wss://devspace-ultra-gateway.abdul-hsu.workers.dev/ws/agent `
-  --device-id win11-arm64-workstation-2 `
-  --token <NEW_DEVICE_TOKEN> `
-  --config C:\Users\testuser\DevSpace\agent-config\projects.json
+# 1. 切換至 vnext 目錄
+cd C:\Users\testuser\DevSpace\devspace-ultra\vnext
+
+# 2. 設定連線認證與安全變數
+$env:GATEWAY_URL = "wss://devspace-ultra-gateway.abdul-hsu.workers.dev/ws/agent"
+$env:AGENT_ID = "win11-arm64-workstation-2"
+$env:AGENT_TOKEN = "<NEW_DEVICE_TOKEN>"
+$env:ALLOW_RAW_SHELL = "false"
+
+# 3. 啟動 Outbound Local Agent
+node dist/cli/agent-cli.js start --projects-config "$HOME\DevSpace\agent-config\projects.json"
 ```
 
 ### 步驟 5：雙 Agent 同時在線驗收
@@ -84,6 +92,23 @@ node dist/cli/agent-cli.js start `
 - `win11-arm64-workstation` 狀態為 `online`。
 - `win11-arm64-workstation-2` 狀態為 `online`。
 - 分別提交各指定一台電腦的讀取任務，確認任務精準送達各自專案目錄，無跨電腦錯配。
+
+---
+
+## 四、特別調查報告：正式環境裝置狀態差異 (`totalRegistered: 0 / totalOnline: 1`)
+
+在 ChatGPT 先前執行的獨立審查中，觀察到正式 Cloudflare Gateway 上 `device_status` 回傳：
+`totalRegistered: 0, totalOnline: 1`。
+
+### 1. 根本原因深入分析
+- **歷史架構機制**：在本次 PR #23 之前，Gateway 並無 `/admin/devices` 動態註冊介面。舊電腦（`win11-arm64-workstation`）採用初始啟動模式，其 Agent Token 是由管理者直接使用 `MASTER_SECRET` 以 HMAC-SHA256 簽署產生的 Bootstrap Token。
+- **資料表水合差異**：舊版 Gateway 未在 Cloudflare DO SQLite 的 `devices` 表中寫入記錄，因此 `authManager.listDevices()` 回傳空陣列（`totalRegistered: 0`）。
+- **連線層驗證通過**：當舊電腦 Agent 建立 WebSocket 連線時，`AuthManager.validateToken` 使用 `MASTER_SECRET` 驗證其 HMAC 簽名成功，連線被 `ConnectionManager` 正常收錄並維持心跳，因此線上連線數為 1（`totalOnline: 1`）。
+- **向下相容防護**：`McpHandlers.handleDeviceStatus`（第 1316-1332 行）具備向前容錯機制，會主動掃描 `ConnectionManager` 中在線但未在 `devices` 表中列出的裝置，將其列入狀態報告（標註 `isRegistered: false`）。
+
+### 2. 本次升級對舊電腦的相容性保證
+- **Token 仍然有效**：PR #23 的 Token 驗證機制保留了對 `MASTER_SECRET` 簽名 Token 的完整驗證相容性，部署新版 Worker **不會**中斷舊電腦的連線或使其 Token 失效。
+- **補登建議（非強制）**：部署 PR #23 後，管理者亦可使用 `POST /admin/devices` 將舊電腦裝置 ID `win11-arm64-workstation` 正式登錄進 SQLite，屆時 `totalRegistered` 將正常計入該裝置。
 
 ---
 

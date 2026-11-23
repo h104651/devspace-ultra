@@ -27,21 +27,26 @@
 
 ---
 
-## 二、本次修復後本機驗收結果 (Local Verification)
+## 二、修復歷程與驗收結果 (Verification History)
 
+### 1. 中繼 GitHub Actions CI 驗證成功 (Commit: `8e40f54`)
+在修復 Task B7 與隔離測試後推播至 GitHub，GitHub Actions 執行結果：
+- **Workflow**: `CI` (Run ID: [45101220131](https://github.com/h104651/devspace-ultra/actions/runs/45101220131)) -> **SUCCESS**
+- **Workflow**: `vNext CI & Production Deploy` (Run ID: [45101220130](https://github.com/h104651/devspace-ultra/actions/runs/45101220130)) -> **SUCCESS**
+- **測試結果**: 456 Tests Passed / 0 Failed
+- **Wrangler Dry Run**: PASS (Exit code 0)
+
+### 2. 本次最終 P0 / P1 安全修正本機驗收 (Local Verification)
 - **執行環境**: Windows 11 (ARM64 Workstation)
 - **Node.js**: v24.18.0
 - **TypeScript 建置 (`npm run build`)**: PASS (Exit code 0)
-- **連續三次完整測試回歸**:
-  - Run 1: 456 Passed / 0 Failed (Exit code 0)
-  - Run 2: 456 Passed / 0 Failed (Exit code 0)
-  - Run 3: 456 Passed / 0 Failed (Exit code 0)
+- **完整回歸測試**: 457 Passed / 0 Failed (Exit code 0)
 - **Wrangler Deploy 預檢 (`npx wrangler deploy --dry-run`)**: PASS (Exit code 0)
-- **關鍵修復項目驗證**:
-  - `Task B7`: 驗證即時 Agent 輪詢環境下租約逾期回收成功，重試次數累加，目標電腦正確認領第二個 Attempt。
-  - `Task B7b`: 隔離環境下驗證 `recoveredCount === 1`、非目標裝置無法搶奪、連續逾期直至重試上限轉為 terminal `stale` 狀態。
-  - `Task B13`: 驗證 Idempotency 參數衝突檢驗與無權限調用者拒絕繞過。
-  - `Task B14`: 驗證 5 種裝置註冊/在線狀態的定向路由與安全保護。
+- **關鍵安全性項目驗證**:
+  - `Task A8`: 裝置註冊未給予 capabilities 時預設為最小唯讀範圍（`local:read`, `artifacts:read`），回應標頭強制設定 `Cache-Control: no-store` 與 `Pragma: no-cache`。
+  - `Task B14`: 零裝置在線且零註冊時未指定目標本機任務立即 Fail-Closed 拒絕（`DEVICE_TARGET_REQUIRED`）。
+  - `Task B7 / B7b`: 租約過期回收、重試計數維持與 Attempt 記錄確定性。
+  - `Task B13`: Idempotency 參數全衝突檢驗與無權限調用者拒絕繞過。
 
 ---
 

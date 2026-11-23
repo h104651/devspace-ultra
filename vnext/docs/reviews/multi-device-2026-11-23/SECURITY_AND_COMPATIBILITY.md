@@ -14,21 +14,37 @@
   - Token 簽發後由 API 單次輸出，伺服端僅持久化 SHA-256 雜湊值（`tokenHash`）與 Token ID（`activeTokenId`），無法從資料庫反向還原明文。
   - 具備過期時間（限制在 60 秒至 365 天之間，預設 90 天），杜絕無期限永久 Token。
 
-### 2. Device Scope 嚴格白名單 (`ALLOWED_DEVICE_SCOPES`)
+### 2. Device Scope 嚴格白名單 (`ALLOWED_DEVICE_SCOPES`) 與預設最小權限
 為防止裝置藉由註冊 API 提權存取管理端或提交任務，系統強制限制裝置 Scope 僅限於以下本機執行權限：
 ```ts
-export const ALLOWED_DEVICE_SCOPES = [
+export const ALLOWED_DEVICE_SCOPES = new Set<string>([
+  'device:connect',
   'local:read',
   'local:write',
-  'local:build',
   'local:test',
   'local:exec',
-  'raw_shell:run',
-  'artifacts:read',
-  'artifacts:write'
-] as const;
+  'local:list_projects',
+  'local:project_status',
+  'local:read_file',
+  'local:write_file',
+  'local:patch_file',
+  'local:list_directory',
+  'local:find_files',
+  'local:search_text',
+  'local:find_repositories',
+  'local:create_directory',
+  'local:git_status',
+  'local:run_tests',
+  'local:build_project',
+  'artifacts:read'
+]);
 ```
-任何包含 `admin`、`tasks:submit`、`tasks:cancel`、`kaggle:*` 的請求將立即遭阻擋並回傳 `INVALID_DEVICE_SCOPE`。
+- **最小權限預設 (Least Privilege Default)**:
+  若管理端調用 `POST /admin/devices` 時省略 `capabilities`，系統將**嚴格預設為最小唯讀權限 `['local:read', 'artifacts:read']`**。
+  絕不自動賦予 `local:write`、`local:exec`、Host Execution 或 Raw Shell 權限。
+- **快取防禦標頭 (No-Store Cache Headers)**:
+  裝置註冊回應標頭強制設定 `Cache-Control: no-store` 與 `Pragma: no-cache`，確保 Token 不被快取代理伺服器留存。
+- 任何包含 `admin`、`tasks:submit`、`tasks:cancel`、`kaggle:*` 的請求將立即遭阻擋並回傳 `INVALID_DEVICE_SCOPE`。
 
 ### 3. 已撤銷裝置重註冊安全性 (Revocation & Superseding)
 - 當裝置被管理員撤銷時：

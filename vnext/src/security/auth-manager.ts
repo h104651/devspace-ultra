@@ -21,7 +21,8 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
   'local:create_directory',
   'local:git_status',
   'local:run_tests',
-  'local:build_project'
+  'local:build_project',
+  'artifacts:read'
 ]);
 
 export class AuthManager {
@@ -124,7 +125,7 @@ export class AuthManager {
   public registerDevice(
     name: string,
     platform: 'windows' | 'linux' | 'darwin' | 'cloud' = 'windows',
-    capabilities: string[] = ['local:read', 'local:write', 'local:test'],
+    capabilities: string[] = ['local:read', 'artifacts:read'],
     customDeviceId?: string,
     expiresInMs?: number
   ): { deviceId: string; token: string; record: DeviceRecord } {
@@ -155,11 +156,15 @@ export class AuthManager {
       throw new Error(`INVALID_DEVICE_ID: Device ID '${deviceId}' is invalid. Length must be 3-64 characters using letters, numbers, hyphens, dots, or underscores.`);
     }
 
-    // 5. Capability & Scope Whitelist enforcement
-    if (!Array.isArray(capabilities)) {
+    // 5. Capability & Scope Whitelist enforcement (default minimal read-only if omitted)
+    const effectiveCapabilities = (capabilities === undefined || capabilities === null)
+      ? ['local:read', 'artifacts:read']
+      : capabilities;
+
+    if (!Array.isArray(effectiveCapabilities)) {
       throw new Error('INVALID_ARGUMENT: capabilities must be an array of strings');
     }
-    for (const cap of capabilities) {
+    for (const cap of effectiveCapabilities) {
       if (typeof cap !== 'string' || !ALLOWED_DEVICE_SCOPES.has(cap)) {
         throw new Error(`INVALID_DEVICE_SCOPE: Scope '${cap}' is not allowed for device registration. Devices are restricted to local execution scopes.`);
       }
@@ -178,7 +183,7 @@ export class AuthManager {
     }
 
     const scopes = ['device:connect'];
-    for (const cap of (capabilities || [])) {
+    for (const cap of effectiveCapabilities) {
       if (!scopes.includes(cap)) scopes.push(cap);
     }
     const { token, payload } = this.generateToken(deviceId, 'device', scopes, validExpiresInMs);
@@ -187,7 +192,7 @@ export class AuthManager {
       name: trimmedName,
       platform,
       status: 'offline',
-      capabilities,
+      capabilities: effectiveCapabilities,
       registeredAt: Date.now(),
       tokenHash: this.hashToken(token),
       activeTokenId: payload.tokenId

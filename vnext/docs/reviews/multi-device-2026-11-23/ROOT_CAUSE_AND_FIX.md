@@ -80,10 +80,13 @@
 | **B7 斷言可靠度** | 若背景 Agent 輪詢搶先回收租約，測試因 `rec.recoveredCount === 0` 誤判失敗 | 驗證任務實際回收狀態（`queued`、`retryCount: 1`、`attempt: interrupted`），相容背景與主動回收 |
 | **目標裝置重新認領** | 未在 B7 測試重新認領行為 | 明確驗證新電腦可合法認領 Attempt 2，且 Attempt Ledger 記錄完整 |
 | **隔離環境確定性** | 無隔離的 Lease 耗盡測試 | 新增 `Task B7b`，在無背景輪詢干擾下精準驗證 `recoveredCount: 1` 以及超過重試上限時的 `TASK_STALE` 終態 |
-| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續 3 次本機執行與 GitHub Actions 環境皆 100% PASS |
+| **零裝置在線/註冊派工 (P0)** | 0 裝置且未指定目標時仍允許建立未綁定任務排隊，後續依賴遷移 | 0 裝置且未指定目標時嚴格 Fail-Closed，立即拒絕並拋出 `DEVICE_TARGET_REQUIRED`；指定目標時安全排隊等待該裝置 |
+| **裝置註冊預設權限 (P1)** | `POST /admin/devices` 省略 `capabilities` 時預設包含 `local:write`、`local:exec` | 嚴格預設為最小唯讀權限 `['local:read', 'artifacts:read']`，禁止自動授權寫入與執行 |
+| **Token 回應快取安全 (P1)** | 管理端註冊回應未設置安全快取限制標頭 | 嚴格強制回傳 `Cache-Control: no-store` 與 `Pragma: no-cache` |
+| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (457/457 PASS) |
 
 ---
 
 ## 五、未解決不確定性
 
-經代碼與行為審計，Task B7 相關邏輯與租約管理機制已 100% 確定，無任何未解不確定性。
+經代碼與行為審計，Task B7 租約競爭、零裝置安全邊界與裝置最小權限註冊機制已 100% 確定，無任何未解不確定性。

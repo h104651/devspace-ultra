@@ -55,7 +55,8 @@ exports.ALLOWED_DEVICE_SCOPES = new Set([
     'local:create_directory',
     'local:git_status',
     'local:run_tests',
-    'local:build_project'
+    'local:build_project',
+    'artifacts:read'
 ]);
 class AuthManager {
     masterSecret;
@@ -168,7 +169,7 @@ class AuthManager {
         this.save();
         return { clientId, token, record };
     }
-    registerDevice(name, platform = 'windows', capabilities = ['local:read', 'local:write', 'local:test'], customDeviceId, expiresInMs) {
+    registerDevice(name, platform = 'windows', capabilities = ['local:read', 'artifacts:read'], customDeviceId, expiresInMs) {
         // 1. Name validation
         if (typeof name !== 'string' || !name.trim() || name.trim().length > 100 || /[\x00-\x1F\x7F]/.test(name)) {
             throw new Error('INVALID_ARGUMENT: name must be a non-empty string between 1 and 100 characters without control characters');
@@ -192,11 +193,14 @@ class AuthManager {
         if (deviceId.length < 3 || deviceId.length > 64 || !/^[a-z0-9-_.]+$/.test(deviceId)) {
             throw new Error(`INVALID_DEVICE_ID: Device ID '${deviceId}' is invalid. Length must be 3-64 characters using letters, numbers, hyphens, dots, or underscores.`);
         }
-        // 5. Capability & Scope Whitelist enforcement
-        if (!Array.isArray(capabilities)) {
+        // 5. Capability & Scope Whitelist enforcement (default minimal read-only if omitted)
+        const effectiveCapabilities = (capabilities === undefined || capabilities === null)
+            ? ['local:read', 'artifacts:read']
+            : capabilities;
+        if (!Array.isArray(effectiveCapabilities)) {
             throw new Error('INVALID_ARGUMENT: capabilities must be an array of strings');
         }
-        for (const cap of capabilities) {
+        for (const cap of effectiveCapabilities) {
             if (typeof cap !== 'string' || !exports.ALLOWED_DEVICE_SCOPES.has(cap)) {
                 throw new Error(`INVALID_DEVICE_SCOPE: Scope '${cap}' is not allowed for device registration. Devices are restricted to local execution scopes.`);
             }
@@ -213,7 +217,7 @@ class AuthManager {
             }
         }
         const scopes = ['device:connect'];
-        for (const cap of (capabilities || [])) {
+        for (const cap of effectiveCapabilities) {
             if (!scopes.includes(cap))
                 scopes.push(cap);
         }
@@ -223,7 +227,7 @@ class AuthManager {
             name: trimmedName,
             platform,
             status: 'offline',
-            capabilities,
+            capabilities: effectiveCapabilities,
             registeredAt: Date.now(),
             tokenHash: this.hashToken(token),
             activeTokenId: payload.tokenId

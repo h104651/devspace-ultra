@@ -282,6 +282,9 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
     }));
     const regData = await regRes.json() as any;
     assert.strictEqual(regData.deviceId, 'persist-dev-01');
+    assert.strictEqual(regRes.headers.get('Cache-Control'), 'no-store');
+    assert.strictEqual(regRes.headers.get('Pragma'), 'no-cache');
+    assert.deepStrictEqual(regData.device.capabilities, ['local:read', 'artifacts:read']);
 
     // Simulate DO cold-start restart with fresh DO instance pointing to same storage
     const mockCtx2: any = { storage: { sql }, getWebSockets: () => [] };
@@ -378,6 +381,36 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
     const oldCheck = auth.validateToken(oldToken);
     assert.strictEqual(oldCheck.valid, false);
     assert.ok(oldCheck.error?.includes('TOKEN_REVOKED') || oldCheck.error?.includes('TOKEN_SUPERSEDED'));
+  });
+
+  await test('Task A8: Device registration defaults to minimal read-only scopes and sets no-store cache headers', async () => {
+    const sql = new TestSqlStorage();
+    const mockCtx: any = { storage: { sql }, getWebSockets: () => [] };
+    const mockEnv: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+    const gatewayDo = new GatewayDurableObject(mockCtx, mockEnv);
+
+    // Call POST /admin/devices without capabilities
+    const res = await gatewayDo.fetch(new Request('https://gateway.internal/admin/devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+      body: JSON.stringify({ name: 'Minimal Scope Device', deviceId: 'min-scope-dev' })
+    }));
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.headers.get('Cache-Control'), 'no-store');
+    assert.strictEqual(res.headers.get('Pragma'), 'no-cache');
+
+    const body = await res.json() as any;
+    assert.deepStrictEqual(body.device.capabilities, ['local:read', 'artifacts:read']);
+    assert.ok(body.token);
+
+    // Also verify AuthManager directly with default arguments
+    const auth = new AuthManager(testMasterSecret);
+    const directReg = auth.registerDevice('Direct Default Dev', 'windows');
+    assert.deepStrictEqual(directReg.record.capabilities, ['local:read', 'artifacts:read']);
+    const tokenVal = auth.validateToken(directReg.token);
+    assert.strictEqual(tokenVal.valid, true);
+    assert.deepStrictEqual(tokenVal.payload?.scopes, ['device:connect', 'local:read', 'artifacts:read']);
   });
 
   // ========================================================
@@ -976,16 +1009,26 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       );
       assert.strictEqual(resState1Targeted.task.targetDeviceId, 'future-device');
 
-      // (b) Task submitted without targetDeviceId in 0-device state: fails closed if multiple devices register
-      const resState1Unassigned = await serverState1.taskRouter.routeTaskSubmit(
-        { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' } },
-        ['admin', 'tasks:submit', 'local:read'],
-        'user-1'
+      // (b) Task submitted without targetDeviceId in 0-device state: immediately rejected with DEVICE_TARGET_REQUIRED
+      await assert.rejects(
+        async () => serverState1.taskRouter.routeTaskSubmit(
+          { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' } },
+          ['admin', 'tasks:submit', 'local:read'],
+          'user-1'
+        ),
+        /DEVICE_TARGET_REQUIRED/
       );
-      assert.strictEqual(resState1Unassigned.task.targetDeviceId, undefined);
+
+      // (c) Legacy unassigned tasks already persisted prior to upgrade: safely handled by migrateLegacyUnassignedTasks
+      const legacyTaskInStorage = serverState1.taskStore.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'legacy.txt' }
+      });
+      assert.strictEqual(legacyTaskInStorage.targetDeviceId, undefined);
       serverState1.taskStore.migrateLegacyUnassignedTasks(['dev-1', 'dev-2']);
-      assert.strictEqual(serverState1.taskStore.getTask(resState1Unassigned.taskId)?.status, 'failed');
-      assert.strictEqual((serverState1.taskStore.getTask(resState1Unassigned.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+      assert.strictEqual(serverState1.taskStore.getTask(legacyTaskInStorage.taskId)?.status, 'failed');
+      assert.strictEqual((serverState1.taskStore.getTask(legacyTaskInStorage.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
 
       // State 2: 1 registered, 0 online -> Auto-binds to sole registered device
       const serverState2 = new GatewayServer({

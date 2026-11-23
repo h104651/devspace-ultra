@@ -15,6 +15,15 @@
    - 透過 `activeTokenId` 追蹤當前合法憑證，重註冊時舊憑證永久失效。
 6. **[RESOLVED] Idempotency Replay 跨裝置/跨參數污染與權限繞過**:
    - 調整執行順序，嚴格要求權限驗證通過後方可命中快取。比對 `targetDeviceId`、`backend`、`capability`、`payload` 衝突，拋出 `IDEMPOTENCY_CONFLICT`。
+7. **[RESOLVED] 零裝置在線且零註冊時未指定目標之本機任務排隊漏洞 (P0)**:
+   - 0 registered / 0 online / 未指定目標時，立即 Fail-Closed 拒絕並拋出 `DEVICE_TARGET_REQUIRED`。
+   - 0 registered / 0 online / 已指定目標時，允許排隊但嚴格綁定 `targetDeviceId`，其它裝置無法認領。
+8. **[RESOLVED] 裝置註冊預設最小權限與 Token 快取安全 (P1)**:
+   - `POST /admin/devices` 省略 `capabilities` 時預設為最小唯讀範圍 `['local:read', 'artifacts:read']`，禁止自動授與寫入或執行權限。
+   - 回應標頭設置 `Cache-Control: no-store` 與 `Pragma: no-cache`。
+9. **[RESOLVED] CLI 啟動規格校正與生產環境狀態差異釐清 (P1)**:
+   - 修正文件中的平臺參數為 `windows`，校正啟動指令為 `agent-cli.ts` 實際支援之環境變數與 `--projects-config` 格式。
+   - 深入調查並說明生產環境舊電腦 `totalRegistered: 0 / totalOnline: 1` 歷史成因與向前相容保證。
 
 ---
 

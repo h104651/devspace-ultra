@@ -744,7 +744,7 @@ export class GatewayDurableObject {
           const body = await request.json() as any;
           const name = typeof body?.name === 'string' ? body.name.trim() : 'Local Agent';
           const platform = body?.platform || 'windows';
-          const capabilities = Array.isArray(body?.capabilities) ? body.capabilities : ['local:read', 'local:write', 'local:test', 'local:exec'];
+          const capabilities = Array.isArray(body?.capabilities) && body.capabilities.length > 0 ? body.capabilities : ['local:read', 'artifacts:read'];
           const customDeviceId = typeof body?.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : undefined;
           const expiresInMs = typeof body?.expiresInMs === 'number' ? body.expiresInMs : undefined;
 
@@ -766,7 +766,13 @@ export class GatewayDurableObject {
               registeredAt: reg.record.registeredAt
             },
             message: 'Device registered successfully. Save token securely; it cannot be retrieved again.'
-          }, { status: 201 });
+          }, {
+            status: 201,
+            headers: {
+              'Cache-Control': 'no-store',
+              'Pragma': 'no-cache'
+            }
+          });
         } catch (err: any) {
           const isConflict = err.message?.includes('DEVICE_ID_CONFLICT');
           return Response.json({ error: err.message }, { status: isConflict ? 409 : 400 });

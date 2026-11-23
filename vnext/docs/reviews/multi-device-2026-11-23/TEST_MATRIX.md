@@ -32,7 +32,7 @@
 | 15 | Integration: Remote MCP Transport (HTTP POST /mcp) | 整合測試 | 8 | PASS | 68ms | /mcp 端點工具調用與 OAuth 攔截 |
 | 16 | Integration: Agent Lifecycle & Durability | 整合測試 | 19 | PASS | 1597ms | Agent 斷線、重連、心跳與清理 |
 | 17 | Integration: Local Multi-Project Named Routing | 整合測試 | 29 | PASS | 804ms | 具名專案路由與許可權控制 |
-| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **22** | **PASS** | **1805ms** | **本次修復重點 (含 A1~A7, B1~B14)** |
+| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **23** | **PASS** | **1754ms** | **本次修復重點 (含 A1~A8, B1~B14)** |
 | 19 | Integration: Local Workspace Discovery & Nested Operations | 整合測試 | 15 | PASS | 42104ms | 遞迴工作區探索與檔案列舉 |
 | 20 | Integration: Kaggle Mock Backend | 整合測試 | 3 | PASS | 116ms | Kaggle 模擬後端執行 |
 | 21 | Integration: Pre-Migration Kaggle Restart Recovery | 整合測試 | 1 | PASS | 1ms | 遷移前歷史重啟恢復 |
@@ -55,7 +55,7 @@
 | 38 | Cloudflare: OAuth 2.1 & Protected Resource Metadata | Cloudflare | 20 | PASS | 2ms | OAuth 2.1 協定與安全端點元數據 |
 | 39 | Security: Zero Trust, Injections, Shell & Rate Limits | 安全測試 | 13 | PASS | 79ms | 零信任防護、指令注入、頻率限制 |
 | 40 | Security: Bootstrap Token Security & Redaction | 安全測試 | 3 | PASS | 2ms | 開機引導憑證安全脫敏 |
-| **總計** | **40 個測試套件** | — | **456** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
+| **總計** | **40 個測試套件** | — | **457** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
 
 ---
 
@@ -70,6 +70,7 @@
 | **Task A5** | Revoked device immediately rejected upon validation | 撤銷裝置後其所屬 Token 立即失效（DEVICE_REVOKED） | PASS |
 | **Task A6** | Device registration validates input, limits expiresInMs and rejects non-whitelisted scopes | 阻擋提權 Scope（admin/tasks:submit）、限制有效期 60s..365d、過濾 ID 惡意字元 | PASS |
 | **Task A7** | Re-registering a previously revoked device ID permanently invalidates the old token | 撤銷後同 ID 重新註冊，舊 Token 保持永久失效（TOKEN_REVOKED / TOKEN_SUPERSEDED） | PASS |
+| **Task A8** | Device registration defaults to minimal read-only scopes and sets no-store cache headers | 省略 capabilities 時預設為最小唯讀範圍（local:read, artifacts:read），回應包含 Cache-Control: no-store | PASS |
 | **Task B1** | Two agents connected simultaneously are correctly identified in device_status | 兩台電腦同時在線時，Gateway 明確列出各自獨立 ID 與狀態 | PASS |
 | **Task B2** | Task targeted to New PC is claimed and completed strictly by New PC | 指定新電腦的任務僅由新電腦認領與完成 | PASS |
 | **Task B3** | Task targeted to Old PC is claimed and completed strictly by Old PC | 指定舊電腦的任務僅由舊電腦認領與完成 | PASS |

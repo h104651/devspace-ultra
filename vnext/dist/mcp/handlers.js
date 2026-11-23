@@ -44,6 +44,14 @@ class McpHandlers {
     gateway;
     constructor(gateway) {
         this.gateway = gateway;
+        if (this.gateway?.taskRouter) {
+            if (!this.gateway.taskRouter.getAuthManager?.() && this.gateway.authManager) {
+                this.gateway.taskRouter.setAuthManager?.(this.gateway.authManager);
+            }
+            if (!this.gateway.taskRouter.getConnectionManager?.() && this.gateway.connectionManager) {
+                this.gateway.taskRouter.setConnectionManager?.(this.gateway.connectionManager);
+            }
+        }
     }
     requireCaller(caller) {
         if (!caller)

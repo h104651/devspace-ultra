@@ -484,6 +484,7 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
         masterSecret: 'test-master-secret-workspace-discovery-32b',
         storageDir: testStorageDir
       });
+      gateway.authManager.registerDevice('Astor Discovery Worker', 'windows', ['local:read', 'local:write', 'local:exec'], 'astor-worker');
 
       const handlers = new McpHandlers(gateway);
 
