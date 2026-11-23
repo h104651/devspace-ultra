@@ -440,11 +440,16 @@ export class TaskStore {
       return { assigned: 0, taskIds: [] };
     }
     const targetSet = new Set(taskIds);
+    const now = Date.now();
 
     for (const task of this.tasks.values()) {
       // Must be local backend, unassigned, active (non-terminal), and explicitly in taskIds
       if (task.backend === 'local' && !task.targetDeviceId && ACTIVE_TASK_STATUSES.has(task.status)) {
         if (!targetSet.has(task.taskId)) {
+          continue;
+        }
+        // Guard: Cannot reassign a task that currently has an active unexpired lease held by a different claimant
+        if (task.lease && task.lease.leaseExpiresAt > now && task.lease.claimedBy && task.lease.claimedBy !== targetDeviceId) {
           continue;
         }
         task.targetDeviceId = targetDeviceId;

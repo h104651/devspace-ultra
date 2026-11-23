@@ -1793,6 +1793,102 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       }
     });
 
+    await test('Task B26: Admin legacy task assignment strictly excludes tasks with active lease held by different claimant', async () => {
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doGateway = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      const now = Date.now();
+      // Register both Device 1 and Device 2
+      (doGateway as any).authManager.registerDevice('Workstation 1', 'windows', ['local:read'], 'win11-arm64-workstation');
+      (doGateway as any).authManager.registerDevice('Workstation 2', 'windows', ['local:read'], 'win11-arm64-workstation-2');
+
+      // Create pure quarantined unassigned tasks (no claimant in DB)
+      await (doGateway as any).storage.saveTask({
+        taskId: 'task-active-lease-conflict',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'claimed',
+        priority: 0,
+        payload: { path: 'active-lease.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        createdAt: now,
+        updatedAt: now
+      });
+
+      await (doGateway as any).storage.saveTask({
+        taskId: 'task-expired-lease-safe',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'claimed',
+        priority: 0,
+        payload: { path: 'expired-lease.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        createdAt: now - 70000,
+        updatedAt: now - 10000
+      });
+
+      await (doGateway as any).initializeFromDurableStorage();
+
+      // Ensure both tasks remain quarantined with targetDeviceId: undefined
+      const taskStore = (doGateway as any).taskStore;
+      const t1 = taskStore.getTask('task-active-lease-conflict');
+      const t2 = taskStore.getTask('task-expired-lease-safe');
+      assert.strictEqual(t1.targetDeviceId, undefined);
+      assert.strictEqual(t2.targetDeviceId, undefined);
+
+      // Set active unexpired lease on t1 (held by Workstation 1)
+      t1.lease = {
+        claimedBy: 'win11-arm64-workstation',
+        claimedAt: now,
+        leaseExpiresAt: now + 60000,
+        lastHeartbeatAt: now
+      };
+
+      // Set expired lease on t2 (held by Workstation 1, expired 10s ago)
+      t2.lease = {
+        claimedBy: 'win11-arm64-workstation',
+        claimedAt: now - 70000,
+        leaseExpiresAt: now - 10000,
+        lastHeartbeatAt: now - 70000
+      };
+
+      // 1. Try to reassign the active lease task to Workstation 2 -> MUST BE REJECTED/SKIPPED!
+      const activeLeaseReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation-2', taskIds: ['task-active-lease-conflict'] })
+      });
+      const activeRes = await doGateway.fetch(activeLeaseReq);
+      assert.strictEqual(activeRes.status, 200);
+      const activeJson = await activeRes.json() as any;
+      assert.strictEqual(activeJson.assignedCount, 0, 'Cannot reassign task with active lease held by different claimant');
+      assert.deepStrictEqual(activeJson.assignedTaskIds, []);
+
+      // Verify task-active-lease-conflict remains unassigned to Workstation 2
+      assert.strictEqual(t1.targetDeviceId, undefined, 'Active lease task targetDeviceId must not be modified');
+      assert.strictEqual(t1.lease?.claimedBy, 'win11-arm64-workstation');
+
+      // 2. Try to assign the expired lease task to Workstation 2 -> SUCCEEDS!
+      const expiredLeaseReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation-2', taskIds: ['task-expired-lease-safe'] })
+      });
+      const expiredRes = await doGateway.fetch(expiredLeaseReq);
+      assert.strictEqual(expiredRes.status, 200);
+      const expiredJson = await expiredRes.json() as any;
+      assert.strictEqual(expiredJson.assignedCount, 1, 'Expired lease task can safely be assigned');
+      assert.deepStrictEqual(expiredJson.assignedTaskIds, ['task-expired-lease-safe']);
+
+      assert.strictEqual(t2.targetDeviceId, 'win11-arm64-workstation-2');
+    });
+
   } finally {
     if (agentOld) agentOld.stop();
     if (agentNew) agentNew.stop();

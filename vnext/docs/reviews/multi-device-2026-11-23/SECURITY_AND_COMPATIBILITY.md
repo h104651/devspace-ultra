@@ -115,6 +115,8 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
     - **活躍狀態白名單 (`ACTIVE_TASK_STATUSES`) 與終態不可變性**:
       - 僅允許對處於活躍狀態（`queued`, `claimed`, `acknowledged`, `running`, `retrying`）的任務進行改派。
       - 終態任務（`succeeded`, `failed`, `cancelled`, `stale`）嚴格不可變，任何改派請求一律略過不變動。
+    - **有效租約衝突防護 (Active Lease Conflict Protection)**:
+      - 若任務當前仍存在未過期之有效 Lease（`leaseExpiresAt > now`），且其持有者與目標裝置不同，系統嚴格禁止改派，杜絕中途搶奪他人進行中任務。
     - 寫入結構化稽核日誌（包含操作員、目標裝置、指派數量與任務 ID 清單）。
 
 ### 3. 資料庫 Schema 遷移相容性
@@ -140,18 +142,37 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
 ## 四、正式環境任務盤點 CLI 工具 (`scripts/inventory-tasks.ts`)
 
 - **功能與介面**:
-  - 提供 `npm run inventory:tasks` 唯讀盤點腳本，支援分頁（`--limit`、`--offset`）、過濾（`--backend`、`--status`）、格式切換（`--format table|json`）與就緒檢查（`--check-readiness`）。
+  - 提供 `npm run inventory:tasks` 唯讀盤點腳本，支援全量分頁查詢（`--limit`、`--offset`）、格式切換（`--format table|json`）與就緒檢查（`--check-readiness`）。
+  - **就緒檢查篩選安全邊界 (Readiness Mode Filter Restriction)**:
+    - 預設 Production Readiness 檢查模式（`checkReadiness: true`）**僅允許評估全量活躍本機任務**。
+    - 若指定 `--backend kaggle`、`--status queued` 或 `--offset > 0` 等部分篩選，系統一律嚴格 Fail Closed 回傳 Exit Code 2（BLOCKED），絕不允許以局部查詢錯誤宣告正式部署 READY。
+  - **自動全量多頁分頁查詢 (Multi-Page Complete Pagination)**:
+    - 當 `hasMore: true` 時，腳本自動循環分頁獲取全部任務直至完成，杜絕資料截斷漏查。
+    - 嚴格校驗每頁 `offset`、`limit`、`total`、`hasMore` 與累計筆數一致；若分頁期間發生資料異動（如 `total` 變化、偏移不符或出現重複任務 ID），立即 Fail Closed（Exit Code 2）。
   - **舊版端點 Fail Closed 安全防護**: 自動偵測舊版生產端點（`v2.1.0 @ 1a933d3`），由於舊版端點無法證明零未綁定任務，無論回傳幾筆資料一律回傳 Exit Code 2（BLOCKED），絕不因回傳 0 筆誤判 READY。
-  - **正式環境真實 SQL 備援機制**: 提示運維人員透過 Cloudflare Dashboard -> Workers & Pages -> Durable Objects -> `GatewayDurableObject` -> `devspace-gateway-default` -> Data Studio / SQL Console 執行真實唯讀 SQL 查詢。
+  - **正式環境真實 SQL 備援機制**: 提示運維人員透過 Cloudflare Dashboard -> Workers & Pages -> Durable Objects -> `GatewayDurableObject` -> `global-gateway-singleton-recovery-20260910`（由 `worker.ts:117` 定位）-> Data Studio / SQL Console 執行真實唯讀 SQL 查詢：
+    ```sql
+    SELECT taskId, status, backend, createdAt,
+           json_extract(leaseJson, '$.claimedBy') AS leaseClaimant,
+           json_extract(leaseJson, '$.leaseExpiresAt') AS leaseExpiresAt,
+           json_extract(attemptsJson, '$[0].claimedBy') AS firstAttemptClaimant,
+           attemptsJson
+    FROM tasks
+    WHERE backend = 'local'
+      AND status IN ('queued', 'claimed', 'acknowledged', 'running', 'retrying')
+    ORDER BY createdAt ASC;
+    ```
+    - 舊版 Schema 限制：在 `main` 舊版生產環境中，資料表主鍵為 `taskId`（非 `id`），且尚未存在 `targetDeviceId` 欄位（查詢該欄位將拋錯）。
+    - 實測狀態說明：本機環境無生產控制臺權限，此 SQL 操作**未於本機實測**，維持 **PREFLIGHT BLOCKED**，待維護窗口由運維人員實施。
   - **嚴格 Schema 與統計一致性校驗**:
     - 回應必須具備完整 `summary`、`offset`、`limit`、`hasMore` 與任務陣列。
     - 嚴格校驗：`totalActiveLocal === totalTargeted + totalQuarantined`、`totalWithPriorClaimant <= totalQuarantined`，且 `byStatus` 各狀態加總精確等於 `totalActiveLocal`。
-    - 驗證分頁任務數不大於 `limit`、`hasMore` 布林值邏輯正確，各任務必須具備 `id`、`status`、`backend`、`isQuarantined` 等欄位。
+    - 驗證分頁任務數不大於 `limit`、`hasMore` 布林值邏輯正確，各任務必須具備 `taskId`、`status`、`backend`、`isQuarantined` 等欄位。
     - 任何統計矛盾、格式損壞或不完整均立即 Fail Closed（Exit Code 2）。
   - 嚴格資料脫敏：自動過濾任務代碼與敏感憑證，僅呈現狀態、裝置 ID、認領歷程與摘要統計。
   - 明確退出碼：`0`（READY，無未綁定任務）、`1`（ERROR，網路或授權錯誤）、`2`（BLOCKED，存在隔離/未綁定任務或資料異常，阻擋正式部署）。
 - **受控單元測試覆蓋**:
-  - `tests/unit/inventory-tasks.test.ts` 擴充至 53 項測試，覆蓋遺失密鑰拒絕、網路超時、401 拒絕、舊版 0 筆阻擋、舊版 >100 筆阻擋、統計矛盾阻擋、分頁不完整阻擋、任務格式損壞阻擋、Data Studio 指引驗證、脫敏保證與就緒驗收。
+  - `tests/unit/inventory-tasks.test.ts` 擴充至 **91 項測試**，覆蓋遺失密鑰拒絕、網路超時、401 拒絕、舊版 0 筆阻擋、舊版 >100 筆阻擋、統計矛盾阻擋、分頁不完整阻擋、分頁偏移矛盾阻擋、分頁異動檢測、分頁重複 ID 阻擋、跨頁全量分頁蒐集、篩選安全性阻擋、舊版 SQLite Schema 模擬解析、Data Studio 指引驗證、脫敏保證與就緒驗收。
 
 ---
 

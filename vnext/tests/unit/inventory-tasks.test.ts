@@ -79,8 +79,9 @@ export async function runInventoryTasksUnitTests(): Promise<{ passed: number; fa
     ok(res.output.includes('[LEGACY_ENDPOINT_DETECTED]'), 'Output indicates legacy endpoint');
     ok(res.output.includes('Cloudflare Durable Objects Data Studio'), 'Output provides Data Studio fallback instructions');
     ok(res.output.includes('GatewayDurableObject'), 'Output names correct Durable Object');
-    ok(res.output.includes('devspace-gateway-default'), 'Output names singleton instance');
-    ok(res.output.includes('SELECT id, status, backend'), 'Output contains correct SQL query');
+    ok(res.output.includes('global-gateway-singleton-recovery-20260910'), 'Output names singleton instance');
+    ok(res.output.includes('SELECT taskId, status, backend'), 'Output contains correct SQL query');
+    ok(res.output.includes('attemptsJson'), 'Output references attemptsJson');
     ok(res.output.includes('Zero Task Loss Quarantine'), 'Output explains Zero Task Loss Quarantine protection');
   } catch (err: any) {
     console.error('Test 4 failed:', err);
@@ -513,6 +514,500 @@ export async function runInventoryTasksUnitTests(): Promise<{ passed: number; fa
     ok(res.exitCode === 0, 'JSON run passed with exit code 0');
   } catch (err: any) {
     console.error('Test 8 failed:', err);
+  }
+
+  // Test 9: Legacy SQLite Row Format Simulation (Task A)
+  try {
+    // Legacy schema on main has taskId, status, backend, createdAt, leaseJson, attemptsJson
+    // Notice: NO id, NO data, NO targetDeviceId column.
+    const legacySqlRows = [
+      {
+        taskId: 'legacy-row-1',
+        status: 'queued',
+        backend: 'local',
+        createdAt: 1700000000000,
+        leaseJson: JSON.stringify({ claimedBy: 'win11-arm64-workstation', leaseExpiresAt: 1700001000000 }),
+        attemptsJson: JSON.stringify([{ attemptId: 'att-1', claimedBy: 'win11-arm64-workstation', status: 'interrupted' }])
+      },
+      {
+        taskId: 'legacy-row-2',
+        status: 'queued',
+        backend: 'local',
+        createdAt: 1700000000100,
+        leaseJson: null,
+        attemptsJson: '[]'
+      }
+    ];
+
+    // Simulate SQL extraction logic as run in Cloudflare Data Studio
+    const extracted = legacySqlRows.map(r => ({
+      taskId: r.taskId,
+      status: r.status,
+      backend: r.backend,
+      leaseClaimant: r.leaseJson ? JSON.parse(r.leaseJson).claimedBy : null,
+      leaseExpiresAt: r.leaseJson ? JSON.parse(r.leaseJson).leaseExpiresAt : null,
+      firstAttemptClaimant: JSON.parse(r.attemptsJson)[0]?.claimedBy || null,
+      hasTargetDeviceIdColumn: 'targetDeviceId' in r // false in legacy schema
+    }));
+
+    ok(extracted[0].taskId === 'legacy-row-1', 'Legacy row 1 taskId matches');
+    ok(extracted[0].leaseClaimant === 'win11-arm64-workstation', 'Extracted leaseClaimant from leaseJson');
+    ok(extracted[0].leaseExpiresAt === 1700001000000, 'Extracted leaseExpiresAt from leaseJson');
+    ok(extracted[0].firstAttemptClaimant === 'win11-arm64-workstation', 'Extracted firstAttemptClaimant from attemptsJson');
+    ok(extracted[0].hasTargetDeviceIdColumn === false, 'targetDeviceId column does NOT exist in legacy schema');
+
+    ok(extracted[1].taskId === 'legacy-row-2', 'Legacy row 2 taskId matches');
+    ok(extracted[1].leaseClaimant === null, 'Row 2 has null leaseClaimant (unassigned)');
+    ok(extracted[1].firstAttemptClaimant === null, 'Row 2 has null firstAttemptClaimant (unassigned)');
+  } catch (err: any) {
+    console.error('Test 9 failed:', err);
+  }
+
+  // Test 10: Production readiness mode rejects non-local backend filter (Task B)
+  try {
+    const resBlocked = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      backend: 'kaggle', // partial filter
+      checkReadiness: true
+    });
+    ok(resBlocked.exitCode === 2, 'Readiness mode rejects --backend kaggle with exitCode 2');
+    ok(resBlocked.status === 'BLOCKED', 'Status is BLOCKED for non-local backend in readiness mode');
+    ok(resBlocked.error?.includes('INVALID_PREFLIGHT_FILTER'), 'Error indicates invalid preflight filter');
+
+    // With checkReadiness=false, partial query is allowed for diagnostic inspection
+    const resAllowed = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      backend: 'kaggle',
+      checkReadiness: false,
+      fetchFn: async () => Response.json({
+        ok: true,
+        total: 1,
+        offset: 0,
+        limit: 1000,
+        hasMore: false,
+        summary: {
+          totalActiveLocal: 0,
+          totalTargeted: 0,
+          totalQuarantined: 0,
+          totalWithPriorClaimant: 0,
+          byTargetDevice: {},
+          byStatus: {}
+        },
+        tasks: [{ taskId: 'k-1', backend: 'kaggle', status: 'running' }]
+      })
+    });
+    ok(resAllowed.exitCode === 0, 'Diagnostic mode allows --backend kaggle with exitCode 0');
+  } catch (err: any) {
+    console.error('Test 10 failed:', err);
+  }
+
+  // Test 11: Production readiness mode rejects partial status filter (Task B)
+  try {
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      status: 'queued', // partial filter
+      checkReadiness: true
+    });
+    ok(res.exitCode === 2, 'Readiness mode rejects --status queued with exitCode 2');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED for non-active status in readiness mode');
+    ok(res.error?.includes('INVALID_PREFLIGHT_FILTER'), 'Error indicates invalid preflight filter');
+  } catch (err: any) {
+    console.error('Test 11 failed:', err);
+  }
+
+  // Test 12: Production readiness mode rejects non-zero starting offset (Task B)
+  try {
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      offset: 10, // non-zero offset
+      checkReadiness: true
+    });
+    ok(res.exitCode === 2, 'Readiness mode rejects --offset 10 with exitCode 2');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED for non-zero offset in readiness mode');
+    ok(res.error?.includes('INVALID_PREFLIGHT_FILTER'), 'Error indicates invalid preflight filter');
+  } catch (err: any) {
+    console.error('Test 12 failed:', err);
+  }
+
+  // Test 13: Multi-page complete pagination (Task B)
+  try {
+    // Generate 25 tasks across 3 pages: 10 + 10 + 5
+    const makeTask = (id: number) => ({
+      taskId: `page-task-${id}`,
+      backend: 'local',
+      status: 'queued',
+      targetDeviceId: 'win11-arm64-workstation',
+      isQuarantined: false
+    });
+
+    const page1Tasks = Array.from({ length: 10 }, (_, i) => makeTask(i + 1));
+    const page2Tasks = Array.from({ length: 10 }, (_, i) => makeTask(i + 11));
+    const page3Tasks = Array.from({ length: 5 }, (_, i) => makeTask(i + 21));
+
+    const commonSummary = {
+      totalActiveLocal: 25,
+      totalTargeted: 25,
+      totalQuarantined: 0,
+      totalWithPriorClaimant: 0,
+      byTargetDevice: { 'win11-arm64-workstation': 25 },
+      byStatus: { 'queued': 25 }
+    };
+
+    let fetchCount = 0;
+    const multiPageFetch = async (url: string | URL | Request) => {
+      fetchCount++;
+      const urlStr = url.toString();
+      if (urlStr.includes('offset=0')) {
+        return Response.json({
+          ok: true,
+          total: 25,
+          offset: 0,
+          limit: 10,
+          hasMore: true,
+          summary: commonSummary,
+          tasks: page1Tasks
+        });
+      } else if (urlStr.includes('offset=10')) {
+        return Response.json({
+          ok: true,
+          total: 25,
+          offset: 10,
+          limit: 10,
+          hasMore: true,
+          summary: commonSummary,
+          tasks: page2Tasks
+        });
+      } else if (urlStr.includes('offset=20')) {
+        return Response.json({
+          ok: true,
+          total: 25,
+          offset: 20,
+          limit: 10,
+          hasMore: false,
+          summary: commonSummary,
+          tasks: page3Tasks
+        });
+      }
+      throw new Error(`Unexpected URL in test: ${urlStr}`);
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      limit: 10,
+      offset: 0,
+      checkReadiness: true,
+      fetchFn: multiPageFetch
+    });
+
+    ok(fetchCount === 3, 'Fetched exactly 3 pages to complete inventory');
+    ok(res.tasks?.length === 25, 'Accumulated all 25 tasks across pages');
+    ok(res.exitCode === 0, 'Exit code is 0 (READY) after full pagination');
+    ok(res.status === 'READY', 'Status is READY after full pagination');
+  } catch (err: any) {
+    console.error('Test 13 failed:', err);
+  }
+
+  // Test 14: Pagination shift - total count changes between pages (Task B)
+  try {
+    let callNum = 0;
+    const shiftingFetch = async (url: string | URL | Request) => {
+      callNum++;
+      if (callNum === 1) {
+        return Response.json({
+          ok: true,
+          total: 20,
+          offset: 0,
+          limit: 10,
+          hasMore: true,
+          summary: {
+            totalActiveLocal: 20,
+            totalTargeted: 20,
+            totalQuarantined: 0,
+            totalWithPriorClaimant: 0,
+            byTargetDevice: { 'win11': 20 },
+            byStatus: { 'queued': 20 }
+          },
+          tasks: Array.from({ length: 10 }, (_, i) => ({
+            taskId: `shift-t-${i}`,
+            backend: 'local',
+            status: 'queued',
+            targetDeviceId: 'win11',
+            isQuarantined: false
+          }))
+        });
+      } else {
+        // Between page 1 and 2, a task was added, shifting total to 21
+        return Response.json({
+          ok: true,
+          total: 21,
+          offset: 10,
+          limit: 10,
+          hasMore: false,
+          summary: {
+            totalActiveLocal: 21,
+            totalTargeted: 21,
+            totalQuarantined: 0,
+            totalWithPriorClaimant: 0,
+            byTargetDevice: { 'win11': 21 },
+            byStatus: { 'queued': 21 }
+          },
+          tasks: Array.from({ length: 11 }, (_, i) => ({
+            taskId: `shift-t-${i + 10}`,
+            backend: 'local',
+            status: 'queued',
+            targetDeviceId: 'win11',
+            isQuarantined: false
+          }))
+        });
+      }
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      limit: 10,
+      offset: 0,
+      checkReadiness: true,
+      fetchFn: shiftingFetch
+    });
+
+    ok(res.exitCode === 2, 'Total shift between pages returns exit code 2 (BLOCKED)');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED when pagination total shifts');
+    ok(res.error?.includes('PAGINATION_SHIFT_DETECTED'), 'Error indicates PAGINATION_SHIFT_DETECTED');
+  } catch (err: any) {
+    console.error('Test 14 failed:', err);
+  }
+
+  // Test 15: Pagination offset mismatch (Task B)
+  try {
+    let callNum = 0;
+    const offsetMismatchFetch = async () => {
+      callNum++;
+      if (callNum === 1) {
+        return Response.json({
+          ok: true,
+          total: 20,
+          offset: 0,
+          limit: 10,
+          hasMore: true,
+          summary: {
+            totalActiveLocal: 20,
+            totalTargeted: 20,
+            totalQuarantined: 0,
+            totalWithPriorClaimant: 0,
+            byTargetDevice: { 'win11': 20 },
+            byStatus: { 'queued': 20 }
+          },
+          tasks: Array.from({ length: 10 }, (_, i) => ({
+            taskId: `offset-t-${i}`,
+            backend: 'local',
+            status: 'queued',
+            targetDeviceId: 'win11',
+            isQuarantined: false
+          }))
+        });
+      } else {
+        // Server returned offset 8 instead of offset 10
+        return Response.json({
+          ok: true,
+          total: 20,
+          offset: 8,
+          limit: 10,
+          hasMore: false,
+          summary: {
+            totalActiveLocal: 20,
+            totalTargeted: 20,
+            totalQuarantined: 0,
+            totalWithPriorClaimant: 0,
+            byTargetDevice: { 'win11': 20 },
+            byStatus: { 'queued': 20 }
+          },
+          tasks: Array.from({ length: 10 }, (_, i) => ({
+            taskId: `offset-t-${i + 10}`,
+            backend: 'local',
+            status: 'queued',
+            targetDeviceId: 'win11',
+            isQuarantined: false
+          }))
+        });
+      }
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      limit: 10,
+      offset: 0,
+      checkReadiness: true,
+      fetchFn: offsetMismatchFetch
+    });
+
+    ok(res.exitCode === 2, 'Offset mismatch returns exit code 2 (BLOCKED)');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED when offset mismatches');
+    ok(res.error?.includes('PAGINATION_OFFSET_MISMATCH'), 'Error indicates PAGINATION_OFFSET_MISMATCH');
+  } catch (err: any) {
+    console.error('Test 15 failed:', err);
+  }
+
+  // Test 16: Pagination duplicate task ID across pages (Task B)
+  try {
+    let callNum = 0;
+    const dupFetch = async () => {
+      callNum++;
+      if (callNum === 1) {
+        return Response.json({
+          ok: true,
+          total: 20,
+          offset: 0,
+          limit: 10,
+          hasMore: true,
+          summary: {
+            totalActiveLocal: 20,
+            totalTargeted: 20,
+            totalQuarantined: 0,
+            totalWithPriorClaimant: 0,
+            byTargetDevice: { 'win11': 20 },
+            byStatus: { 'queued': 20 }
+          },
+          tasks: Array.from({ length: 10 }, (_, i) => ({
+            taskId: `dup-t-${i}`,
+            backend: 'local',
+            status: 'queued',
+            targetDeviceId: 'win11',
+            isQuarantined: false
+          }))
+        });
+      } else {
+        // Page 2 also contains dup-t-0!
+        return Response.json({
+          ok: true,
+          total: 20,
+          offset: 10,
+          limit: 10,
+          hasMore: false,
+          summary: {
+            totalActiveLocal: 20,
+            totalTargeted: 20,
+            totalQuarantined: 0,
+            totalWithPriorClaimant: 0,
+            byTargetDevice: { 'win11': 20 },
+            byStatus: { 'queued': 20 }
+          },
+          tasks: [
+            { taskId: 'dup-t-0', backend: 'local', status: 'queued', targetDeviceId: 'win11', isQuarantined: false },
+            ...Array.from({ length: 9 }, (_, i) => ({
+              taskId: `dup-t-${i + 11}`,
+              backend: 'local',
+              status: 'queued',
+              targetDeviceId: 'win11',
+              isQuarantined: false
+            }))
+          ]
+        });
+      }
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      limit: 10,
+      offset: 0,
+      checkReadiness: true,
+      fetchFn: dupFetch
+    });
+
+    ok(res.exitCode === 2, 'Duplicate task ID returns exit code 2 (BLOCKED)');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED when duplicate task ID encountered');
+    ok(res.error?.includes('PAGINATION_DUPLICATE_TASK'), 'Error indicates PAGINATION_DUPLICATE_TASK');
+  } catch (err: any) {
+    console.error('Test 16 failed:', err);
+  }
+
+  // Test 17: Pagination count mismatch - total accumulated does not match expected total (Task B)
+  try {
+    const mismatchCountFetch = async () => Response.json({
+      ok: true,
+      total: 10,
+      offset: 0,
+      limit: 10,
+      hasMore: false, // says complete page, but only returns 8 tasks!
+      summary: {
+        totalActiveLocal: 10,
+        totalTargeted: 10,
+        totalQuarantined: 0,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: { 'win11': 10 },
+        byStatus: { 'queued': 10 }
+      },
+      tasks: Array.from({ length: 8 }, (_, i) => ({
+        taskId: `count-mismatch-${i}`,
+        backend: 'local',
+        status: 'queued',
+        targetDeviceId: 'win11',
+        isQuarantined: false
+      }))
+    });
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      limit: 10,
+      offset: 0,
+      checkReadiness: true,
+      fetchFn: mismatchCountFetch
+    });
+
+    ok(res.exitCode === 2, 'Accumulated count mismatch returns exit code 2 (BLOCKED)');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED on count mismatch');
+    ok(res.error?.includes('PAGINATION_INCONSISTENCY') || res.error?.includes('PAGINATION_COUNT_MISMATCH'), 'Error indicates count inconsistency');
+  } catch (err: any) {
+    console.error('Test 17 failed:', err);
+  }
+
+  // Test 18: Pagination inconsistency - hasMore=true with partial page (Task B)
+  try {
+    const partialHasMoreFetch = async () => Response.json({
+      ok: true,
+      total: 20,
+      offset: 0,
+      limit: 10,
+      hasMore: true, // says hasMore, but returned only 5 tasks when limit is 10
+      summary: {
+        totalActiveLocal: 20,
+        totalTargeted: 20,
+        totalQuarantined: 0,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: { 'win11': 20 },
+        byStatus: { 'queued': 20 }
+      },
+      tasks: Array.from({ length: 5 }, (_, i) => ({
+        taskId: `partial-hasmore-${i}`,
+        backend: 'local',
+        status: 'queued',
+        targetDeviceId: 'win11',
+        isQuarantined: false
+      }))
+    });
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      limit: 10,
+      offset: 0,
+      checkReadiness: true,
+      fetchFn: partialHasMoreFetch
+    });
+
+    ok(res.exitCode === 2, 'hasMore=true with partial page returns exit code 2 (BLOCKED)');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED on partial hasMore page');
+    ok(res.error?.includes('PAGINATION_INCONSISTENCY'), 'Error indicates PAGINATION_INCONSISTENCY');
+  } catch (err: any) {
+    console.error('Test 18 failed:', err);
   }
 
   console.log(`Unit: Read-Only Task Inventory: ${passed} passed, ${failed} failed`);

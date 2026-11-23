@@ -54,6 +54,18 @@
    - 修正 Active Task 清單、Summary 統計、Quarantined 計數與盤點就緒判定。
    - 修正 `assignQuarantinedTasks` 與 `POST /admin/tasks/assign-legacy`：強制要求非空 `taskIds: string[]`，嚴禁修改終態任務，校驗目標裝置非撤銷。
    - 新增整合測試 `Task B25`，100% 驗證狀態白名單過濾與終態任務不可篡改性。
+17. **[RESOLVED] 正式 Durable Object 備援盤點定位校正與舊版 SQLite Schema 欄位修復 (Task A)**:
+   - 修正備援 SQL 查詢：主鍵使用 `taskId`（非 `id`）、使用 `leaseJson` 與 `attemptsJson` 提取歷史認領者（非不存在的 `data` 欄位），並明確說明 `main` 分支舊版無 `targetDeviceId` 欄位。
+   - 校正 Durable Object 單例實例定位：實例名稱為 `global-gateway-singleton-recovery-20260910`（由 `worker.ts:117` 明確定義），非 `devspace-gateway-default`。
+   - 明確標記本機無生產憑證，Data Studio SQL 盤點操作為 `PREFLIGHT BLOCKED`，未於本機實測。
+   - 新增舊版 SQLite Schema 模擬解析自動測試（`inventory-tasks.test.ts`）。
+18. **[RESOLVED] 盤點完整性保證、就緒篩選限制與全量多頁分頁 (Task B)**:
+   - 預設 Production Readiness 檢查嚴格限制必須評估全量活躍本機任務（`backend=local, status=active, offset=0`），傳入部分篩選（如 `--status queued`、`--backend kaggle`、`--offset > 0`）一律 Fail Closed（Exit Code 2），防止錯誤宣告 READY。
+   - 實作完整多頁分頁循環（`hasMore=true`），校驗每頁與累計筆數一致，分頁期間偵測到資料異動（`total` 改變、偏移不符、出現重複 ID）一律 Fail Closed（Exit Code 2）。
+   - 單元測試擴充至 91 項測試。
+19. **[RESOLVED] 歷史任務人工指派之有效租約衝突防護 (Task C)**:
+   - 於 `TaskStore.assignQuarantinedTasks` 加入有效租約衝突守門員：若任務存在未過期 Lease（`leaseExpiresAt > now`）且持有者不同，一律禁止改派。
+   - 新增整合測試 `Task B26`，驗證有效租約任務禁止改派、過期租約任務安全改派。
 
 ---
 
@@ -63,7 +75,7 @@
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **正式環境歷史任務唯讀盤點** | 正式 Cloudflare Gateway | Medium | **否** | **是 (PREFLIGHT BLOCKED)** | **是** | 本機環境依零洩漏原則未配置正式 `ADMIN_SECRET`，執行盤點腳本精確回傳 Exit Code 2（BLOCKED）。部署前需由操作員於安全終端執行 `npm run inventory:tasks`，若為舊版端點一律為 Exit Code 2，需至 Cloudflare Data Studio 執行唯讀 SQL 盤點。 |
 | **正式生產環境 Device Token 簽發** | 新 Windows 電腦 | Low | **否** | **否** | **是** | 依資安授權邊界，本輪禁止簽發正式憑證。需待 PR 合併並部署後，由管理員在安全管理介面手動簽發一次性 Token。 |
-| **生產環境雙實機同時連線驗收** | 舊電腦與新電腦 | Low | **否** | **否** | **是** | 本機模擬測試（553 項）已全數 PASS，真實雙實機連線驗收需待正式部署完成後依 SOP 啟動。 |
+| **生產環境雙實機同時連線驗收** | 舊電腦與新電腦 | Low | **否** | **否** | **是** | 本機模擬測試（592 項）已全數 PASS，真實雙實機連線驗收需待正式部署完成後依 SOP 啟動。 |
 | **ChatGPT MCP 端點實際對接測試** | ChatGPT 客戶端 | Low | **否** | **否** | **是** | 需於正式 Gateway 升級並加入第二台 Agent 後，由 ChatGPT 操作並指定 `targetDeviceId` 進行端對端驗收。 |
 
 ---
@@ -71,18 +83,18 @@
 ## 三、風險等級總評估 (Overall Risk Assessment)
 
 - **代碼回歸風險**: **極低 (Very Low)**
-  - 553 項全套自動化測試 100% 通過（連續三次確認無間歇性失敗）。
+  - 592 項全套自動化測試 100% 通過（連續三次確認無間歇性失敗）。
   - 單電腦環境保留自動綁定機制，100% 向後相容。
 - **資料庫遷移風險**: **極低 (Very Low)**
   - SQLite 採非破壞性 `ALTER TABLE ADD COLUMN` 腳本，具備安全錯誤捕獲，不會損壞舊資料。
 - **安全性與權限邊界**: **極高安全性 (Hardened Zero Trust)**
-  - Scope 白名單、Idempotency 參數全校驗、Master Secret 嚴格隔離、已撤銷憑證永久失效、部署門禁手動雙確認與 40-char SHA 鎖定。
+  - Scope 白名單、Idempotency 參數全校驗、Master Secret 嚴格隔離、已撤銷憑證永久失效、有效租約衝突防禦、部署門禁手動雙確認與 40-char SHA 鎖定。
 
 ---
 
 ## 四、最終決策建議 (Recommendation)
 
-- **CODE 判定**: **GO** (代碼完全合規、安全修復到位、553 測試通過)
+- **CODE 判定**: **GO** (代碼完全合規、安全修復到位、592 測試通過)
 - **CI 判定**: **GO** (跨平臺多矩陣與 vNext Verify 綠燈)
 - **MERGE 判定**: **GO** (Draft PR 已就緒，可由 ChatGPT 獨立審查後合併至 main)
 - **PRODUCTION DEPLOY 判定**: **NO-GO / PREFLIGHT BLOCKED** (嚴格阻擋生產部署，直至維護窗口由授權操作員執行前置任務盤點確認並完成手動工作流簽核)

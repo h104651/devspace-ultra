@@ -153,7 +153,7 @@
 | **舊 Agent 補登安全性 (P1)** | 文件建議使用 `POST /admin/devices` 補登舊電腦 ID | 明確禁止補登舊電腦 ID（避免 `TOKEN_SUPERSEDED` 導致斷線），改由 Gateway 連線時自動收錄 |
 | **新電腦初次驗收權限 (P1)** | 部署範例包含 `local:write`、`local:test` | 嚴格限定為最小唯讀範圍 `['local:read', 'artifacts:read']`，並移除未被 CLI 解析之 `start` 參數 |
 | **Token 回應快取安全 (P1)** | 管理端註冊回應未設置安全快取限制標頭 | 嚴格強制回傳 `Cache-Control: no-store` 與 `Pragma: no-cache` |
-| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (553/553 PASS) |
+| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (592/592 PASS) |
 
 ---
 

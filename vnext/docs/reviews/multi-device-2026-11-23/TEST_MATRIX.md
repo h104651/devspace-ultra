@@ -32,7 +32,7 @@
 | 15 | Integration: Remote MCP Transport (HTTP POST /mcp) | 整合測試 | 8 | PASS | 68ms | /mcp 端點工具調用與 OAuth 攔截 |
 | 16 | Integration: Agent Lifecycle & Durability | 整合測試 | 19 | PASS | 1597ms | Agent 斷線、重連、心跳與清理 |
 | 17 | Integration: Local Multi-Project Named Routing | 整合測試 | 29 | PASS | 804ms | 具名專案路由與許可權控制 |
-| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **34** | **PASS** | **2065ms** | **本次修復重點 (含 A1~A8, B1~B25)** |
+| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **35** | **PASS** | **2065ms** | **本次修復重點 (含 A1~A8, B1~B26)** |
 | 19 | Integration: Local Workspace Discovery & Nested Operations | 整合測試 | 15 | PASS | 42104ms | 遞迴工作區探索與檔案列舉 |
 | 20 | Integration: Kaggle Mock Backend | 整合測試 | 3 | PASS | 116ms | Kaggle 模擬後端執行 |
 | 21 | Integration: Pre-Migration Kaggle Restart Recovery | 整合測試 | 1 | PASS | 1ms | 遷移前歷史重啟恢復 |
@@ -55,9 +55,9 @@
 | 38 | Cloudflare: OAuth 2.1 & Protected Resource Metadata | Cloudflare | 20 | PASS | 2ms | OAuth 2.1 協定與安全端點元數據 |
 | 39 | Security: Zero Trust, Injections, Shell & Rate Limits | 安全測試 | 13 | PASS | 79ms | 零信任防護、指令注入、頻率限制 |
 | 40 | Security: Bootstrap Token Security & Redaction | 安全測試 | 3 | PASS | 2ms | 開機引導憑證安全脫敏 |
-| 41 | **Unit: Read-Only Task Inventory & Preflight Verification** | **單元測試** | **53** | **PASS** | **11ms** | **Task 2 唯讀任務盤點 CLI、舊版 DO 偵測、Data Studio SQL、Schema 嚴格校驗** |
+| 41 | **Unit: Read-Only Task Inventory & Preflight Verification** | **單元測試** | **91** | **PASS** | **11ms** | **Task 2 唯讀任務盤點 CLI、舊版 DO 偵測、Data Studio SQL、Schema 嚴格校驗、全量多頁分頁驗證、分頁偏移檢測與篩選安全邊界** |
 | 42 | **Unit: GitHub Actions Deployment Gate & Authorization** | **單元測試** | **32** | **PASS** | **4ms** | **Task 3 PR Merge 與生產部署完全解耦、環境變數安全傳遞與 40-char SHA 鎖定門禁** |
-| **總計** | **42 個測試套件** | — | **553** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
+| **總計** | **42 個測試套件** | — | **592** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
 
 ---
 
@@ -99,6 +99,7 @@
 | **Task B23** | Durable Object cold start preserves quarantined tasks without auto-binding | Gateway Durable Object 冷啟動水合時，歷史無認領記錄之任務安全維持在 queued 隔離狀態，絕不依賴連線自動綁定 | PASS |
 | **Task B24** | Multi-device disconnect, lease expiration, and stale recovery strictly preserves targetDeviceId | 多裝置斷線與租約過期回收情境下，targetDeviceId 與隔離狀態完全保留，重試計數正確累加 | PASS |
 | **Task B25** | Active Task Status Whitelisting and Terminal Task Assignment Exclusion | 驗證 Active 任務狀態白名單（queued, claimed, acknowledged, running, retrying），排除終態（succeeded, failed, cancelled, stale）；指派 API 嚴格禁止修改終態歷史任務 | PASS |
+| **Task B26** | Admin legacy task assignment strictly excludes tasks with active lease held by different claimant | 歷史任務改派嚴格禁止改派仍存在有效未過期 Lease 且持有者不同之任務；租約過期後方可安全改派 | PASS |
 
 ---
 
@@ -107,15 +108,15 @@
 依規範連續執行三次完整測試套件，確認無間歇性失敗 (Flaky Tests)：
 
 1. **第一次完整執行**:
-   - 測試案例: 553 Passed / 0 Failed
+   - 測試案例: 592 Passed / 0 Failed
    - Exit Code: 0
    - 執行耗時: 66,742 ms
 2. **第二次完整執行**:
-   - 測試案例: 553 Passed / 0 Failed
+   - 測試案例: 592 Passed / 0 Failed
    - Exit Code: 0
    - 執行耗時: 65,910 ms
 3. **第三次完整執行**:
-   - 測試案例: 553 Passed / 0 Failed
+   - 測試案例: 592 Passed / 0 Failed
    - Exit Code: 0
    - 執行耗時: 66,120 ms
 
@@ -124,9 +125,9 @@
 ## 五、Wrangler Deploy Dry-Run 檢驗結果
 
 ```text
- ⛅️ wrangler 4.129.0 (update available 4.166.0)
-───────────────────────────────────────────────
-Total Upload: 464.73 KiB / gzip: 93.14 KiB
+ ⛅️ wrangler 4.129.0
+────────────────────
+Total Upload: 465.29 KiB / gzip: 93.27 KiB
 Your Worker has access to the following bindings:
 Binding                                                  Resource                  
 env.GATEWAY_DO (GatewayDurableObject)                    Durable Object            

@@ -60,19 +60,33 @@
   若需直接檢視生產環境 SQLite 底層任務資料表，依下列步驟於 Cloudflare 控制臺執行唯讀查詢：
   1. 登入 Cloudflare Dashboard -> 前往 **Workers & Pages** -> 選擇 **`devspace-ultra-gateway`**。
   2. 點擊 **Durable Objects** 標籤頁，選擇命名空間 **`GatewayDurableObject`**。
-  3. 點選單例實例：**`devspace-gateway-default`**（由 `idFromName("devspace-gateway-default")` 衍生）。
+  3. 點選單例實例：**`global-gateway-singleton-recovery-20260910`**（由 `worker.ts:117` `idFromName("global-gateway-singleton-recovery-20260910")` 衍生）。
   4. 開啟 **Data Studio** / **Storage SQL Console**，執行以下唯讀 SQL 查詢：
      ```sql
-     SELECT id, status, backend,
-            json_extract(data, '$.targetDeviceId') AS targetDeviceId,
-            json_extract(data, '$.lease.claimedBy') AS claimedBy
+     SELECT taskId, status, backend, createdAt,
+            json_extract(leaseJson, '$.claimedBy') AS leaseClaimant,
+            json_extract(leaseJson, '$.leaseExpiresAt') AS leaseExpiresAt,
+            json_extract(attemptsJson, '$[0].claimedBy') AS firstAttemptClaimant,
+            attemptsJson
      FROM tasks
      WHERE backend = 'local'
-       AND status IN ('queued', 'claimed', 'acknowledged', 'running', 'retrying');
+       AND status IN ('queued', 'claimed', 'acknowledged', 'running', 'retrying')
+     ORDER BY createdAt ASC;
      ```
-  5. 權限需求：需具備 Account Administrator 或 Workers Administrator（含 Durable Objects Storage 讀取權限）。
+  5. 舊版 Schema 限制與欄位定位：
+     - 在 `main` 分支既有生產版本（`v2.1.0 @ 1a933d3`）的 SQLite Schema 中，資料表主鍵為 `taskId`（非 `id`），且尚未存在 `targetDeviceId` 欄位（直接查詢 `targetDeviceId` 會拋出 `no such column` 錯誤）。
+     - 歷史任務之擁有者資訊存放於 `leaseJson`（租約 JSON）與 `attemptsJson`（嘗試歷程 JSON 陣列）中，透過 `json_extract` 精確識別歷史認領者。
+  6. 實測狀態與防禦聲明：
+     - **PREFLIGHT BLOCKED**：由於本機環境未持有生產環境 Cloudflare 控制臺管理權限與生產資料庫存取憑證，此步驟**未於本機實測**，嚴禁宣稱已完成正式實測。
+     - 正式部署前必須由運維人員於 Cloudflare 控制臺手動執行上述查詢，確認無孤立未指派之活躍任務後方可放行。
+  7. 權限需求：需具備 Account Administrator 或 Workers Administrator（含 Durable Objects Storage 讀取權限）。
 - **處置原則**:
   - 確認是否有懸空未指派（quarantined）任務；若有，必須透過 `POST /admin/tasks/assign-legacy` 提供明確且非空的 `taskIds: [...]` 指定目標裝置，或等待其執行完成。
+  - **指派安全性邊界保證**：
+    1. 僅允許明確授權且存在於 `taskIds` 清單中之任務。
+    2. 終態任務（`succeeded`, `failed`, `cancelled`, `stale`）維持不可變性，嚴禁修改。
+    3. 若任務當前仍存在未過期之有效 Lease（`leaseExpiresAt > now`），且持有者與目標裝置不同，系統嚴格拒絕改派，杜絕中途搶奪進行中任務。
+    4. 未指定目標且無歷史 Claimant 之任務，在管理員明確指派前，任何 Agent 輪詢均無法領取（Fail Closed）。
   - 未完成上述盤點驗證前，正式部署門禁一律判定為 **NO-GO / PREFLIGHT BLOCKED**。
 
 ### 階段 D：確認舊 Windows Bootstrap Token、裝置身分及任務擁有權相容性
