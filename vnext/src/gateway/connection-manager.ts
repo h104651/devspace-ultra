@@ -147,7 +147,12 @@ export class ConnectionManager {
 
       this.agents.set(authoritativeDeviceId, agent);
       this.sockets.set(socket, agent);
+      this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, (msg.platform as any) || 'windows');
       this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online', ip);
+      const activeDevices = this.authManager.listDevices().filter(d => d.status !== 'revoked').map(d => d.deviceId);
+      if (activeDevices.length === 1 && activeDevices[0] === authoritativeDeviceId) {
+        this.taskStore.migrateLegacyUnassignedTasks([authoritativeDeviceId]);
+      }
       this.auditLogger.log({
         actor: authoritativeDeviceId,
         actorType: 'device',

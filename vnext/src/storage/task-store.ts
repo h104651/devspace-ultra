@@ -404,18 +404,20 @@ export class TaskStore {
             task.targetDeviceId = knownDeviceIds[0];
             this.saveTask(task);
             migrated++;
-          } else {
+          } else if (knownDeviceIds.length > 1) {
             task.status = 'failed';
             task.error = {
               code: 'AMBIGUOUS_LEGACY_TASK',
-              message: knownDeviceIds.length === 0
-                ? 'Legacy task was created without targetDeviceId and cannot be safely routed with zero registered devices.'
-                : `Legacy task was created without targetDeviceId and cannot be safely routed in a multi-device environment (${knownDeviceIds.join(', ')}).`
+              message: `Legacy task was created without targetDeviceId and cannot be safely routed in a multi-device environment (${knownDeviceIds.join(', ')}).`
             };
             task.completedAt = Date.now();
             this.saveTask(task);
             failedAmbiguous++;
           }
+          // Note: When knownDeviceIds.length === 0, the task remains queued without targetDeviceId.
+          // Because claimTask() strictly requires targetDeviceId === deviceId, no agent can claim it.
+          // When an authoritative agent reconnects (knownDeviceIds.length === 1), it is safely bound.
+          // If multiple devices register before connection (knownDeviceIds.length > 1), it fails closed.
         }
       }
     }

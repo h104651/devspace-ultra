@@ -52,8 +52,8 @@
   ```
 - 既有 `devices` 記錄維持完整，水合過程自動完成舊任務遷移（`migrateLegacyUnassignedTasks`）。
 
-### 步驟 3：透過受保護的管理介面註冊新電腦
-使用受保護的管理密鑰向正式 Gateway 請求註冊新裝置：
+### 步驟 3：透過受保護的管理介面註冊新電腦 (僅限最小唯讀權限)
+使用受保護的管理密鑰向正式 Gateway 請求註冊新裝置（新 Windows 電腦初次驗收嚴格限定唯讀權限）：
 ```bash
 curl -X POST https://devspace-ultra-gateway.abdul-hsu.workers.dev/admin/devices \
   -H "Content-Type: application/json" \
@@ -62,16 +62,16 @@ curl -X POST https://devspace-ultra-gateway.abdul-hsu.workers.dev/admin/devices 
     "name": "New Windows Workstation",
     "platform": "windows",
     "deviceId": "win11-arm64-workstation-2",
-    "capabilities": ["local:read", "local:write", "local:test"]
+    "capabilities": ["local:read", "artifacts:read"]
   }'
 ```
-- 若請求省略 `capabilities`，系統將預設為最小唯讀範圍 `["local:read", "artifacts:read"]`，絕不自動給予 `local:write`、`local:exec` 或 Raw Shell 權限。
+- 初次驗收**嚴格限定最小唯讀範圍 `["local:read", "artifacts:read"]`**，絕不自動給予 `local:write`、`local:exec` 或 Raw Shell 權限。
 - 回應標頭嚴格包含 `Cache-Control: no-store` 與 `Pragma: no-cache`，防止 Token 在代理伺服器或快取中洩漏。
 - 記錄回傳之一次性 `token`，妥善存入新電腦本機環境變數或啟動腳本。
 - 確認日誌中無明文 Token 殘留。
 
 ### 步驟 4：在新電腦啟動第二台 Local Agent
-在 `agent-cli.ts` 規格中，認證連線參數由環境變數讀取，專案設定檔透過 `--projects-config` 指定。請在新 Windows 電腦以 PowerShell 執行：
+在 `agent-cli.ts` 規格中，認證連線參數由環境變數讀取，專案設定檔透過 `--projects-config` 指定（移除未被 CLI 解析之 `start` 參數）。請在新 Windows 電腦以 PowerShell 執行：
 ```powershell
 # 1. 切換至 vnext 目錄
 cd C:\Users\testuser\DevSpace\devspace-ultra\vnext
@@ -82,8 +82,8 @@ $env:AGENT_ID = "win11-arm64-workstation-2"
 $env:AGENT_TOKEN = "<NEW_DEVICE_TOKEN>"
 $env:ALLOW_RAW_SHELL = "false"
 
-# 3. 啟動 Outbound Local Agent
-node dist/cli/agent-cli.js start --projects-config "$HOME\DevSpace\agent-config\projects.json"
+# 3. 啟動 Outbound Local Agent (嚴格以專案白名單執行)
+node dist/cli/agent-cli.js --projects-config "$HOME\DevSpace\agent-config\projects.json"
 ```
 
 ### 步驟 5：雙 Agent 同時在線驗收
@@ -95,20 +95,41 @@ node dist/cli/agent-cli.js start --projects-config "$HOME\DevSpace\agent-config\
 
 ---
 
-## 四、特別調查報告：正式環境裝置狀態差異 (`totalRegistered: 0 / totalOnline: 1`)
+## 四、正式環境歷史任務安全升級與舊 Agent 相容性報告
 
-在 ChatGPT 先前執行的獨立審查中，觀察到正式 Cloudflare Gateway 上 `device_status` 回傳：
-`totalRegistered: 0, totalOnline: 1`。
+### 1. 部署前唯讀任務盤點設計與狀態 (Pre-Deployment Read-Only Task Inventory)
+- **盤點介面**: Gateway 具備唯讀任務盤點端點 `GET /admin/tasks`（需帶 `X-Admin-Secret` 標頭）。該端點直接向 SQLite 查詢 `tasks` 資料表，不修改、不刪除、不觸發任何任務狀態機流轉。
+- **盤點執行限制**: 由於本機為新受管環境，依最小權限與零洩漏原則，未配置正式環境 `ADMIN_SECRET`，且禁止發送正式寫入或探測請求。
+- **預檢判定**: **PRODUCTION PREFLIGHT BLOCKED**。
+  - **不得假設正式環境任務數量為零**。
+  - 在無法從本機直接調用 `/admin/tasks` 盤點正式資料庫的情況下，必須在系統架構層面確保**即便存在歷史未完成任務，升級時亦 100% 不會造成任務遺失或錯配**。
 
-### 1. 根本原因深入分析
-- **歷史架構機制**：在本次 PR #23 之前，Gateway 並無 `/admin/devices` 動態註冊介面。舊電腦（`win11-arm64-workstation`）採用初始啟動模式，其 Agent Token 是由管理者直接使用 `MASTER_SECRET` 以 HMAC-SHA256 簽署產生的 Bootstrap Token。
-- **資料表水合差異**：舊版 Gateway 未在 Cloudflare DO SQLite 的 `devices` 表中寫入記錄，因此 `authManager.listDevices()` 回傳空陣列（`totalRegistered: 0`）。
-- **連線層驗證通過**：當舊電腦 Agent 建立 WebSocket 連線時，`AuthManager.validateToken` 使用 `MASTER_SECRET` 驗證其 HMAC 簽名成功，連線被 `ConnectionManager` 正常收錄並維持心跳，因此線上連線數為 1（`totalOnline: 1`）。
-- **向下相容防護**：`McpHandlers.handleDeviceStatus`（第 1316-1332 行）具備向前容錯機制，會主動掃描 `ConnectionManager` 中在線但未在 `devices` 表中列出的裝置，將其列入狀態報告（標註 `isRegistered: false`）。
+### 2. 歷史未完成任務遷移安全性 (Zero Task Loss Architecture)
+針對正式 SQLite 中可能存在的未完成任務（Queued、Claimed、Running、Retrying）：
+- **存在歷史 Claimant 的任務**:
+  - `TaskStore.migrateLegacyUnassignedTasks` 會依序檢查 `task.lease?.claimedBy` 與 `task.attempts` 中的歷史認領者。
+  - 一旦存在歷史 Claimant，**即便系統當前 0 台裝置在線，亦無條件保留並綁定回原目標電腦 (`win11-arm64-workstation`)**。
+  - 任務不會被改派，也不會轉為失敗。
+- **純排隊中且無歷史 Claimant 的歷史任務 (Queued without Claimant)**:
+  - 在過去的實作中，0 註冊裝置時會直接標記為 `failed`。
+  - **最新安全修復**: 當 `knownDeviceIds.length === 0`（冷啟動時 0 台註冊裝置）時，`migrateLegacyUnassignedTasks([])` **不會將其標記為 failed，而是安全保留在 queued 狀態**（非破壞性隔離）。
+  - 同時，因為 `claimTask` 嚴格要求本地任務必須包含相符之 `targetDeviceId`，任何新接入的未授權 Agent 均無法認領此懸空任務（Fail Closed 認領保護）。
+  - 當舊電腦 `win11-arm64-workstation` 重新建立 WebSocket 連線時，Gateway 自動執行 `rememberAuthenticatedDevice`，識別出系統中唯一的合法裝置，隨後自動觸發 `migrateLegacyUnassignedTasks(['win11-arm64-workstation'])`，將該任務安全綁定給舊電腦並由其順利認領執行，達到 **Zero Task Loss**。
+  - 若管理員在舊電腦上線前先註冊了多台新電腦（`knownDeviceIds.length > 1`），此時任務才因目標模糊而轉為 `failed`（`AMBIGUOUS_LEGACY_TASK`），確保多裝置環境下絕不錯配。
 
-### 2. 本次升級對舊電腦的相容性保證
-- **Token 仍然有效**：PR #23 的 Token 驗證機制保留了對 `MASTER_SECRET` 簽名 Token 的完整驗證相容性，部署新版 Worker **不會**中斷舊電腦的連線或使其 Token 失效。
-- **補登建議（非強制）**：部署 PR #23 後，管理者亦可使用 `POST /admin/devices` 將舊電腦裝置 ID `win11-arm64-workstation` 正式登錄進 SQLite，屆時 `totalRegistered` 將正常計入該裝置。
+### 3. 舊電腦正式狀態 (`totalRegistered: 0 / totalOnline: 1`) 與嚴禁補登說明
+- **根本原因深入分析**：
+  - 在 PR #23 之前，Gateway 並無 `/admin/devices` 動態註冊介面。舊電腦（`win11-arm64-workstation`）採用初始啟動模式，其 Agent Token 是由管理者直接使用 `MASTER_SECRET` 以 HMAC-SHA256 簽署產生的 Bootstrap Token。
+  - 舊版 Gateway 未在 Cloudflare DO SQLite 的 `devices` 表中寫入記錄，因此 `authManager.listDevices()` 回傳空陣列（`totalRegistered: 0`）。
+  - 當舊電腦 Agent 建立 WebSocket 連線時，`AuthManager.validateToken` 使用 `MASTER_SECRET` 驗證其 HMAC 簽名成功，連線被 `ConnectionManager` 正常收錄並維持心跳（`totalOnline: 1`）。
+- **【嚴正警告】嚴禁使用 `POST /admin/devices` 補登舊電腦 ID**:
+  - 經單元與整合測試證實（詳見 `Task B16`）：
+    1. 若對已在線的舊電腦 ID 調用 `POST /admin/devices`，系統將因 ID 存在而拋出 `DEVICE_ID_CONFLICT`。
+    2. 若先將舊電腦撤銷再重新註冊，系統將會為其生成全新的 `activeTokenId`。此時舊電腦現有的 Bootstrap Token 在重新連線時將被判定為 `TOKEN_SUPERSEDED`，導致**舊電腦永久無法連線**！
+- **正確相容流程 (Zero-Interruption SOP)**:
+  - **完全不需對舊電腦執行任何註冊操作**。
+  - 舊電腦持續使用既有 Bootstrap Token 保持連線。
+  - 部署新版 Gateway 後，舊電腦重連時會由 Gateway 呼叫 `rememberAuthenticatedDevice`，自動收錄進 SQLite `devices` 表，舊憑證完全不受影響。
 
 ---
 

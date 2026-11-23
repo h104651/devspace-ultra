@@ -969,6 +969,10 @@ class GatewayDurableObject {
                 if (devRecord) {
                     await this.storage.saveDevice(devRecord);
                 }
+                const activeDevices = this.authManager.listDevices().filter(d => d.status !== 'revoked').map(d => d.deviceId);
+                if (activeDevices.length === 1 && activeDevices[0] === authoritativeDeviceId) {
+                    this.taskStore.migrateLegacyUnassignedTasks([authoritativeDeviceId]);
+                }
                 ws.serializeAttachment({
                     deviceId: authoritativeDeviceId,
                     name: msg.name || authoritativeDeviceId,

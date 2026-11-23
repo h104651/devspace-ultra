@@ -104,7 +104,8 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
 - Gateway 在啟動或冷啟動水合時，自動審視歷史留存任務：
   - **有歷史認領者**: 綁定至該次租約認領者，確保重試不會送錯電腦。
   - **單裝置環境**: 自動補齊唯一裝置 ID。
-  - **多裝置或零註冊裝置環境**: 歷史未綁定任務直接標記為失敗（`AMBIGUOUS_LEGACY_TASK`），嚴守 Fail Closed 原則，防止未來新電腦註冊時誤領。
+  - **零註冊裝置冷啟動環境**: 歷史未綁定任務非破壞性保留於 `queued` 狀態，透過 `claimTask` 嚴格拒絕認領防止冒牌 Agent 偷領，待唯一的舊 Agent 重新連線時自動安全綁定（Zero Task Loss）。
+  - **多裝置環境**: 歷史未綁定任務直接標記為失敗（`AMBIGUOUS_LEGACY_TASK`），嚴守 Fail Closed 原則，防止目標模糊錯配。
 
 ### 3. 資料庫 Schema 遷移相容性
 - 在 `devices` 資料表新增 `activeTokenId TEXT` 欄位。
@@ -114,7 +115,12 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
   ```
 - 腳本被包含在 `try/catch` 容錯塊中。既有資料表紀錄在水合時保持有效，無需清空資料庫或手動下 SQL。
 
-### 4. Raw Shell 安全邊界
+### 4. 舊電腦 Bootstrap Token 相容性與嚴禁重新註冊
+- 舊電腦（`win11-arm64-workstation`）使用以 `MASTER_SECRET` HMAC-SHA256 簽署之 Bootstrap Token 連線。
+- Gateway 連線層會在 WebSocket 認證成功時自動調用 `rememberAuthenticatedDevice`，收錄進 SQLite `devices` 表，且**不覆寫 `activeTokenId`**，確保舊 Token 永遠有效。
+- **嚴禁使用 `POST /admin/devices` 補登舊電腦 ID**：若管理端調用此 API 註冊同一 ID，將會產生新的 `activeTokenId`，使得舊電腦之 Bootstrap Token 在驗證時被判定為 `TOKEN_SUPERSEDED` 而永久斷線（已由 `Task B16` 完整測試證實）。
+
+### 5. Raw Shell 安全邊界
 - 本次升級完全不開放 Raw Shell。
 - Local Agent 預設 `allowRawShell: false`。
 - 本機專案目錄限制僅授權登記於 `projects.json` 的路徑，不得存取未授權磁碟分割區。

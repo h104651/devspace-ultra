@@ -16,13 +16,15 @@
 1. **修復 GitHub CI 真實失敗 (Task B7)**:
    - 解決 Task B7 在 GitHub Actions Linux 虛擬機上因即時 Agent 輪詢搶先執行 Stale Recovery 導致的非同步競態斷言問題。
    - 補齊隔離測試 `Task B7b`，驗證 Stale Recovery 在無背景干擾下的精準回收與重試耗盡終態。
-2. **補齊最後的路由安全問題**:
+2. **補齊最後的路由安全與相容性問題**:
    - 完整五種裝置狀態路由矩陣（0註冊/0在線、1註冊/0在線、2註冊/0在線、1在線/2註冊、2在線/2註冊），杜絕模糊派工。
    - 強化 Idempotency Replay 防護：禁止未授權請求透過 Idempotency 繞過權限；完整比對 `targetDeviceId`、`backend`、`capability`、`payload` 參數衝突。
-   - 舊任務遷移保證 Fail Closed，禁止歷史未綁定任務被錯誤裝置領取；在 0 註冊裝置冷啟動時標記失敗（`AMBIGUOUS_LEGACY_TASK`）。
+   - 舊任務遷移保證 Zero Task Loss 與 Fail Closed：在 0 註冊裝置冷啟動時非破壞性保留於 queued 狀態，待唯一的舊 Agent 重新連線時自動安全綁定；多裝置註冊時則 Fail Closed 標記失敗（`AMBIGUOUS_LEGACY_TASK`）。
    - `claimTask` 與 `claimTaskById` 嚴格限制本地任務只有明確指定且匹配該裝置之 `targetDeviceId` 方可領取（Fail Closed）。
+   - 嚴格禁止使用 `POST /admin/devices` 補登舊電腦 ID（防止 `TOKEN_SUPERSEDED` 導致斷線），新舊 Agent 憑證機制 100% 平滑向下相容。
+   - 詳查 PR #23 中 Kaggle 變更來源（源自工作分支基準 Commit `8187c14`），提供逐檔分析與保留依賴證據。
 3. **完成全套回歸測試與 Wrangler Dry Run**:
-   - 458 / 458 測試 PASS（0 失敗，連續 3 次通過）。
+   - 460 / 460 測試 PASS（0 失敗，連續 3 次通過）。
    - Wrangler 部署預檢 PASS。
 4. **交付 7 份審查技術文件**:
    - 保存在 `vnext/docs/reviews/multi-device-2026-11-23/`，供 ChatGPT 與審查工程師完整閱讀與評估。
@@ -69,7 +71,7 @@
 ## 五、最終結論判定 (GO / NO-GO)
 
 - **程式碼修復與安全強化**: **GO** (100% 完成且經單元/整合驗證)
-- **本機 Windows ARM64 測試**: **GO** (458/458 PASS)
+- **本機 Windows ARM64 測試**: **GO** (460/460 PASS)
 - **Cloudflare 部署預檢 (Dry Run)**: **GO** (Exit code 0, 資源 Binding 完整)
 - **GitHub PR Merge 資格**: **GO** (代碼完整、Draft PR 就緒、審查文件齊全)
 - **正式環境部署資格 (Production Deploy)**: **CONDITIONAL GO** (等待 ChatGPT 人工完成 GitHub 審查，並由管理者簽發正式 Device Token 後方可執行)

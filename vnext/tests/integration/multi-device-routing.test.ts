@@ -1122,17 +1122,18 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       assert.strictEqual(legacyUnassigned.targetDeviceId, undefined);
       assert.strictEqual(legacyUnassigned.status, 'queued');
 
-      // 2 & 3. Simulate Gateway cold start with 0 registered devices & execute Legacy Migration
+      // 2 & 3. Simulate Gateway cold start with 0 registered devices & execute Legacy Migration:
+      // In a 0-device state, unassigned tasks are preserved in queued status without data loss.
       const migZeroRes = store.migrateLegacyUnassignedTasks([]);
-      assert.strictEqual(migZeroRes.failedAmbiguous, 1, 'Zero registered devices migration must fail closed');
+      assert.strictEqual(migZeroRes.failedAmbiguous, 0);
       assert.strictEqual(migZeroRes.migrated, 0);
-      const migratedTask = store.getTask(legacyUnassigned.taskId);
-      assert.strictEqual(migratedTask?.status, 'failed', 'Unassigned legacy task in 0-device environment must be failed');
-      assert.strictEqual((migratedTask?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+      const preservedTask = store.getTask(legacyUnassigned.taskId);
+      assert.strictEqual(preservedTask?.status, 'queued', 'Unassigned legacy task in 0-device environment is preserved without destruction');
+      assert.strictEqual(preservedTask?.targetDeviceId, undefined);
 
-      // 4 & 5. Simulate new Agent polling and verify no Agent can claim it
+      // 4 & 5. Simulate new Agent polling and verify no Agent can claim it because targetDeviceId is unset (Fail-Closed claim)
       const pollNewAgent = store.claimTask('agent-new-01', ['local:read_file']);
-      assert.strictEqual(pollNewAgent, undefined, 'New agent must never claim failed unassigned legacy task');
+      assert.strictEqual(pollNewAgent, undefined, 'New agent must never claim unassigned legacy task');
 
       // 6. Separately verify claimTask() and claimTaskById() reject unassigned queued tasks
       const queuedUnassigned = store.createTask({
@@ -1209,7 +1210,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       // 9. Verify single-device auto-migration and multi-device fail-closed behavior
       const legacySingle = store.createTask({ backend: 'local', capability: 'local:read_file', payload: { path: 'single.txt' } });
       const migSingle = store.migrateLegacyUnassignedTasks(['sole-device-beta']);
-      assert.strictEqual(migSingle.migrated, 1);
+      assert.strictEqual(migSingle.migrated, 3, 'All previously preserved unassigned tasks and the new task are migrated');
       assert.strictEqual(store.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-beta');
 
       const legacyMulti = store.createTask({ backend: 'local', capability: 'local:read_file', payload: { path: 'multi.txt' } });
@@ -1246,15 +1247,121 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       const doColdInstance = new GatewayDurableObject(mockCtxDo, mockEnvDo);
       await (doColdInstance as any).initializeFromDurableStorage();
 
-      // Verify DO cold start ran legacy migration and marked unassigned task failed in SQLite
+      // Verify DO cold start preserves legacy unassigned task without destruction
       const coldLoaded = (doColdInstance as any).taskStore.getTask('do-cold-legacy-01');
-      assert.strictEqual(coldLoaded?.status, 'failed', 'DO cold start must fail closed unassigned legacy task with 0 registered devices');
-      assert.strictEqual(coldLoaded?.error?.code, 'AMBIGUOUS_LEGACY_TASK');
+      assert.strictEqual(coldLoaded?.status, 'queued', 'DO cold start preserves legacy unassigned task without destruction');
+      assert.strictEqual(coldLoaded?.targetDeviceId, undefined);
+      // Imposter agent strictly cannot claim it
+      assert.strictEqual((doColdInstance as any).taskStore.claimTask('imposter-agent', ['local:read_file']), undefined);
 
-      // Verify SQLite state persisted
-      const sqliteSaved = await (doColdInstance as any).storage.getTask('do-cold-legacy-01');
-      assert.strictEqual(sqliteSaved?.status, 'failed');
-      assert.strictEqual(sqliteSaved?.error?.code, 'AMBIGUOUS_LEGACY_TASK');
+      // When the authoritative old agent reconnects:
+      (doColdInstance as any).authManager.rememberAuthenticatedDevice('token-bootstrap-1', 'win11-arm64-workstation', 'Old PC', ['local:read_file']);
+      const activeDevs = (doColdInstance as any).authManager.listDevices().map((d: any) => d.deviceId);
+      (doColdInstance as any).taskStore.migrateLegacyUnassignedTasks(activeDevs);
+      const reconnectedLoaded = (doColdInstance as any).taskStore.getTask('do-cold-legacy-01');
+      assert.strictEqual(reconnectedLoaded?.targetDeviceId, 'win11-arm64-workstation');
+      const claimed = (doColdInstance as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
+      assert.ok(claimed);
+      assert.strictEqual(claimed.taskId, 'do-cold-legacy-01');
+    });
+
+    await test('Task B16: Old agent Bootstrap Token compatibility and prohibition of re-registration', async () => {
+      const auth = new AuthManager(testMasterSecret);
+      // 1. Old agent boots with Bootstrap Token (HMAC signed by MASTER_SECRET)
+      const { token: bootstrapToken } = auth.generateToken('win11-arm64-workstation', 'device', ['local:read', 'local:write', 'artifacts:read']);
+      const valInitial = auth.validateToken(bootstrapToken);
+      assert.strictEqual(valInitial.valid, true);
+
+      // 2. Old agent establishes connection and is remembered
+      auth.rememberAuthenticatedDevice(bootstrapToken, 'win11-arm64-workstation', 'Old PC', ['local:read', 'local:write']);
+      assert.strictEqual(auth.getDevice('win11-arm64-workstation')?.status, 'online');
+      assert.strictEqual(auth.getDevice('win11-arm64-workstation')?.activeTokenId, undefined);
+
+      // 3. Reconnection works seamlessly with the same Bootstrap Token
+      const valReconnect = auth.validateToken(bootstrapToken);
+      assert.strictEqual(valReconnect.valid, true);
+
+      // 4. Calling registerDevice on active device ID is strictly blocked
+      assert.throws(() => {
+        auth.registerDevice('Old PC Duplicate', 'windows', ['local:read'], 'win11-arm64-workstation');
+      }, /DEVICE_ID_CONFLICT/);
+
+      // 5. If device is revoked and re-registered with new token, old token is permanently superseded
+      auth.revokeDevice('win11-arm64-workstation', 'Admin test revocation');
+      const { token: newToken } = auth.registerDevice('Old PC Replaced', 'windows', ['local:read'], 'win11-arm64-workstation');
+      const valOldRevoked = auth.validateToken(bootstrapToken);
+      assert.strictEqual(valOldRevoked.valid, false);
+      assert.ok(valOldRevoked.error?.includes('TOKEN_SUPERSEDED') || valOldRevoked.error?.includes('DEVICE_REVOKED'));
+      const valNew = auth.validateToken(newToken);
+      assert.strictEqual(valNew.valid, true);
+    });
+
+    await test('Task B17: Gateway cold start with zero registered devices preserves legacy queued tasks until single agent reconnects', async () => {
+      // 1. Setup DO with an unassigned legacy queued task in SQLite
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doInstance = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      const legacyTask: any = {
+        taskId: 'legacy-cold-queued-01',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'queued',
+        priority: 0,
+        payload: { path: 'legacy.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        artifacts: [],
+        logs: [],
+        createdAt: Date.now() - 5000,
+        updatedAt: Date.now() - 5000
+      };
+      await (doInstance as any).storage.saveTask(legacyTask);
+
+      // 2. Cold start DO
+      const doCold = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+      await (doCold as any).initializeFromDurableStorage();
+
+      // 3. Verify task is NOT failed; remains queued and un-claimable by random agent
+      const loaded = (doCold as any).taskStore.getTask('legacy-cold-queued-01');
+      assert.strictEqual(loaded?.status, 'queued');
+      assert.strictEqual(loaded?.targetDeviceId, undefined);
+      assert.strictEqual((doCold as any).taskStore.claimTask('random-agent', ['local:read_file']), undefined);
+
+      // 4. Old Agent reconnects via WebSocket AGENT_REGISTER
+      const auth = (doCold as any).authManager;
+      const { token: oldToken } = auth.generateToken('win11-arm64-workstation', 'device', ['local:read', 'artifacts:read']);
+      const wsFake: any = {
+        _att: null,
+        serializeAttachment: (att: any) => { wsFake._att = att; },
+        deserializeAttachment: () => wsFake._att,
+        send: () => {},
+        close: () => {}
+      };
+      // Simulate AGENT_REGISTER message
+      await (doCold as any).webSocketMessage(
+        wsFake,
+        JSON.stringify({
+          type: 'AGENT_REGISTER',
+          messageId: 'reg-msg-1',
+          deviceId: 'win11-arm64-workstation',
+          name: 'Old PC Agent',
+          token: oldToken,
+          capabilities: ['local:read_file']
+        })
+      );
+
+      // 5. Verify unassigned task is automatically and safely bound to the sole reconnected agent
+      const taskAfterReconnect = (doCold as any).taskStore.getTask('legacy-cold-queued-01');
+      assert.strictEqual(taskAfterReconnect?.targetDeviceId, 'win11-arm64-workstation');
+      assert.strictEqual(taskAfterReconnect?.status, 'queued');
+
+      // 6. Old agent polls and claims it successfully
+      const claimed = (doCold as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
+      assert.ok(claimed);
+      assert.strictEqual(claimed.taskId, 'legacy-cold-queued-01');
     });
 
   } finally {
