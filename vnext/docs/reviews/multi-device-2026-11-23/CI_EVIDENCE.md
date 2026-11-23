@@ -59,16 +59,16 @@
 
 ## 三、遠端 CI 驗收結果 (Remote CI Execution Evidence)
 
-本次最終修復 Commit `5084bc4` 推送至 GitHub PR #23 後，GitHub Actions 執行結果：
+本次最新修復 Commit `9af473168bf0cd4a21a6a3908b9b739bf09f1819` 推送至 GitHub PR #23 後，GitHub Actions 執行結果：
 
 1. **Workflow: `vNext CI & Production Deploy`**:
-   - **Run ID**: [45125168802](https://github.com/h104651/devspace-ultra/actions/runs/45125168802)
+   - **Run ID**: [45144349645](https://github.com/h104651/devspace-ultra/actions/runs/45144349645)
    - **狀態**: **SUCCESS** (All jobs green)
-   - **Job `verify-vnext`**: 耗時 1m21s，全套單元、整合、協定與安全測試（458 / 458 PASS）及 Cloudflare deploy dry-run 全數通過。
-   - **Job `Deploy Cloudflare production`**: 依規則自動跳過（Draft PR 狀態防護生效），未執行任何生產部署。
+   - **Job `verify-vnext`**: 耗時 1m29s，全套單元、整合、協定與安全測試（553 / 553 PASS）及 Cloudflare deploy dry-run 全數通過。
+   - **Job `Deploy Cloudflare production`**: 依規則自動跳過（生產部署門禁解耦生效，非手動 dispatch 跳過），未執行任何生產部署。
 
 2. **Workflow: `CI` (跨平臺多版本矩陣)**:
-   - **Run ID**: [45125168776](https://github.com/h104651/devspace-ultra/actions/runs/45125168776)
+   - **Run ID**: [45144349698](https://github.com/h104651/devspace-ultra/actions/runs/45144349698)
    - **狀態**: **SUCCESS** (9/9 matrix jobs green)
    - **覆蓋矩陣**:
      - Ubuntu-latest (Node 22, 24, 26) -> PASS
