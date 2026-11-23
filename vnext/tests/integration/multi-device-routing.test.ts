@@ -564,21 +564,77 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       // Claim by target device with 1ms lease
       const claimed = server.taskStore.claimTaskById(task.taskId, 'win11-arm64-workstation-2', 1)!;
       assert.ok(claimed);
-      await new Promise(r => setTimeout(r, 10)); // wait for lease to expire
+      await new Promise(r => setTimeout(r, 15)); // wait for lease to expire
 
-      // Trigger stale recovery
+      // Trigger stale recovery (or observe that background live agent poll already recovered it)
       const rec = server.taskStore.recoverStaleTasks();
-      assert.ok(rec.recoveredCount >= 1);
-
       const recoveredTask = server.taskStore.getTask(task.taskId)!;
       assert.strictEqual(recoveredTask.status, 'queued');
+      assert.strictEqual(recoveredTask.retryPolicy.retryCount, 1, 'retryCount must be incremented on lease expiration');
       assert.strictEqual(recoveredTask.targetDeviceId, 'win11-arm64-workstation-2', 'targetDeviceId must be preserved after stale lease recovery');
+      assert.strictEqual(recoveredTask.lease, undefined);
+      assert.strictEqual(recoveredTask.attempts?.length, 1);
+      assert.strictEqual(recoveredTask.attempts?.[0]?.status, 'interrupted');
+      assert.strictEqual(recoveredTask.attempts?.[0]?.errorCode, 'TASK_LEASE_EXPIRED');
 
       // Old PC still cannot claim recovered task
       const stealAttempt = server.taskStore.claimTask('win11-arm64-workstation', ['local:run_tests']);
       if (stealAttempt) {
         assert.notStrictEqual(stealAttempt.taskId, task.taskId, 'Old PC must not be assigned recovered task targeted to New PC');
       }
+
+      // New PC (target device) can safely re-claim the recovered task (Attempt 2)
+      const reClaimed = server.taskStore.claimTaskById(task.taskId, 'win11-arm64-workstation-2')!;
+      assert.ok(reClaimed, 'Target device must be permitted to re-claim task after lease recovery');
+      assert.strictEqual(reClaimed.status, 'claimed');
+      assert.strictEqual(reClaimed.attempts?.length, 2, 'Re-claimed task must have second attempt in ledger');
+      assert.strictEqual(reClaimed.attempts?.[1]?.claimedBy, 'win11-arm64-workstation-2');
+    });
+
+    await test('Task B7b: Deterministic TaskStore lease recovery and retry exhaustion in isolation', async () => {
+      const isolatedStore = new TaskStore();
+      const task = isolatedStore.createTask({
+        backend: 'local',
+        capability: 'local:run_tests',
+        payload: { projectId: 'project-isolated' },
+        targetDeviceId: 'isolated-device-target',
+        maxRetries: 2
+      });
+
+      // Attempt 1: Claim with 1ms lease and expire
+      isolatedStore.claimTaskById(task.taskId, 'isolated-device-target', 1);
+      await new Promise(r => setTimeout(r, 15));
+      const rec1 = isolatedStore.recoverStaleTasks();
+      assert.strictEqual(rec1.recoveredCount, 1, 'First lease expiration must recover exactly 1 task');
+      assert.strictEqual(rec1.failedCount, 0);
+      const afterRec1 = isolatedStore.getTask(task.taskId)!;
+      assert.strictEqual(afterRec1.status, 'queued');
+      assert.strictEqual(afterRec1.retryPolicy.retryCount, 1);
+      assert.strictEqual(afterRec1.attempts?.[0]?.status, 'interrupted');
+      assert.strictEqual(afterRec1.attempts?.[0]?.errorCode, 'TASK_LEASE_EXPIRED');
+
+      // Other device cannot steal it
+      const stolen = isolatedStore.claimTask('wrong-device', ['local:run_tests']);
+      assert.strictEqual(stolen, undefined);
+
+      // Attempt 2: Target device re-claims and expires
+      isolatedStore.claimTaskById(task.taskId, 'isolated-device-target', 1);
+      await new Promise(r => setTimeout(r, 15));
+      const rec2 = isolatedStore.recoverStaleTasks();
+      assert.strictEqual(rec2.recoveredCount, 1, 'Second lease expiration must recover task');
+      assert.strictEqual(rec2.failedCount, 0);
+      assert.strictEqual(isolatedStore.getTask(task.taskId)?.retryPolicy.retryCount, 2);
+
+      // Attempt 3: Target device re-claims, expires again (exceeds maxRetries=2) -> terminal 'stale'
+      isolatedStore.claimTaskById(task.taskId, 'isolated-device-target', 1);
+      await new Promise(r => setTimeout(r, 15));
+      const rec3 = isolatedStore.recoverStaleTasks();
+      assert.strictEqual(rec3.recoveredCount, 0);
+      assert.strictEqual(rec3.failedCount, 1, 'Exceeding max retries must transition task to terminal stale');
+      const terminalTask = isolatedStore.getTask(task.taskId)!;
+      assert.strictEqual(terminalTask.status, 'stale');
+      assert.strictEqual(terminalTask.error?.code, 'TASK_STALE');
+      assert.strictEqual(terminalTask.targetDeviceId, 'isolated-device-target', 'targetDeviceId preserved even when terminal stale');
     });
 
     await test('Task B8: Revoked device is immediately disconnected and rejected upon polling', async () => {
@@ -786,6 +842,211 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       // device-Y cannot steal it
       const stolenByY = memStore.claimTask('device-Y', ['local:write_file']);
       assert.strictEqual(stolenByY, undefined);
+    });
+
+    await test('Task B13: Full Idempotency conflict matrix on parameters and authorization enforcement', async () => {
+      const keyBase = 'idemp-matrix-' + Date.now();
+      const validScopes = ['admin', 'tasks:submit', 'local:read', 'local:write'];
+
+      // Baseline submission
+      const baseKey = keyBase + '-base';
+      const baseRes = await server.taskRouter.routeTaskSubmit(
+        {
+          backend: 'local',
+          capability: 'local:read_file',
+          payload: { path: 'base.txt' },
+          targetDeviceId: 'win11-arm64-workstation',
+          idempotencyKey: baseKey
+        },
+        validScopes,
+        'caller-base'
+      );
+      assert.strictEqual(baseRes.isReplay, false);
+
+      // (a) Exact match -> Replay
+      const replayOk = await server.taskRouter.routeTaskSubmit(
+        {
+          backend: 'local',
+          capability: 'local:read_file',
+          payload: { path: 'base.txt' },
+          targetDeviceId: 'win11-arm64-workstation',
+          idempotencyKey: baseKey
+        },
+        validScopes,
+        'caller-base'
+      );
+      assert.strictEqual(replayOk.isReplay, true);
+      assert.strictEqual(replayOk.taskId, baseRes.taskId);
+
+      // (b) Different targetDeviceId -> Conflict
+      await assert.rejects(
+        async () => server.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { path: 'base.txt' },
+            targetDeviceId: 'win11-arm64-workstation-2',
+            idempotencyKey: baseKey
+          },
+          validScopes,
+          'caller-base'
+        ),
+        /IDEMPOTENCY_CONFLICT/
+      );
+
+      // (c) Original had targetDeviceId, new request omitted it -> Conflict
+      await assert.rejects(
+        async () => server.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { path: 'base.txt' },
+            idempotencyKey: baseKey
+          },
+          validScopes,
+          'caller-base'
+        ),
+        /AMBIGUOUS_DEVICE_TARGET|IDEMPOTENCY_CONFLICT/
+      );
+
+      // (d) Different capability -> Conflict
+      await assert.rejects(
+        async () => server.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:write_file',
+            payload: { path: 'base.txt' },
+            targetDeviceId: 'win11-arm64-workstation',
+            idempotencyKey: baseKey
+          },
+          validScopes,
+          'caller-base'
+        ),
+        /IDEMPOTENCY_CONFLICT/
+      );
+
+      // (e) Different payload -> Conflict
+      await assert.rejects(
+        async () => server.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { path: 'different.txt' },
+            targetDeviceId: 'win11-arm64-workstation',
+            idempotencyKey: baseKey
+          },
+          validScopes,
+          'caller-base'
+        ),
+        /IDEMPOTENCY_CONFLICT/
+      );
+
+      // (f) Replay without required scopes cannot bypass auth
+      await assert.rejects(
+        async () => server.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { path: 'base.txt' },
+            targetDeviceId: 'win11-arm64-workstation',
+            idempotencyKey: baseKey
+          },
+          [], // no scopes
+          'unauthorized-caller'
+        ),
+        /AUTH_FORBIDDEN/
+      );
+    });
+
+    await test('Task B14: Five distinct device states routing security matrix', async () => {
+      const auth = new AuthManager('matrix-master-secret-32-chars-long!');
+
+      // State 1: 0 registered, 0 online
+      const serverState1 = new GatewayServer({
+        port: 0,
+        host: '127.0.0.1',
+        storageDir: path.join(tmpBase, 'state-1'),
+        masterSecret: 'matrix-master-secret-32-chars-long!'
+      });
+      // (a) Task submitted with explicit targetDeviceId is safely bound to that target
+      const resState1Targeted = await serverState1.taskRouter.routeTaskSubmit(
+        { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' }, targetDeviceId: 'future-device' },
+        ['admin', 'tasks:submit', 'local:read'],
+        'user-1'
+      );
+      assert.strictEqual(resState1Targeted.task.targetDeviceId, 'future-device');
+
+      // (b) Task submitted without targetDeviceId in 0-device state: fails closed if multiple devices register
+      const resState1Unassigned = await serverState1.taskRouter.routeTaskSubmit(
+        { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' } },
+        ['admin', 'tasks:submit', 'local:read'],
+        'user-1'
+      );
+      assert.strictEqual(resState1Unassigned.task.targetDeviceId, undefined);
+      serverState1.taskStore.migrateLegacyUnassignedTasks(['dev-1', 'dev-2']);
+      assert.strictEqual(serverState1.taskStore.getTask(resState1Unassigned.taskId)?.status, 'failed');
+      assert.strictEqual((serverState1.taskStore.getTask(resState1Unassigned.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+
+      // State 2: 1 registered, 0 online -> Auto-binds to sole registered device
+      const serverState2 = new GatewayServer({
+        port: 0,
+        host: '127.0.0.1',
+        storageDir: path.join(tmpBase, 'state-2'),
+        masterSecret: 'matrix-master-secret-32-chars-long!'
+      });
+      serverState2.authManager.registerDevice('Dev 1', 'windows', ['local:read'], 'dev-sole-1');
+      const resState2 = await serverState2.taskRouter.routeTaskSubmit(
+        { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' } },
+        ['admin', 'tasks:submit', 'local:read'],
+        'user-1'
+      );
+      assert.strictEqual(resState2.task.targetDeviceId, 'dev-sole-1', 'Single registered device must be auto-bound safely');
+
+      // State 3: 2 registered, 0 online -> Fails closed with AMBIGUOUS_DEVICE_TARGET
+      const serverState3 = new GatewayServer({
+        port: 0,
+        host: '127.0.0.1',
+        storageDir: path.join(tmpBase, 'state-3'),
+        masterSecret: 'matrix-master-secret-32-chars-long!'
+      });
+      serverState3.authManager.registerDevice('Dev 1', 'windows', ['local:read'], 'dev-reg-1');
+      serverState3.authManager.registerDevice('Dev 2', 'windows', ['local:read'], 'dev-reg-2');
+      await assert.rejects(
+        async () => serverState3.taskRouter.routeTaskSubmit(
+          { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' } },
+          ['admin', 'tasks:submit', 'local:read'],
+          'user-1'
+        ),
+        /AMBIGUOUS_DEVICE_TARGET/
+      );
+
+      // State 4: 1 online, 2 registered -> MUST NOT misroute to the 1 online device; fails closed with AMBIGUOUS_DEVICE_TARGET
+      const mockConn1Online: any = {
+        getConnectedAgents: () => [{ deviceId: 'dev-reg-1' }]
+      };
+      (serverState3 as any).taskRouter.connectionManager = mockConn1Online;
+      await assert.rejects(
+        async () => serverState3.taskRouter.routeTaskSubmit(
+          { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' } },
+          ['admin', 'tasks:submit', 'local:read'],
+          'user-1'
+        ),
+        /AMBIGUOUS_DEVICE_TARGET/
+      );
+
+      // State 5: 2 online, 2 registered -> Fails closed with AMBIGUOUS_DEVICE_TARGET
+      const mockConn2Online: any = {
+        getConnectedAgents: () => [{ deviceId: 'dev-reg-1' }, { deviceId: 'dev-reg-2' }]
+      };
+      (serverState3 as any).taskRouter.connectionManager = mockConn2Online;
+      await assert.rejects(
+        async () => serverState3.taskRouter.routeTaskSubmit(
+          { backend: 'local', capability: 'local:read_file', payload: { path: 'f.txt' } },
+          ['admin', 'tasks:submit', 'local:read'],
+          'user-1'
+        ),
+        /AMBIGUOUS_DEVICE_TARGET/
+      );
     });
 
   } finally {

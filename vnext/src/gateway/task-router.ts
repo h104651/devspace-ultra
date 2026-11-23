@@ -26,36 +26,6 @@ export class TaskRouter {
     callerScopes: string[],
     actorId: string
   ): Promise<{ taskId: string; status: string; task: DurableTask<TPayload>; isReplay: boolean }> {
-    const idempKey = options.idempotencyKey || options.clientRequestId || options.taskKey;
-    if (idempKey) {
-      const cached = await this.idempotencyStore.getDurable(idempKey);
-      if (cached) {
-        // Enforce parameter matching on idempotency replay to prevent cross-device or cross-capability pollution
-        if (options.targetDeviceId && cached.targetDeviceId && options.targetDeviceId !== cached.targetDeviceId) {
-          this.auditLogger.log({
-            actor: actorId,
-            actorType: 'client',
-            action: 'TASK_SUBMIT_DENIED',
-            result: 'DENY',
-            details: {
-              reason: 'IDEMPOTENCY_CONFLICT',
-              idempotencyKey: idempKey,
-              cachedTargetDeviceId: cached.targetDeviceId,
-              requestedTargetDeviceId: options.targetDeviceId
-            }
-          });
-          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to targetDeviceId '${cached.targetDeviceId}', but request specified '${options.targetDeviceId}'.`);
-        }
-        if (options.backend && cached.backend && options.backend !== cached.backend) {
-          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to backend '${cached.backend}', but request specified '${options.backend}'.`);
-        }
-        if (options.capability && cached.capability && options.capability !== cached.capability) {
-          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to capability '${cached.capability}', but request specified '${options.capability}'.`);
-        }
-        return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
-      }
-    }
-
     const killCheck = this.killSwitch.isExecutionAllowed(options.backend);
     if (!killCheck.allowed) {
       this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { reason: killCheck.reason, capability: options.capability } });
@@ -111,31 +81,24 @@ export class TaskRouter {
         : [];
 
       if (!options.targetDeviceId) {
-        if (distinctDevices.length > 1) {
+        if (registeredDevices.length > 1 || distinctDevices.length > 1) {
+          const deviceList = registeredDevices.length > 1
+            ? registeredDevices.map((d: any) => d.deviceId).join(', ')
+            : distinctDevices.join(', ');
           this.auditLogger.log({
             actor: actorId,
             actorType: 'client',
             action: 'TASK_SUBMIT_DENIED',
             result: 'DENY',
-            details: { reason: 'AMBIGUOUS_DEVICE_TARGET', connectedDevices: distinctDevices, capability: options.capability }
+            details: { reason: 'AMBIGUOUS_DEVICE_TARGET', registeredDevices: registeredDevices.map((d: any) => d.deviceId), connectedDevices: distinctDevices, capability: options.capability }
           });
-          throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local agents are online (${distinctDevices.join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
-        } else if (distinctDevices.length === 1) {
-          // Auto-bind to single online device for backwards compatibility
-          options.targetDeviceId = distinctDevices[0];
-        } else if (registeredDevices.length > 1) {
-          // 0 agents online, but multiple devices are registered in the gateway!
-          this.auditLogger.log({
-            actor: actorId,
-            actorType: 'client',
-            action: 'TASK_SUBMIT_DENIED',
-            result: 'DENY',
-            details: { reason: 'AMBIGUOUS_DEVICE_TARGET', registeredDevices: registeredDevices.map((d: any) => d.deviceId), capability: options.capability }
-          });
-          throw new Error(`AMBIGUOUS_DEVICE_TARGET: No local agent is currently online, and multiple devices are registered (${registeredDevices.map((d: any) => d.deviceId).join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks.`);
+          throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local devices exist (${deviceList}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
         } else if (registeredDevices.length === 1) {
-          // 0 agents online, but exactly 1 device is registered in the gateway! Auto-bind safely
+          // Exactly 1 registered device: auto-bind safely for backwards compatibility
           options.targetDeviceId = registeredDevices[0].deviceId;
+        } else if (distinctDevices.length === 1) {
+          // Exactly 1 connected device: auto-bind safely
+          options.targetDeviceId = distinctDevices[0];
         }
       } else {
         if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
@@ -158,6 +121,43 @@ export class TaskRouter {
           }
         });
         throw new Error(`AUTH_FORBIDDEN: Required scope '${requiredScope}' or 'tasks:submit' not granted`);
+      }
+    }
+
+    // Idempotency resolution: checked after authorization and parameter normalization
+    const idempKey = options.idempotencyKey || options.clientRequestId || options.taskKey;
+    if (idempKey) {
+      const cached = await this.idempotencyStore.getDurable(idempKey);
+      if (cached) {
+        const reqTarget = options.targetDeviceId?.trim() || undefined;
+        const cachedTarget = cached.targetDeviceId?.trim() || undefined;
+        if (reqTarget !== cachedTarget) {
+          this.auditLogger.log({
+            actor: actorId,
+            actorType: 'client',
+            action: 'TASK_SUBMIT_DENIED',
+            result: 'DENY',
+            details: {
+              reason: 'IDEMPOTENCY_CONFLICT',
+              idempotencyKey: idempKey,
+              cachedTargetDeviceId: cachedTarget,
+              requestedTargetDeviceId: reqTarget
+            }
+          });
+          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to targetDeviceId '${cachedTarget}', but request specified '${reqTarget}'.`);
+        }
+        if (options.backend && cached.backend && options.backend !== cached.backend) {
+          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to backend '${cached.backend}', but request specified '${options.backend}'.`);
+        }
+        if (options.capability && cached.capability && options.capability !== cached.capability) {
+          throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to capability '${cached.capability}', but request specified '${options.capability}'.`);
+        }
+        if (options.payload !== undefined && cached.payload !== undefined) {
+          if (JSON.stringify(options.payload) !== JSON.stringify(cached.payload)) {
+            throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' payload mismatch.`);
+          }
+        }
+        return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
       }
     }
 
