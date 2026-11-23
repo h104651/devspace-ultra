@@ -26,52 +26,30 @@ class TaskRouter {
         const idempKey = options.idempotencyKey || options.clientRequestId || options.taskKey;
         if (idempKey) {
             const cached = await this.idempotencyStore.getDurable(idempKey);
-            if (cached)
+            if (cached) {
+                // Enforce parameter matching on idempotency replay to prevent cross-device or cross-capability pollution
+                if (options.targetDeviceId && cached.targetDeviceId && options.targetDeviceId !== cached.targetDeviceId) {
+                    this.auditLogger.log({
+                        actor: actorId,
+                        actorType: 'client',
+                        action: 'TASK_SUBMIT_DENIED',
+                        result: 'DENY',
+                        details: {
+                            reason: 'IDEMPOTENCY_CONFLICT',
+                            idempotencyKey: idempKey,
+                            cachedTargetDeviceId: cached.targetDeviceId,
+                            requestedTargetDeviceId: options.targetDeviceId
+                        }
+                    });
+                    throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to targetDeviceId '${cached.targetDeviceId}', but request specified '${options.targetDeviceId}'.`);
+                }
+                if (options.backend && cached.backend && options.backend !== cached.backend) {
+                    throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to backend '${cached.backend}', but request specified '${options.backend}'.`);
+                }
+                if (options.capability && cached.capability && options.capability !== cached.capability) {
+                    throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' was previously bound to capability '${cached.capability}', but request specified '${options.capability}'.`);
+                }
                 return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
-        }
-        if (options.backend === 'local') {
-            if (!(0, capabilities_1.isLocalExecutableCapability)(options.capability)) {
-                this.auditLogger.log({
-                    actor: actorId,
-                    actorType: 'client',
-                    action: 'TASK_SUBMIT_DENIED',
-                    result: 'DENY',
-                    details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
-                });
-                throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
-            }
-            // Multi-device targeted routing enforcement
-            if (this.connectionManager && typeof this.connectionManager.getConnectedAgents === 'function') {
-                const connected = this.connectionManager.getConnectedAgents() || [];
-                const distinctDevices = Array.from(new Set(connected.map((a) => String(a.deviceId)).filter(Boolean)));
-                if (!options.targetDeviceId) {
-                    if (distinctDevices.length > 1) {
-                        this.auditLogger.log({
-                            actor: actorId,
-                            actorType: 'client',
-                            action: 'TASK_SUBMIT_DENIED',
-                            result: 'DENY',
-                            details: { reason: 'AMBIGUOUS_DEVICE_TARGET', connectedDevices: distinctDevices, capability: options.capability }
-                        });
-                        throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local agents are online (${distinctDevices.join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
-                    }
-                    else if (distinctDevices.length === 1) {
-                        // Auto-bind to single online device for backwards compatibility
-                        options.targetDeviceId = distinctDevices[0];
-                    }
-                }
-                else {
-                    if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
-                        throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
-                    }
-                    options.targetDeviceId = options.targetDeviceId.trim();
-                }
-            }
-            else if (options.targetDeviceId) {
-                if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
-                    throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
-                }
-                options.targetDeviceId = options.targetDeviceId.trim();
             }
         }
         const killCheck = this.killSwitch.isExecutionAllowed(options.backend);
@@ -105,6 +83,61 @@ class TaskRouter {
                 if (missingCapabilityScope)
                     missingList.push(`'${requiredScope}'`);
                 throw new Error(`AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and '${requiredScope}'. Missing: ${missingList.join(', ')}`);
+            }
+            if (!(0, capabilities_1.isLocalExecutableCapability)(options.capability)) {
+                this.auditLogger.log({
+                    actor: actorId,
+                    actorType: 'client',
+                    action: 'TASK_SUBMIT_DENIED',
+                    result: 'DENY',
+                    details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
+                });
+                throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+            }
+            // Multi-device targeted routing enforcement
+            const connected = (this.connectionManager && typeof this.connectionManager.getConnectedAgents === 'function')
+                ? (this.connectionManager.getConnectedAgents() || [])
+                : [];
+            const distinctDevices = Array.from(new Set(connected.map((a) => String(a.deviceId)).filter(Boolean)));
+            const registeredDevices = (this.authManager && typeof this.authManager.listDevices === 'function')
+                ? this.authManager.listDevices().filter((d) => d.status !== 'revoked')
+                : [];
+            if (!options.targetDeviceId) {
+                if (distinctDevices.length > 1) {
+                    this.auditLogger.log({
+                        actor: actorId,
+                        actorType: 'client',
+                        action: 'TASK_SUBMIT_DENIED',
+                        result: 'DENY',
+                        details: { reason: 'AMBIGUOUS_DEVICE_TARGET', connectedDevices: distinctDevices, capability: options.capability }
+                    });
+                    throw new Error(`AMBIGUOUS_DEVICE_TARGET: Multiple local agents are online (${distinctDevices.join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks to prevent misrouting.`);
+                }
+                else if (distinctDevices.length === 1) {
+                    // Auto-bind to single online device for backwards compatibility
+                    options.targetDeviceId = distinctDevices[0];
+                }
+                else if (registeredDevices.length > 1) {
+                    // 0 agents online, but multiple devices are registered in the gateway!
+                    this.auditLogger.log({
+                        actor: actorId,
+                        actorType: 'client',
+                        action: 'TASK_SUBMIT_DENIED',
+                        result: 'DENY',
+                        details: { reason: 'AMBIGUOUS_DEVICE_TARGET', registeredDevices: registeredDevices.map((d) => d.deviceId), capability: options.capability }
+                    });
+                    throw new Error(`AMBIGUOUS_DEVICE_TARGET: No local agent is currently online, and multiple devices are registered (${registeredDevices.map((d) => d.deviceId).join(', ')}). You must explicitly specify 'targetDeviceId' for local tasks.`);
+                }
+                else if (registeredDevices.length === 1) {
+                    // 0 agents online, but exactly 1 device is registered in the gateway! Auto-bind safely
+                    options.targetDeviceId = registeredDevices[0].deviceId;
+                }
+            }
+            else {
+                if (typeof options.targetDeviceId !== 'string' || options.targetDeviceId.trim().length === 0) {
+                    throw new Error('INVALID_ARGUMENT: targetDeviceId must be a non-empty string');
+                }
+                options.targetDeviceId = options.targetDeviceId.trim();
             }
         }
         else {

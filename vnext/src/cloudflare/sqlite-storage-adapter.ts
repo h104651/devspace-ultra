@@ -39,7 +39,8 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       CREATE TABLE IF NOT EXISTS devices (
         deviceId TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, status TEXT NOT NULL,
         capabilitiesJson TEXT NOT NULL, registeredAt INTEGER NOT NULL, lastConnectedAt INTEGER,
-        lastHeartbeatAt INTEGER, revokedAt INTEGER, revocationReason TEXT, tokenHash TEXT NOT NULL, ip TEXT
+        lastHeartbeatAt INTEGER, revokedAt INTEGER, revocationReason TEXT, tokenHash TEXT NOT NULL, ip TEXT,
+        activeTokenId TEXT
       );
       CREATE TABLE IF NOT EXISTS revoked_tokens (tokenId TEXT PRIMARY KEY, revokedAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS artifacts (
@@ -80,6 +81,7 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     try { this.sql.exec('ALTER TABLE tasks ADD COLUMN activeAttemptId TEXT'); } catch {}
     try { this.sql.exec('ALTER TABLE tasks ADD COLUMN externalRunJson TEXT'); } catch {}
     try { this.sql.exec('ALTER TABLE tasks ADD COLUMN targetDeviceId TEXT'); } catch {}
+    try { this.sql.exec('ALTER TABLE devices ADD COLUMN activeTokenId TEXT'); } catch {}
   }
 
   private getFirstRow(query: string, ...params: any[]): any {
@@ -201,13 +203,13 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
     return row ? this.rowToDevice(row) : undefined;
   }
   async saveDevice(device: DeviceRecord): Promise<void> {
-    this.sql.exec(`INSERT OR REPLACE INTO devices (deviceId, name, platform, status, capabilitiesJson, registeredAt, lastConnectedAt, lastHeartbeatAt, revokedAt, revocationReason, tokenHash, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    this.sql.exec(`INSERT OR REPLACE INTO devices (deviceId, name, platform, status, capabilitiesJson, registeredAt, lastConnectedAt, lastHeartbeatAt, revokedAt, revocationReason, tokenHash, ip, activeTokenId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       device.deviceId, device.name, device.platform, device.status, JSON.stringify(device.capabilities), device.registeredAt,
-      device.lastConnectedAt || null, device.lastHeartbeatAt || null, device.revokedAt || null, device.revocationReason || null, device.tokenHash, device.ip || null);
+      device.lastConnectedAt || null, device.lastHeartbeatAt || null, device.revokedAt || null, device.revocationReason || null, device.tokenHash, device.ip || null, device.activeTokenId || null);
   }
   async listDevices(): Promise<DeviceRecord[]> { return this.sql.exec('SELECT * FROM devices').toArray().map(r => this.rowToDevice(r)); }
   private rowToDevice(r: any): DeviceRecord {
-    return { deviceId: r.deviceId, name: r.name, platform: r.platform, status: r.status, capabilities: JSON.parse(r.capabilitiesJson), registeredAt: r.registeredAt, lastConnectedAt: r.lastConnectedAt || undefined, lastHeartbeatAt: r.lastHeartbeatAt || undefined, revokedAt: r.revokedAt || undefined, revocationReason: r.revocationReason || undefined, tokenHash: r.tokenHash, ip: r.ip || undefined };
+    return { deviceId: r.deviceId, name: r.name, platform: r.platform, status: r.status, capabilities: JSON.parse(r.capabilitiesJson), registeredAt: r.registeredAt, lastConnectedAt: r.lastConnectedAt || undefined, lastHeartbeatAt: r.lastHeartbeatAt || undefined, revokedAt: r.revokedAt || undefined, revocationReason: r.revocationReason || undefined, tokenHash: r.tokenHash, ip: r.ip || undefined, activeTokenId: r.activeTokenId || undefined };
   }
 
   async isTokenRevoked(tokenId: string): Promise<boolean> { return !!this.getFirstRow('SELECT tokenId FROM revoked_tokens WHERE tokenId = ?', tokenId); }

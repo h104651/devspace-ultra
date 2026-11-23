@@ -10,6 +10,7 @@ import { AuthManager } from '../../src/security/auth-manager';
 import { CloudflareSqliteStorageAdapter, SqlStorage } from '../../src/cloudflare/sqlite-storage-adapter';
 import { GatewayDurableObject } from '../../src/cloudflare/gateway-durable-object';
 import { DurableTask } from '../../src/types/task';
+import { TaskStore } from '../../src/storage/task-store';
 
 // In-memory SQLite stub for Durable Object tests
 class TestSqlStorage implements SqlStorage {
@@ -310,6 +311,75 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
     assert.strictEqual(val2.error, 'DEVICE_REVOKED');
   });
 
+  await test('Task A6: Device registration validates input, limits expiresInMs and rejects non-whitelisted scopes', async () => {
+    const auth = new AuthManager(testMasterSecret);
+
+    // (a) Scope whitelist: unauthorized scope 'admin' is rejected
+    assert.throws(() => {
+      auth.registerDevice('Device Admin Esc', 'windows', ['admin'], 'dev-esc-admin');
+    }, /INVALID_DEVICE_SCOPE/);
+
+    // (b) Scope whitelist: unauthorized scope 'tasks:submit' is rejected
+    assert.throws(() => {
+      auth.registerDevice('Device Submit Esc', 'windows', ['tasks:submit'], 'dev-esc-sub');
+    }, /INVALID_DEVICE_SCOPE/);
+
+    // (c) Expiration bounds: negative or less than 60s rejected
+    assert.throws(() => {
+      auth.registerDevice('Device Bad Exp', 'windows', ['local:read'], 'dev-bad-exp', 1000);
+    }, /INVALID_ARGUMENT/);
+
+    // (d) Expiration bounds: greater than 365 days rejected
+    assert.throws(() => {
+      auth.registerDevice('Device Huge Exp', 'windows', ['local:read'], 'dev-huge-exp', 400 * 24 * 3600 * 1000);
+    }, /INVALID_ARGUMENT/);
+
+    // (e) Name validation: empty or control chars rejected
+    assert.throws(() => {
+      auth.registerDevice('', 'windows', ['local:read'], 'dev-empty-name');
+    }, /INVALID_ARGUMENT/);
+    assert.throws(() => {
+      auth.registerDevice('Device\x00Bad', 'windows', ['local:read'], 'dev-ctrl-name');
+    }, /INVALID_ARGUMENT/);
+
+    // (f) Platform validation: invalid platform rejected
+    assert.throws(() => {
+      auth.registerDevice('Device Bad Plat', 'solaris' as any, ['local:read'], 'dev-bad-plat');
+    }, /INVALID_ARGUMENT/);
+
+    // (g) Device ID validation: invalid characters rejected
+    assert.throws(() => {
+      auth.registerDevice('Device Bad ID', 'windows', ['local:read'], 'dev@invalid!');
+    }, /INVALID_DEVICE_ID/);
+  });
+
+  await test('Task A7: Re-registering a previously revoked device ID permanently invalidates the old token', async () => {
+    const auth = new AuthManager(testMasterSecret);
+    const deviceId = 'dev-recycle-lifecycle';
+
+    // 1. Initial registration
+    const { token: oldToken } = auth.registerDevice('Recycle Dev', 'windows', ['local:read'], deviceId);
+    assert.strictEqual(auth.validateToken(oldToken).valid, true);
+
+    // 2. Revoke device
+    auth.revokeDevice(deviceId, 'Decommission old unit');
+    assert.strictEqual(auth.validateToken(oldToken).valid, false);
+    assert.strictEqual(auth.validateToken(oldToken).error, 'DEVICE_REVOKED');
+
+    // 3. Re-register device ID with new credentials
+    const { token: newToken } = auth.registerDevice('Recycle Dev Reborn', 'windows', ['local:read', 'local:write'], deviceId);
+
+    // 4. New token must be valid
+    const newCheck = auth.validateToken(newToken);
+    assert.strictEqual(newCheck.valid, true);
+    assert.strictEqual(newCheck.payload?.subjectId, deviceId);
+
+    // 5. Old token MUST REMAIN INVALID (TOKEN_REVOKED or TOKEN_SUPERSEDED)
+    const oldCheck = auth.validateToken(oldToken);
+    assert.strictEqual(oldCheck.valid, false);
+    assert.ok(oldCheck.error?.includes('TOKEN_REVOKED') || oldCheck.error?.includes('TOKEN_SUPERSEDED'));
+  });
+
   // ========================================================
   // SUITE 2: Task B - Multi-Device Targeted Execution E2E
   // ========================================================
@@ -540,6 +610,182 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       await new Promise(r => setTimeout(r, 100));
       const currentTask = server.taskStore.getTask(task.taskId)!;
       assert.strictEqual(currentTask.status, 'queued', 'Task for revoked device must not be claimed');
+    });
+
+    await test('Task B9: Zero devices online with multiple registered devices rejects ambiguous local task submission', async () => {
+      // Both agents temporarily stopped
+      agentOld!.stop();
+      agentNew!.stop();
+      await new Promise(r => setTimeout(r, 100));
+
+      // Verify 0 agents connected
+      assert.strictEqual(server.connectionManager.getConnectedAgents().length, 0);
+
+      // Verify multiple devices registered (at least 2: win11-arm64-workstation and win11-arm64-workstation-2)
+      // Un-revoke old device so we have multiple active registered devices
+      server.authManager.registerDevice('Old Windows PC Re-reg', 'windows', ['local:read'], 'win11-arm64-workstation');
+      const registered = server.authManager.listDevices().filter(d => d.status !== 'revoked');
+      assert.ok(registered.length >= 2, 'Multiple devices must be registered');
+
+      // Submitting local task without targetDeviceId must throw AMBIGUOUS_DEVICE_TARGET
+      let rejectedAmbiguous = false;
+      try {
+        await server.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { projectId: 'project-test', relativePath: 'test.txt' }
+          },
+          ['admin', 'tasks:submit', 'local:read'],
+          'test-user'
+        );
+      } catch (err: any) {
+        if (err.message?.includes('AMBIGUOUS_DEVICE_TARGET')) rejectedAmbiguous = true;
+      }
+      assert.strictEqual(rejectedAmbiguous, true, 'Zero devices online with multiple registered devices must reject ambiguous submission');
+    });
+
+    await test('Task B10: Zero devices online with exactly one registered device auto-binds targetDeviceId safely', async () => {
+      const singleDevServer = new GatewayServer({
+        port: 0,
+        host: '127.0.0.1',
+        storageDir: path.join(tmpBase, 'single-dev-box'),
+        masterSecret: testMasterSecret
+      });
+      try {
+        await singleDevServer.start();
+        singleDevServer.authManager.registerDevice('Sole Station', 'windows', ['local:read'], 'sole-station-01');
+
+        assert.strictEqual(singleDevServer.connectionManager.getConnectedAgents().length, 0);
+        assert.strictEqual(singleDevServer.authManager.listDevices().filter(d => d.status !== 'revoked').length, 1);
+
+        const res = await singleDevServer.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { projectId: 'p1', relativePath: 'f.txt' }
+          },
+          ['admin', 'tasks:submit', 'local:read'],
+          'client-user'
+        );
+
+        assert.strictEqual(res.task.targetDeviceId, 'sole-station-01', 'Task must be auto-bound to the sole registered device');
+      } finally {
+        await singleDevServer.stop();
+      }
+    });
+
+    await test('Task B11: Idempotency replay with a conflicting targetDeviceId throws IDEMPOTENCY_CONFLICT', async () => {
+      const idempKey = 'idemp-multi-dev-test-' + Date.now();
+
+      // First submission targeting device-A
+      const resA = await server.taskRouter.routeTaskSubmit(
+        {
+          backend: 'local',
+          capability: 'local:read_file',
+          payload: { projectId: 'project-new', relativePath: 'readme.txt' },
+          targetDeviceId: 'win11-arm64-workstation-2',
+          idempotencyKey: idempKey
+        },
+        ['admin', 'tasks:submit', 'local:read'],
+        'caller-1'
+      );
+      assert.strictEqual(resA.isReplay, false);
+
+      // Replay with matching targetDeviceId succeeds
+      const replayMatch = await server.taskRouter.routeTaskSubmit(
+        {
+          backend: 'local',
+          capability: 'local:read_file',
+          payload: { projectId: 'project-new', relativePath: 'readme.txt' },
+          targetDeviceId: 'win11-arm64-workstation-2',
+          idempotencyKey: idempKey
+        },
+        ['admin', 'tasks:submit', 'local:read'],
+        'caller-1'
+      );
+      assert.strictEqual(replayMatch.isReplay, true);
+      assert.strictEqual(replayMatch.taskId, resA.taskId);
+
+      // Replay with DIFFERENT targetDeviceId throws IDEMPOTENCY_CONFLICT
+      let conflictCaught = false;
+      try {
+        await server.taskRouter.routeTaskSubmit(
+          {
+            backend: 'local',
+            capability: 'local:read_file',
+            payload: { projectId: 'project-new', relativePath: 'readme.txt' },
+            targetDeviceId: 'other-device-999',
+            idempotencyKey: idempKey
+          },
+          ['admin', 'tasks:submit', 'local:read'],
+          'caller-1'
+        );
+      } catch (err: any) {
+        if (err.message?.includes('IDEMPOTENCY_CONFLICT')) conflictCaught = true;
+      }
+      assert.strictEqual(conflictCaught, true, 'Reusing idempotencyKey with different targetDeviceId must throw IDEMPOTENCY_CONFLICT');
+    });
+
+    await test('Task B12: Legacy unassigned tasks are safely migrated and fail closed when ambiguous in multi-device environment', async () => {
+      const memStore = new TaskStore();
+
+      // 1. Legacy task with prior lease/attempt by 'device-alpha'
+      const legacyClaimed = memStore.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'a.txt' }
+      });
+      // Simulate prior claim before multi-device migration
+      memStore.claimTaskById(legacyClaimed.taskId, 'device-alpha');
+      // Device disconnects / lease expires, requeue
+      memStore.failTask(legacyClaimed.taskId, { code: 'DISCONNECT', message: 'Agent disconnected' }, { retryable: true });
+
+      // 2. Legacy task queued with single known device
+      const legacySingle = memStore.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'b.txt' }
+      });
+
+      // 3. Legacy task queued with multiple known devices
+      const legacyAmbiguous = memStore.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'c.txt' }
+      });
+
+      // Run migration:
+      // With 1 device: legacySingle binds to sole device
+      memStore.migrateLegacyUnassignedTasks(['sole-device-01']);
+      assert.strictEqual(memStore.getTask(legacyClaimed.taskId)?.targetDeviceId, 'device-alpha', 'Prior claimant must be preserved');
+      assert.strictEqual(memStore.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-01', 'Single known device must be auto-bound');
+
+      // Reset legacyAmbiguous to have no targetDeviceId and simulate multi-device environment
+      const taskAmb = memStore.getTask(legacyAmbiguous.taskId)!;
+      taskAmb.targetDeviceId = undefined;
+      taskAmb.status = 'queued';
+
+      memStore.migrateLegacyUnassignedTasks(['device-1', 'device-2']);
+      assert.strictEqual(memStore.getTask(taskAmb.taskId)?.status, 'failed', 'Ambiguous legacy task must fail closed');
+      assert.strictEqual((memStore.getTask(taskAmb.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+
+      // 4. Verify that once targeted, task cannot be stolen on retry
+      const targetedTask = memStore.createTask({
+        backend: 'local',
+        capability: 'local:write_file',
+        payload: { path: 'd.txt' },
+        targetDeviceId: 'device-X'
+      });
+      // Claimed by device-X
+      const claimedByX = memStore.claimTask('device-X', ['local:write_file']);
+      assert.ok(claimedByX);
+      assert.strictEqual(claimedByX.targetDeviceId, 'device-X');
+      // Fails / requeues
+      memStore.failTask(targetedTask.taskId, { code: 'CRASH', message: 'crash' }, { retryable: true });
+      // device-Y cannot steal it
+      const stolenByY = memStore.claimTask('device-Y', ['local:write_file']);
+      assert.strictEqual(stolenByY, undefined);
     });
 
   } finally {

@@ -206,6 +206,7 @@ class GatewayServer {
                     return res.status(400).json({ error: 'INVALID_ARGUMENT: name is required' });
                 }
                 const reg = this.authManager.registerDevice(name, platform || 'windows', capabilities, deviceId, expiresInMs);
+                await this.killSwitch.unrevokeDevice(reg.deviceId);
                 this.auditLogger.log({ actor: req.auth?.subjectId || 'admin', actorType: 'client', action: 'DEVICE_REGISTERED', resource: reg.deviceId, result: 'SUCCESS' });
                 return res.status(201).json({
                     ok: true,
@@ -364,6 +365,8 @@ class GatewayServer {
         const port = this.config.port ?? 4000;
         const host = this.config.host || '0.0.0.0';
         this.leaseMonitor.start();
+        const activeDevices = this.authManager.listDevices().filter(d => d.status !== 'revoked').map(d => d.deviceId);
+        this.taskStore.migrateLegacyUnassignedTasks(activeDevices);
         return new Promise((resolve, reject) => {
             const onError = (error) => {
                 this.httpServer.off('listening', onListening);

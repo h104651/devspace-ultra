@@ -176,6 +176,18 @@ export class KillSwitch {
     }
   }
 
+  public async unrevokeDevice(deviceId: string): Promise<void> {
+    if (this.state.revokedDeviceIds.includes(deviceId)) {
+      const nextState: KillSwitchState = {
+        ...this.state,
+        revokedDeviceIds: this.state.revokedDeviceIds.filter(id => id !== deviceId),
+        lastTriggeredAt: Date.now(),
+        reason: `Device ${deviceId} unrevoked on administrative re-registration`
+      };
+      await this.persistNextState(nextState);
+    }
+  }
+
   public async revokeClient(clientId: string, reason?: string): Promise<void> {
     if (!this.state.revokedClientIds.includes(clientId)) {
       const nextState: KillSwitchState = {

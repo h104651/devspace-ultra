@@ -352,7 +352,9 @@ export class TaskStore {
       .filter(t => {
         if (t.status !== 'queued') return false;
         if (!supportedCapabilities.includes(t.capability)) return false;
-        if (t.targetDeviceId && t.targetDeviceId !== deviceId) return false;
+        if (t.backend === 'local') {
+          if (t.targetDeviceId && t.targetDeviceId !== deviceId) return false;
+        }
         return true;
       })
       .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
@@ -364,7 +366,7 @@ export class TaskStore {
   public claimTaskById(taskId: string, deviceId: string, leaseDurationMs?: number): DurableTask | undefined {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'queued') return undefined;
-    if (task.targetDeviceId && task.targetDeviceId !== deviceId) return undefined;
+    if (task.backend === 'local' && task.targetDeviceId && task.targetDeviceId !== deviceId) return undefined;
 
     const now = Date.now();
     const attempt = this.createAttempt(task, deviceId, now);
@@ -381,6 +383,41 @@ export class TaskStore {
 
     this.saveTask(task);
     return task;
+  }
+
+  public migrateLegacyUnassignedTasks(knownDeviceIds: string[]): { migrated: number; failedAmbiguous: number } {
+    let migrated = 0;
+    let failedAmbiguous = 0;
+
+    for (const task of this.tasks.values()) {
+      if (task.backend === 'local' && !task.targetDeviceId) {
+        const priorClaimant = task.lease?.claimedBy || (task.attempts && task.attempts.find(a => a.claimedBy)?.claimedBy);
+        if (priorClaimant) {
+          task.targetDeviceId = priorClaimant;
+          this.saveTask(task);
+          migrated++;
+          continue;
+        }
+
+        if (task.status === 'queued') {
+          if (knownDeviceIds.length === 1) {
+            task.targetDeviceId = knownDeviceIds[0];
+            this.saveTask(task);
+            migrated++;
+          } else if (knownDeviceIds.length > 1) {
+            task.status = 'failed';
+            task.error = {
+              code: 'AMBIGUOUS_LEGACY_TASK',
+              message: `Legacy task was created without targetDeviceId and cannot be safely routed in a multi-device environment (${knownDeviceIds.join(', ')}).`
+            };
+            task.completedAt = Date.now();
+            this.saveTask(task);
+            failedAmbiguous++;
+          }
+        }
+      }
+    }
+    return { migrated, failedAmbiguous };
   }
 
   public acknowledgeTask(taskId: string, deviceId: string): boolean {

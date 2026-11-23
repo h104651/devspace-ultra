@@ -185,6 +185,8 @@ class GatewayDurableObject {
         try {
             this.taskStore.hydrate(await this.storage.listTasks());
             this.taskStore.recoverStaleTasks();
+            const activeDevices = this.authManager.listDevices().filter(d => d.status !== 'revoked').map(d => d.deviceId);
+            this.taskStore.migrateLegacyUnassignedTasks(activeDevices);
             this.kaggleBackend.reconcileDanglingTasks().catch(err => console.warn('[DO] Background Kaggle reconciliation warning:', err));
         }
         catch (err) {
@@ -712,6 +714,7 @@ class GatewayDurableObject {
                     const customDeviceId = typeof body?.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : undefined;
                     const expiresInMs = typeof body?.expiresInMs === 'number' ? body.expiresInMs : undefined;
                     const reg = this.authManager.registerDevice(name, platform, capabilities, customDeviceId, expiresInMs);
+                    await this.killSwitch.unrevokeDevice(reg.deviceId);
                     await this.storage.saveDevice(reg.record);
                     this.auditLogger.log({ actor: 'admin', actorType: 'client', action: 'DEVICE_REGISTERED', resource: reg.deviceId, result: 'SUCCESS' });
                     return Response.json({
@@ -766,8 +769,11 @@ class GatewayDurableObject {
                 await this.killSwitch.revokeDevice(targetId, reason);
                 this.authManager.revokeDevice(targetId, reason);
                 const dev = this.authManager.getDevice(targetId);
-                if (dev)
+                if (dev) {
                     await this.storage.saveDevice(dev);
+                    if (dev.activeTokenId)
+                        await this.storage.revokeToken(dev.activeTokenId);
+                }
                 if (this.ctx.getWebSockets) {
                     for (const ws of this.ctx.getWebSockets()) {
                         const att = typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null;
