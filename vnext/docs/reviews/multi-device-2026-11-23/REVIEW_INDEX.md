@@ -19,9 +19,10 @@
 2. **補齊最後的路由安全問題**:
    - 完整五種裝置狀態路由矩陣（0註冊/0在線、1註冊/0在線、2註冊/0在線、1在線/2註冊、2在線/2註冊），杜絕模糊派工。
    - 強化 Idempotency Replay 防護：禁止未授權請求透過 Idempotency 繞過權限；完整比對 `targetDeviceId`、`backend`、`capability`、`payload` 參數衝突。
-   - 舊任務遷移保證 Fail Closed，禁止歷史未綁定任務被錯誤裝置領取。
+   - 舊任務遷移保證 Fail Closed，禁止歷史未綁定任務被錯誤裝置領取；在 0 註冊裝置冷啟動時標記失敗（`AMBIGUOUS_LEGACY_TASK`）。
+   - `claimTask` 與 `claimTaskById` 嚴格限制本地任務只有明確指定且匹配該裝置之 `targetDeviceId` 方可領取（Fail Closed）。
 3. **完成全套回歸測試與 Wrangler Dry Run**:
-   - 457 / 457 測試 PASS（0 失敗）。
+   - 458 / 458 測試 PASS（0 失敗，連續 3 次通過）。
    - Wrangler 部署預檢 PASS。
 4. **交付 7 份審查技術文件**:
    - 保存在 `vnext/docs/reviews/multi-device-2026-11-23/`，供 ChatGPT 與審查工程師完整閱讀與評估。
@@ -68,7 +69,7 @@
 ## 五、最終結論判定 (GO / NO-GO)
 
 - **程式碼修復與安全強化**: **GO** (100% 完成且經單元/整合驗證)
-- **本機 Windows ARM64 測試**: **GO** (457/457 PASS)
+- **本機 Windows ARM64 測試**: **GO** (458/458 PASS)
 - **Cloudflare 部署預檢 (Dry Run)**: **GO** (Exit code 0, 資源 Binding 完整)
 - **GitHub PR Merge 資格**: **GO** (代碼完整、Draft PR 就緒、審查文件齊全)
 - **正式環境部署資格 (Production Deploy)**: **CONDITIONAL GO** (等待 ChatGPT 人工完成 GitHub 審查，並由管理者簽發正式 Device Token 後方可執行)

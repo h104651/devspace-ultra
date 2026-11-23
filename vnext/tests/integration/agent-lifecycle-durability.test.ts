@@ -202,7 +202,8 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     const taskWrite = server.taskStore.createTask({
       backend: 'local',
       capability: 'local:write_file',
-      payload: { test: true }
+      payload: { test: true },
+      targetDeviceId: devB.deviceId
     });
     wsDevA.send(JSON.stringify({
       type: 'TASK_CLAIM_POLL',
@@ -296,7 +297,8 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     const taskGit = server.taskStore.createTask({
       backend: 'local',
       capability: 'local:git_status',
-      payload: { workspace: process.cwd() }
+      payload: { workspace: process.cwd() },
+      targetDeviceId: devZero.deviceId
     });
     wsDevZero.send(JSON.stringify({
       type: 'TASK_CLAIM_POLL',
@@ -328,7 +330,8 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     const taskWrite2 = server.taskStore.createTask({
       backend: 'local',
       capability: 'local:write_file',
-      payload: { write: true }
+      payload: { write: true },
+      targetDeviceId: devRead.deviceId
     });
     wsDevRead.send(JSON.stringify({
       type: 'TASK_CLAIM_POLL',
@@ -369,7 +372,8 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     const taskReadFile = server.taskStore.createTask({
       backend: 'local',
       capability: 'local:read_file',
-      payload: { filePath: 'package.json' }
+      payload: { filePath: 'package.json' },
+      targetDeviceId: devRead.deviceId
     });
     wsDevRead.send(JSON.stringify({
       type: 'TASK_CLAIM_POLL',

@@ -353,7 +353,7 @@ export class TaskStore {
         if (t.status !== 'queued') return false;
         if (!supportedCapabilities.includes(t.capability)) return false;
         if (t.backend === 'local') {
-          if (t.targetDeviceId && t.targetDeviceId !== deviceId) return false;
+          if (!t.targetDeviceId || t.targetDeviceId !== deviceId) return false;
         }
         return true;
       })
@@ -366,7 +366,7 @@ export class TaskStore {
   public claimTaskById(taskId: string, deviceId: string, leaseDurationMs?: number): DurableTask | undefined {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'queued') return undefined;
-    if (task.backend === 'local' && task.targetDeviceId && task.targetDeviceId !== deviceId) return undefined;
+    if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId)) return undefined;
 
     const now = Date.now();
     const attempt = this.createAttempt(task, deviceId, now);
@@ -404,11 +404,13 @@ export class TaskStore {
             task.targetDeviceId = knownDeviceIds[0];
             this.saveTask(task);
             migrated++;
-          } else if (knownDeviceIds.length > 1) {
+          } else {
             task.status = 'failed';
             task.error = {
               code: 'AMBIGUOUS_LEGACY_TASK',
-              message: `Legacy task was created without targetDeviceId and cannot be safely routed in a multi-device environment (${knownDeviceIds.join(', ')}).`
+              message: knownDeviceIds.length === 0
+                ? 'Legacy task was created without targetDeviceId and cannot be safely routed with zero registered devices.'
+                : `Legacy task was created without targetDeviceId and cannot be safely routed in a multi-device environment (${knownDeviceIds.join(', ')}).`
             };
             task.completedAt = Date.now();
             this.saveTask(task);

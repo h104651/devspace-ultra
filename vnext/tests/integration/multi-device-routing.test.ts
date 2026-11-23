@@ -80,6 +80,10 @@ class TestSqlStorage implements SqlStorage {
           metadataJson: row[16], startedAt: row[17], completedAt: row[18], createdAt: row[19], updatedAt: row[20],
           attemptsJson: row[21], activeAttemptId: row[22], externalRunJson: row[23], targetDeviceId: row[24]
         }));
+        if (/status\s+IN/i.test(query)) {
+          const filtered = mapped.filter(r => params.includes(r.status));
+          return { toArray: () => filtered, one: () => filtered[0] || null, raw: () => filtered };
+        }
         if (params.length > 0) {
           const filtered = mapped.filter(r => r.taskId === params[0]);
           return { toArray: () => filtered, one: () => filtered[0] || null, raw: () => filtered };
@@ -826,7 +830,21 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
         payload: { path: 'a.txt' }
       });
       // Simulate prior claim before multi-device migration
-      memStore.claimTaskById(legacyClaimed.taskId, 'device-alpha');
+      legacyClaimed.lease = {
+        claimedBy: 'device-alpha',
+        claimedAt: Date.now() - 10000,
+        leaseExpiresAt: Date.now() + 50000,
+        lastHeartbeatAt: Date.now() - 5000
+      };
+      legacyClaimed.attempts = [{
+        id: 'att-legacy-1',
+        attemptNumber: 1,
+        claimedBy: 'device-alpha',
+        claimedAt: Date.now() - 10000,
+        status: 'claimed'
+      }];
+      legacyClaimed.activeAttemptId = 'att-legacy-1';
+      legacyClaimed.status = 'claimed';
       // Device disconnects / lease expires, requeue
       memStore.failTask(legacyClaimed.taskId, { code: 'DISCONNECT', message: 'Agent disconnected' }, { retryable: true });
 
@@ -1090,6 +1108,153 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
         ),
         /AMBIGUOUS_DEVICE_TARGET/
       );
+    });
+
+    await test('Task B15: Strict P0 verification of legacy unassigned tasks, zero-device cold start, and claim protections', async () => {
+      const store = new TaskStore();
+
+      // 1. Create a legacy-format local task without targetDeviceId
+      const legacyUnassigned = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'legacy-unassigned.txt' }
+      });
+      assert.strictEqual(legacyUnassigned.targetDeviceId, undefined);
+      assert.strictEqual(legacyUnassigned.status, 'queued');
+
+      // 2 & 3. Simulate Gateway cold start with 0 registered devices & execute Legacy Migration
+      const migZeroRes = store.migrateLegacyUnassignedTasks([]);
+      assert.strictEqual(migZeroRes.failedAmbiguous, 1, 'Zero registered devices migration must fail closed');
+      assert.strictEqual(migZeroRes.migrated, 0);
+      const migratedTask = store.getTask(legacyUnassigned.taskId);
+      assert.strictEqual(migratedTask?.status, 'failed', 'Unassigned legacy task in 0-device environment must be failed');
+      assert.strictEqual((migratedTask?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+
+      // 4 & 5. Simulate new Agent polling and verify no Agent can claim it
+      const pollNewAgent = store.claimTask('agent-new-01', ['local:read_file']);
+      assert.strictEqual(pollNewAgent, undefined, 'New agent must never claim failed unassigned legacy task');
+
+      // 6. Separately verify claimTask() and claimTaskById() reject unassigned queued tasks
+      const queuedUnassigned = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'queued-unassigned.txt' }
+      });
+      assert.strictEqual(queuedUnassigned.targetDeviceId, undefined);
+      assert.strictEqual(queuedUnassigned.status, 'queued');
+
+      // claimTask rejects unassigned local task
+      const claimPoll = store.claimTask('agent-new-02', ['local:read_file']);
+      assert.strictEqual(claimPoll, undefined, 'claimTask must strictly reject unassigned local tasks');
+
+      // claimTaskById rejects unassigned local task
+      const claimById = store.claimTaskById(queuedUnassigned.taskId, 'agent-new-02');
+      assert.strictEqual(claimById, undefined, 'claimTaskById must strictly reject unassigned local tasks');
+
+      // 7. Verify task with explicit targetDeviceId can be normally claimed by that device (and only that device)
+      const targetedTask = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'targeted.txt' },
+        targetDeviceId: 'target-agent-01'
+      });
+      // Wrong agent fails to claim
+      assert.strictEqual(store.claimTask('wrong-agent', ['local:read_file']), undefined);
+      assert.strictEqual(store.claimTaskById(targetedTask.taskId, 'wrong-agent'), undefined);
+      // Correct agent claims successfully
+      const claimedTargeted = store.claimTask('target-agent-01', ['local:read_file']);
+      assert.ok(claimedTargeted);
+      assert.strictEqual(claimedTargeted.taskId, targetedTask.taskId);
+      assert.strictEqual(claimedTargeted.targetDeviceId, 'target-agent-01');
+      assert.strictEqual(claimedTargeted.status, 'claimed');
+
+      // 8. Verify legacy task with prior claimant safely binds to original device even with 0 registered devices
+      const legacyPrior = store.createTask({
+        backend: 'local',
+        capability: 'local:read_file',
+        payload: { path: 'prior.txt' }
+      });
+      legacyPrior.lease = {
+        claimedBy: 'device-original-alpha',
+        claimedAt: Date.now() - 5000,
+        leaseExpiresAt: Date.now() + 50000,
+        lastHeartbeatAt: Date.now() - 1000
+      };
+      legacyPrior.attempts = [{
+        id: 'att-prior-1',
+        attemptNumber: 1,
+        claimedBy: 'device-original-alpha',
+        claimedAt: Date.now() - 5000,
+        completedAt: Date.now() - 1000,
+        status: 'interrupted'
+      }];
+      legacyPrior.activeAttemptId = undefined;
+      // Prior attempt completed/interrupted -> requeued
+      legacyPrior.status = 'queued';
+      legacyPrior.lease = undefined;
+      legacyPrior.retryPolicy.retryCount = 1;
+      assert.strictEqual(store.getTask(legacyPrior.taskId)?.status, 'queued');
+
+      // Migrate with 0 registered devices
+      const migPriorRes = store.migrateLegacyUnassignedTasks([]);
+      assert.strictEqual(migPriorRes.migrated, 1, 'Task with prior claimant must be safely bound');
+      assert.strictEqual(store.getTask(legacyPrior.taskId)?.targetDeviceId, 'device-original-alpha');
+      // Imposter agent cannot claim it
+      assert.strictEqual(store.claimTask('device-imposter', ['local:read_file']), undefined);
+      // Original device claims it
+      const claimedPrior = store.claimTask('device-original-alpha', ['local:read_file']);
+      assert.ok(claimedPrior);
+      assert.strictEqual(claimedPrior.taskId, legacyPrior.taskId);
+
+      // 9. Verify single-device auto-migration and multi-device fail-closed behavior
+      const legacySingle = store.createTask({ backend: 'local', capability: 'local:read_file', payload: { path: 'single.txt' } });
+      const migSingle = store.migrateLegacyUnassignedTasks(['sole-device-beta']);
+      assert.strictEqual(migSingle.migrated, 1);
+      assert.strictEqual(store.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-beta');
+
+      const legacyMulti = store.createTask({ backend: 'local', capability: 'local:read_file', payload: { path: 'multi.txt' } });
+      const migMulti = store.migrateLegacyUnassignedTasks(['dev-1', 'dev-2']);
+      assert.strictEqual(migMulti.failedAmbiguous, 1);
+      assert.strictEqual(store.getTask(legacyMulti.taskId)?.status, 'failed');
+      assert.strictEqual((store.getTask(legacyMulti.taskId)?.error as any)?.code, 'AMBIGUOUS_LEGACY_TASK');
+
+      // 10. Verify SQLite persistence and Durable Object Cold Start path
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doInstance1 = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      // Save a legacy unassigned task directly to SQLite
+      const rawLegacyTask: any = {
+        taskId: 'do-cold-legacy-01',
+        backend: 'local',
+        capability: 'local:read_file',
+        requiredScope: 'local:read',
+        status: 'queued',
+        priority: 0,
+        payload: { path: 'cold.txt' },
+        retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+        attempts: [],
+        artifacts: [],
+        logs: [],
+        createdAt: Date.now() - 10000,
+        updatedAt: Date.now() - 10000
+      };
+      await (doInstance1 as any).storage.saveTask(rawLegacyTask);
+
+      // Cold start DO with 0 registered devices:
+      const doColdInstance = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+      await (doColdInstance as any).initializeFromDurableStorage();
+
+      // Verify DO cold start ran legacy migration and marked unassigned task failed in SQLite
+      const coldLoaded = (doColdInstance as any).taskStore.getTask('do-cold-legacy-01');
+      assert.strictEqual(coldLoaded?.status, 'failed', 'DO cold start must fail closed unassigned legacy task with 0 registered devices');
+      assert.strictEqual(coldLoaded?.error?.code, 'AMBIGUOUS_LEGACY_TASK');
+
+      // Verify SQLite state persisted
+      const sqliteSaved = await (doColdInstance as any).storage.getTask('do-cold-legacy-01');
+      assert.strictEqual(sqliteSaved?.status, 'failed');
+      assert.strictEqual(sqliteSaved?.error?.code, 'AMBIGUOUS_LEGACY_TASK');
     });
 
   } finally {

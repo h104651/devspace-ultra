@@ -32,7 +32,7 @@
 | 15 | Integration: Remote MCP Transport (HTTP POST /mcp) | 整合測試 | 8 | PASS | 68ms | /mcp 端點工具調用與 OAuth 攔截 |
 | 16 | Integration: Agent Lifecycle & Durability | 整合測試 | 19 | PASS | 1597ms | Agent 斷線、重連、心跳與清理 |
 | 17 | Integration: Local Multi-Project Named Routing | 整合測試 | 29 | PASS | 804ms | 具名專案路由與許可權控制 |
-| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **23** | **PASS** | **1754ms** | **本次修復重點 (含 A1~A8, B1~B14)** |
+| 18 | **Integration: Multi-Device Targeted Routing & Registration** | **整合測試** | **24** | **PASS** | **1721ms** | **本次修復重點 (含 A1~A8, B1~B15)** |
 | 19 | Integration: Local Workspace Discovery & Nested Operations | 整合測試 | 15 | PASS | 42104ms | 遞迴工作區探索與檔案列舉 |
 | 20 | Integration: Kaggle Mock Backend | 整合測試 | 3 | PASS | 116ms | Kaggle 模擬後端執行 |
 | 21 | Integration: Pre-Migration Kaggle Restart Recovery | 整合測試 | 1 | PASS | 1ms | 遷移前歷史重啟恢復 |
@@ -55,7 +55,7 @@
 | 38 | Cloudflare: OAuth 2.1 & Protected Resource Metadata | Cloudflare | 20 | PASS | 2ms | OAuth 2.1 協定與安全端點元數據 |
 | 39 | Security: Zero Trust, Injections, Shell & Rate Limits | 安全測試 | 13 | PASS | 79ms | 零信任防護、指令注入、頻率限制 |
 | 40 | Security: Bootstrap Token Security & Redaction | 安全測試 | 3 | PASS | 2ms | 開機引導憑證安全脫敏 |
-| **總計** | **40 個測試套件** | — | **457** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
+| **總計** | **40 個測試套件** | — | **458** | **PASS** | **約 67 秒** | **成功率 100% (0 失敗)** |
 
 ---
 
@@ -86,6 +86,7 @@
 | **Task B12** | Legacy unassigned tasks are safely migrated and fail closed when ambiguous in multi-device environment | 歷史任務安全遷移：單裝置綁定、歷史認領保留、多裝置時 Fail Closed（AMBIGUOUS_LEGACY_TASK） | PASS |
 | **Task B13** | Full Idempotency conflict matrix on parameters and authorization enforcement | 完整比對 targetDeviceId、backend、capability、payload 衝突，且無權限無法透過 Replay 繞過授權 | PASS |
 | **Task B14** | Five distinct device states routing security matrix | 驗證 5 種裝置註冊/連線狀態之定向路由與安全防護 | PASS |
+| **Task B15** | Strict P0 verification of legacy unassigned tasks, zero-device cold start, and claim protections | 覆蓋 10 項邊界檢驗：無綁定拒絕認領、歷史認領者自動綁定、單裝置自動綁定、多裝置/0裝置 fail-closed 標記 failed、SQLite 持久化與 Durable Object 冷啟動路徑 | PASS |
 
 ---
 
@@ -94,26 +95,26 @@
 依規範連續執行三次完整測試套件，確認無間歇性失敗 (Flaky Tests)：
 
 1. **第一次完整執行**:
-   - 測試案例: 456 Passed / 0 Failed
+   - 測試案例: 458 Passed / 0 Failed
    - Exit Code: 0
-   - 執行耗時: 66,745 ms
+   - 執行耗時: 66,238 ms
 2. **第二次完整執行**:
-   - 測試案例: 456 Passed / 0 Failed
+   - 測試案例: 458 Passed / 0 Failed
    - Exit Code: 0
-   - 執行耗時: 65,992 ms
+   - 執行耗時: 65,842 ms
 3. **第三次完整執行**:
-   - 測試案例: 456 Passed / 0 Failed
+   - 測試案例: 458 Passed / 0 Failed
    - Exit Code: 0
-   - 執行耗時: 66,134 ms
+   - 執行耗時: 65,971 ms
 
 ---
 
 ## 五、Wrangler Deploy Dry-Run 檢驗結果
 
 ```text
- ⛅️ wrangler 4.129.0
-────────────────────
-Total Upload: 457.79 KiB / gzip: 91.74 KiB
+ ⛅️ wrangler 4.129.0 (update available 4.166.0)
+───────────────────────────────────────────────
+Total Upload: 459.24 KiB / gzip: 91.98 KiB
 Your Worker has access to the following bindings:
 Binding                                                  Resource                  
 env.GATEWAY_DO (GatewayDurableObject)                    Durable Object            

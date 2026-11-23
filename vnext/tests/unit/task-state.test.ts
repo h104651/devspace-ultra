@@ -18,7 +18,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task = store.createTask({
       backend: 'local',
       capability: 'local:git_status',
-      payload: { repo: '.' }
+      payload: { repo: '.' },
+      targetDeviceId: 'device-1'
     });
     assert.strictEqual(task.status, 'queued');
     passed++;
@@ -61,7 +62,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task2 = store.createTask({
       backend: 'local',
       capability: 'local:read_file',
-      payload: { path: 'a.txt' }
+      payload: { path: 'a.txt' },
+      targetDeviceId: 'device-dead'
     });
     store.claimTask('device-dead', ['local:read_file'], 50); // 50ms lease
     await new Promise(r => setTimeout(r, 80)); // Wait for lease to expire
@@ -93,7 +95,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task4 = store.createTask({
       backend: 'local',
       capability: 'local:write_file',
-      payload: { path: 'b.txt', content: 'test' }
+      payload: { path: 'b.txt', content: 'test' },
+      targetDeviceId: 'device-1'
     });
     store.claimTask('device-1', ['local:write_file']);
     const terminalFailRes = store.failTask(task4.taskId, { code: 'WRITE_ERROR', message: 'Permission denied' }, { retryable: false });
@@ -110,7 +113,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task5 = store.createTask({
       backend: 'local',
       capability: 'local:read_file',
-      payload: { path: 'c.txt' }
+      payload: { path: 'c.txt' },
+      targetDeviceId: 'device-1'
     });
     store.claimTask('device-1', ['local:read_file']);
     const retryRes = store.failTask(task5.taskId, { code: 'NETWORK_TIMEOUT', message: 'Temporary network glitch' }, { retryable: true });
@@ -127,7 +131,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task6 = store.createTask({
       backend: 'local',
       capability: 'local:read_file',
-      payload: { path: 'attempt-ledger.txt' }
+      payload: { path: 'attempt-ledger.txt' },
+      targetDeviceId: 'device-attempt-1'
     });
     const firstAttemptClaim = store.claimTaskById(task6.taskId, 'device-attempt-1', 1000);
     assert.ok(firstAttemptClaim);
@@ -156,7 +161,7 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     assert.strictEqual(afterFirstFailure.attempts[0].status, 'failed');
     assert.ok(afterFirstFailure.attempts[0].completedAt, 'Failed attempt must retain its completion timestamp');
 
-    store.updateTask(task6.taskId, { status: 'queued' } as any);
+    store.updateTask(task6.taskId, { status: 'queued', targetDeviceId: 'device-attempt-2' } as any);
     assert.ok(store.claimTaskById(task6.taskId, 'device-attempt-2', 1000));
     const secondAttemptTask = store.getTask(task6.taskId) as any;
     assert.strictEqual(secondAttemptTask.attempts.length, 2, 'Retry must append a new attempt instead of overwriting history');
@@ -168,7 +173,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task7 = store.createTask({
       backend: 'local',
       capability: 'local:read_file',
-      payload: { path: 'stale-attempt.txt' }
+      payload: { path: 'stale-attempt.txt' },
+      targetDeviceId: 'device-stale-attempt'
     });
     store.claimTaskById(task7.taskId, 'device-stale-attempt', 30);
     await new Promise(r => setTimeout(r, 50));
@@ -187,7 +193,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task8 = store.createTask({
       backend: 'local',
       capability: 'local:git_status',
-      payload: { repo: '.' }
+      payload: { repo: '.' },
+      targetDeviceId: 'device-wait'
     });
     store.claimTaskById(task8.taskId, 'device-wait', 1000);
     store.acknowledgeTask(task8.taskId, 'device-wait');
@@ -203,7 +210,8 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     const task9 = store.createTask({
       backend: 'local',
       capability: 'local:git_status',
-      payload: { repo: '.' }
+      payload: { repo: '.' },
+      targetDeviceId: 'device-wait'
     });
     const timedOut = await (store as any).waitForTask(task9.taskId, { timeoutMs: 25 });
     assert.strictEqual(timedOut.timedOut, true);

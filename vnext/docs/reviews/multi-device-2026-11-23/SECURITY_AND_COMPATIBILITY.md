@@ -63,14 +63,19 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
 - **提交期限制**:
   - 當系統存在多台已註冊裝置或線上有多台 Agent 時，用戶端若未指明 `targetDeviceId`，`TaskRouter` 立即拋出 `AMBIGUOUS_DEVICE_TARGET` 拒絕任務排隊（Fail Closed）。
   - 若其中 1 台電腦在線、另 1 台電腦離線，亦禁止自動將任務偷派給在線電腦，杜絕「原本要跑在 New PC 的任務因 New PC 離線而被 Old PC 搶走執行」。
-- **認領期限制**:
+- **認領期限制 (Strict Fail-Closed Claim Protection)**:
   - `TaskStore.claimTask` 與 `TaskStore.claimTaskById` 強制校驗：
     ```ts
-    if (task.backend === 'local' && task.targetDeviceId && task.targetDeviceId !== deviceId) {
+    if (t.backend === 'local') {
+      if (!t.targetDeviceId || t.targetDeviceId !== deviceId) return false;
+    }
+    ```
+    ```ts
+    if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId)) {
       return undefined; // 嚴格拒絕認領
     }
     ```
-  - 即使特定 Agent 試圖以輪詢或指定任務 ID 認領非指定任務，Gateway 端一律拒絕。
+  - 本地任務**必須具備明確且相符之 `targetDeviceId`**，若歷史舊任務未綁定或指定給其他電腦，任何 Agent 輪詢或按 ID 認領一律嚴格拒絕。
 - **逾期回收與重試安全**:
   - 當任務租約過期被回收時，`targetDeviceId` 欄位維持不變。
   - 重試佇列中該任務依然只能由原目標裝置認領，其它裝置輪詢一律跳過。
@@ -99,7 +104,7 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
 - Gateway 在啟動或冷啟動水合時，自動審視歷史留存任務：
   - **有歷史認領者**: 綁定至該次租約認領者，確保重試不會送錯電腦。
   - **單裝置環境**: 自動補齊唯一裝置 ID。
-  - **多裝置環境**: 歷史未綁定任務直接標記為失敗（`AMBIGUOUS_LEGACY_TASK`），嚴守 Fail Closed 原則。
+  - **多裝置或零註冊裝置環境**: 歷史未綁定任務直接標記為失敗（`AMBIGUOUS_LEGACY_TASK`），嚴守 Fail Closed 原則，防止未來新電腦註冊時誤領。
 
 ### 3. 資料庫 Schema 遷移相容性
 - 在 `devices` 資料表新增 `activeTokenId TEXT` 欄位。

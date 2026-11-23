@@ -24,6 +24,10 @@
 9. **[RESOLVED] CLI 啟動規格校正與生產環境狀態差異釐清 (P1)**:
    - 修正文件中的平臺參數為 `windows`，校正啟動指令為 `agent-cli.ts` 實際支援之環境變數與 `--projects-config` 格式。
    - 深入調查並說明生產環境舊電腦 `totalRegistered: 0 / totalOnline: 1` 歷史成因與向前相容保證。
+10. **[RESOLVED] 歷史未綁定任務領取漏洞與 0 裝置冷啟動修復 (P0)**:
+   - `TaskStore.claimTask` 與 `TaskStore.claimTaskById` 強制要求本地任務必須具備 `targetDeviceId` 且嚴格匹配請求裝置 ID，否則拒絕認領（Fail Closed）。
+   - `migrateLegacyUnassignedTasks` 針對 0 註冊裝置冷啟動環境，將歷史未綁定排隊任務自動標記為 `failed`（`AMBIGUOUS_LEGACY_TASK`），避免新裝置接入時誤領。
+   - 新增 `Task B15` 隔離回歸測試，10 項邊界案例 100% 通過。
 
 ---
 
@@ -32,7 +36,7 @@
 | 項目說明 | 影響範圍 | 風險等級 | 是否阻擋 Merge | 是否阻擋 Production Deploy | 是否阻擋新 Agent 上線 | 說明 / 處置方式 |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **正式生產環境 Device Token 簽發** | 新 Windows 電腦 | Low | **否** | **否** | **是** | 依資安授權邊界，本輪禁止簽發正式憑證。需待 PR 合併並部署後，由管理員在安全管理介面手動簽發一次性 Token。 |
-| **生產環境雙實機同時連線驗收** | 舊電腦與新電腦 | Low | **否** | **否** | **是** | 本機模擬測試（456 項）已全數 PASS，真實雙實機連線驗收需待正式部署完成後依 SOP 啟動。 |
+| **生產環境雙實機同時連線驗收** | 舊電腦與新電腦 | Low | **否** | **否** | **是** | 本機模擬測試（458 項）已全數 PASS，真實雙實機連線驗收需待正式部署完成後依 SOP 啟動。 |
 | **ChatGPT MCP 端點實際對接測試** | ChatGPT 客戶端 | Low | **否** | **否** | **是** | 需於正式 Gateway 升級並加入第二台 Agent 後，由 ChatGPT 操作並指定 `targetDeviceId` 進行端對端驗收。 |
 
 ---
@@ -40,7 +44,7 @@
 ## 三、風險等級總評估 (Overall Risk Assessment)
 
 - **代碼回歸風險**: **極低 (Very Low)**
-  - 456 項全套自動化測試 100% 通過（連續三次確認無間歇性失敗）。
+  - 458 項全套自動化測試 100% 通過（連續三次確認無間歇性失敗）。
   - 單電腦環境保留自動綁定機制，100% 向後相容。
 - **資料庫遷移風險**: **極低 (Very Low)**
   - SQLite 採非破壞性 `ALTER TABLE ADD COLUMN` 腳本，具備安全錯誤捕獲，不會損壞舊資料。

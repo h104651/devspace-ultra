@@ -40,9 +40,10 @@
 - **執行環境**: Windows 11 (ARM64 Workstation)
 - **Node.js**: v24.18.0
 - **TypeScript 建置 (`npm run build`)**: PASS (Exit code 0)
-- **完整回歸測試**: 457 Passed / 0 Failed (Exit code 0)
+- **完整回歸測試**: 458 Passed / 0 Failed (Exit code 0, 連續 3 次通過)
 - **Wrangler Deploy 預檢 (`npx wrangler deploy --dry-run`)**: PASS (Exit code 0)
 - **關鍵安全性項目驗證**:
+  - `Task B15`: 歷史無綁定本地任務拒絕認領、0 註冊裝置冷啟動 fail-closed 標記失敗、SQLite 持久化與 Durable Object 水合等 10 項邊界驗證全數通過。
   - `Task A8`: 裝置註冊未給予 capabilities 時預設為最小唯讀範圍（`local:read`, `artifacts:read`），回應標頭強制設定 `Cache-Control: no-store` 與 `Pragma: no-cache`。
   - `Task B14`: 零裝置在線且零註冊時未指定目標本機任務立即 Fail-Closed 拒絕（`DEVICE_TARGET_REQUIRED`）。
   - `Task B7 / B7b`: 租約過期回收、重試計數維持與 Attempt 記錄確定性。

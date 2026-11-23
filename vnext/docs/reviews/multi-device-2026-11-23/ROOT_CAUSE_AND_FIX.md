@@ -71,6 +71,17 @@
 - 連續模擬 2 次與 3 次過期，驗證重試計數累加。
 - 當過期次數超過 `maxRetries` 時，驗證 `recoveredCount === 0`、`failedCount === 1`，任務終態轉為 `'stale'`，錯誤碼為 `'TASK_STALE'`。
 
+### 3. P0 歷史未綁定任務領取漏洞與零裝置冷啟動修復 (P0 Legacy Claim & Zero-Device Cold Start Fix)
+- **根因分析**:
+  1. `claimTask()` 與 `claimTaskById()` 原始條件為 `if (t.targetDeviceId && t.targetDeviceId !== deviceId) return false;`。當歷史舊任務缺乏 `targetDeviceId`（`undefined`）時，條件不成立，任何在線 Agent 均可認領無綁定之本機任務。
+  2. `migrateLegacyUnassignedTasks(knownDeviceIds)` 在冷啟動且零註冊裝置（`knownDeviceIds.length === 0`）時無分支處理，導致懸空的歷史未綁定任務維持 `status: 'queued'`，日後新裝置接入時面臨錯配風險。
+- **修復代碼實作**:
+  1. `vnext/src/storage/task-store.ts`:
+     - `claimTask`: 改為 `if (t.backend === 'local') { if (!t.targetDeviceId || t.targetDeviceId !== deviceId) return false; }`。
+     - `claimTaskById`: 改為 `if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId)) return undefined;`。
+     - `migrateLegacyUnassignedTasks`: 0 台或大於 1 台已註冊裝置時，無歷史認領者的排隊任務直接 Fail-Closed 轉為 `failed`，設定錯誤碼 `AMBIGUOUS_LEGACY_TASK`。
+  2. 新增 `Task B15` 隔離回歸測試，完整覆蓋 10 項邊界檢驗（含 SQLite 持久化與 Durable Object 冷啟動路徑）。
+
 ---
 
 ## 四、修改前後行為比對 (Before vs. After)
@@ -81,9 +92,11 @@
 | **目標裝置重新認領** | 未在 B7 測試重新認領行為 | 明確驗證新電腦可合法認領 Attempt 2，且 Attempt Ledger 記錄完整 |
 | **隔離環境確定性** | 無隔離的 Lease 耗盡測試 | 新增 `Task B7b`，在無背景輪詢干擾下精準驗證 `recoveredCount: 1` 以及超過重試上限時的 `TASK_STALE` 終態 |
 | **零裝置在線/註冊派工 (P0)** | 0 裝置且未指定目標時仍允許建立未綁定任務排隊，後續依賴遷移 | 0 裝置且未指定目標時嚴格 Fail-Closed，立即拒絕並拋出 `DEVICE_TARGET_REQUIRED`；指定目標時安全排隊等待該裝置 |
+| **未綁定任務認領保護 (P0)** | 歷史排隊任務無 `targetDeviceId` 時任何 Agent 皆可認領 | 嚴格要求本地任務必須具備 `targetDeviceId` 且等於請求裝置 ID，否則拒絕認領 |
+| **零裝置冷啟動舊任務遷移 (P0)** | 0 註冊裝置時跳過未綁定任務，維持懸空排隊狀態 | 0 註冊裝置冷啟動時 Fail-Closed 標記為 `failed`（`AMBIGUOUS_LEGACY_TASK`），杜絕後續誤領 |
 | **裝置註冊預設權限 (P1)** | `POST /admin/devices` 省略 `capabilities` 時預設包含 `local:write`、`local:exec` | 嚴格預設為最小唯讀權限 `['local:read', 'artifacts:read']`，禁止自動授權寫入與執行 |
 | **Token 回應快取安全 (P1)** | 管理端註冊回應未設置安全快取限制標頭 | 嚴格強制回傳 `Cache-Control: no-store` 與 `Pragma: no-cache` |
-| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (457/457 PASS) |
+| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (458/458 PASS) |
 
 ---
 
