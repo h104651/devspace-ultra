@@ -147,7 +147,7 @@ export async function runTaskInventory(options: InventoryOptions): Promise<Inven
   }
 
   const tasks: any[] = Array.isArray(data.tasks) ? data.tasks : [];
-  const isLegacy = !data.summary || (tasks.length > 0 && tasks[0].targetDeviceId === undefined && tasks[0].isQuarantined === undefined);
+  const isLegacy = !data.summary || typeof data.summary !== 'object' || (tasks.length > 0 && tasks[0].targetDeviceId === undefined && tasks[0].isQuarantined === undefined);
 
   if (isLegacy) {
     log('========================================================================================');
@@ -157,20 +157,31 @@ export async function runTaskInventory(options: InventoryOptions): Promise<Inven
     log('Status: [LEGACY_ENDPOINT_DETECTED]');
     log('The remote Gateway is running the legacy schema (v2.1.0 @ 1a933d3).');
     log(`Total Active Tasks Returned: ${tasks.length}`);
-    log('Note: Legacy /admin/tasks endpoint does not expose targetDeviceId or attempt history.');
+    log('Note: Legacy /admin/tasks endpoint does not expose targetDeviceId, attempt history, or full summary.');
+    log('Warning: A legacy endpoint CANNOT provide verifiable evidence of zero unassigned tasks.');
     log('');
-    log('Safe Fallback Inspection via Cloudflare Wrangler SQL:');
-    log('  npx wrangler durable-objects sql query DEVSPACE_GATEWAY_DO \\');
-    log('    "SELECT taskId, status, backend, targetDeviceId, leaseJson, attemptsJson FROM tasks WHERE status IN (\'queued\', \'claimed\', \'running\', \'retrying\')"');
+    log('Safe Fallback Inspection via Cloudflare Durable Objects Data Studio:');
+    log('  1. Navigate to Cloudflare Dashboard -> Workers & Pages -> devspace-ultra-gateway -> Durable Objects');
+    log('  2. Select Durable Object Namespace: GatewayDurableObject');
+    log('  3. Locate Singleton Instance: devspace-gateway-default');
+    log('  4. In Storage / Data Studio SQL Console, execute the read-only query:');
+    log('       SELECT id, status, backend,');
+    log('              json_extract(data, \'$.targetDeviceId\') AS targetDeviceId,');
+    log('              json_extract(data, \'$.lease.claimedBy\') AS claimedBy');
+    log('       FROM tasks');
+    log('       WHERE backend = \'local\'');
+    log('         AND status IN (\'queued\', \'claimed\', \'acknowledged\', \'running\', \'retrying\');');
+    log('  5. Required Permissions: Workers Administrator or Account Administrator (Durable Objects Storage Read)');
     log('');
     log('Safety Guarantee:');
+    log('  Under Zero Trust preflight rules, a legacy endpoint is STRICTLY BLOCKED from automated readiness.');
     log('  The Zero Task Loss Quarantine architecture in PR #23 guarantees that upon upgrade,');
     log('  any legacy tasks with prior claimants will safely preserve their binding, while any');
     log('  unassigned tasks will remain quarantined in queued state (fail-closed against new devices).');
     log('========================================================================================');
 
     return {
-      exitCode: checkReadiness && tasks.length > 0 ? 2 : 0,
+      exitCode: 2, // Always Exit Code 2 for Legacy Endpoint (cannot prove readiness)
       status: 'LEGACY_ENDPOINT_DETECTED',
       totalActiveLocal: tasks.length,
       totalTargeted: 0,
@@ -181,8 +192,189 @@ export async function runTaskInventory(options: InventoryOptions): Promise<Inven
     };
   }
 
-  const summary = data.summary || {};
-  const totalActiveLocal = summary.totalActiveLocal ?? tasks.filter(t => t.backend === 'local' && !['completed', 'failed', 'cancelled'].includes(t.status)).length;
+  // Modern Endpoint Strict Schema Validation
+  if (data.ok !== true) {
+    log(`[ERROR] Response indicates failure: ${data.error || 'ok !== true'}`);
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: 0,
+      totalTargeted: 0,
+      totalQuarantined: 0,
+      totalWithPriorClaimant: 0,
+      error: `API error: ${data.error || 'ok !== true'}`,
+      output: lines.join('\n')
+    };
+  }
+
+  if (typeof data.total !== 'number' || typeof data.offset !== 'number' || typeof data.limit !== 'number' || typeof data.hasMore !== 'boolean') {
+    log('[ERROR] Invalid response schema: missing pagination metadata (total, offset, limit, hasMore)');
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: 0,
+      totalTargeted: 0,
+      totalQuarantined: 0,
+      totalWithPriorClaimant: 0,
+      error: 'SCHEMA_INVALID: missing pagination metadata',
+      output: lines.join('\n')
+    };
+  }
+
+  const summary = data.summary;
+  if (!summary || typeof summary !== 'object' ||
+      typeof summary.totalActiveLocal !== 'number' ||
+      typeof summary.totalTargeted !== 'number' ||
+      typeof summary.totalQuarantined !== 'number' ||
+      typeof summary.totalWithPriorClaimant !== 'number' ||
+      typeof summary.byTargetDevice !== 'object' || summary.byTargetDevice === null ||
+      typeof summary.byStatus !== 'object' || summary.byStatus === null) {
+    log('[ERROR] Invalid response schema: summary object missing or incomplete');
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: 0,
+      totalTargeted: 0,
+      totalQuarantined: 0,
+      totalWithPriorClaimant: 0,
+      error: 'SCHEMA_INVALID: incomplete summary metrics',
+      output: lines.join('\n')
+    };
+  }
+
+  // Statistical consistency checks
+  if (summary.totalActiveLocal !== summary.totalTargeted + summary.totalQuarantined) {
+    log(`[ERROR] Statistical contradiction: totalActiveLocal (${summary.totalActiveLocal}) !== totalTargeted (${summary.totalTargeted}) + totalQuarantined (${summary.totalQuarantined})`);
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: summary.totalActiveLocal,
+      totalTargeted: summary.totalTargeted,
+      totalQuarantined: summary.totalQuarantined,
+      totalWithPriorClaimant: summary.totalWithPriorClaimant,
+      error: 'STATISTICAL_CONTRADICTION: totalActiveLocal !== totalTargeted + totalQuarantined',
+      output: lines.join('\n')
+    };
+  }
+
+  if (summary.totalWithPriorClaimant > summary.totalQuarantined) {
+    log(`[ERROR] Statistical contradiction: totalWithPriorClaimant (${summary.totalWithPriorClaimant}) exceeds totalQuarantined (${summary.totalQuarantined})`);
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: summary.totalActiveLocal,
+      totalTargeted: summary.totalTargeted,
+      totalQuarantined: summary.totalQuarantined,
+      totalWithPriorClaimant: summary.totalWithPriorClaimant,
+      error: 'STATISTICAL_CONTRADICTION: totalWithPriorClaimant > totalQuarantined',
+      output: lines.join('\n')
+    };
+  }
+
+  const byStatusSum = Object.values(summary.byStatus as Record<string, number>).reduce((a, b) => a + b, 0);
+  if (byStatusSum !== summary.totalActiveLocal) {
+    log(`[ERROR] Statistical contradiction: sum of byStatus (${byStatusSum}) !== totalActiveLocal (${summary.totalActiveLocal})`);
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: summary.totalActiveLocal,
+      totalTargeted: summary.totalTargeted,
+      totalQuarantined: summary.totalQuarantined,
+      totalWithPriorClaimant: summary.totalWithPriorClaimant,
+      error: 'STATISTICAL_CONTRADICTION: sum of byStatus !== totalActiveLocal',
+      output: lines.join('\n')
+    };
+  }
+
+  // Pagination consistency checks
+  if (data.offset === 0 && !data.hasMore && tasks.length !== data.total) {
+    log(`[ERROR] Pagination inconsistency: complete page expected ${data.total} tasks, received ${tasks.length}`);
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: summary.totalActiveLocal,
+      totalTargeted: summary.totalTargeted,
+      totalQuarantined: summary.totalQuarantined,
+      totalWithPriorClaimant: summary.totalWithPriorClaimant,
+      error: 'PAGINATION_INCONSISTENCY: task count mismatch on complete page',
+      output: lines.join('\n')
+    };
+  }
+
+  if (tasks.length > data.limit) {
+    log(`[ERROR] Pagination inconsistency: tasks length ${tasks.length} exceeds limit ${data.limit}`);
+    return {
+      exitCode: 2,
+      status: 'BLOCKED',
+      totalActiveLocal: summary.totalActiveLocal,
+      totalTargeted: summary.totalTargeted,
+      totalQuarantined: summary.totalQuarantined,
+      totalWithPriorClaimant: summary.totalWithPriorClaimant,
+      error: 'PAGINATION_INCONSISTENCY: task count exceeds limit',
+      output: lines.join('\n')
+    };
+  }
+
+  // Task schema checks
+  const ACTIVE_STATUS_SET = new Set(['queued', 'claimed', 'acknowledged', 'running', 'retrying']);
+  for (const t of tasks) {
+    if (!t.taskId || typeof t.taskId !== 'string' || !t.status || typeof t.status !== 'string' || !t.backend) {
+      log(`[ERROR] Task schema invalid: task missing taskId, status, or backend (${JSON.stringify(t)})`);
+      return {
+        exitCode: 2,
+        status: 'BLOCKED',
+        totalActiveLocal: summary.totalActiveLocal,
+        totalTargeted: summary.totalTargeted,
+        totalQuarantined: summary.totalQuarantined,
+        totalWithPriorClaimant: summary.totalWithPriorClaimant,
+        error: 'TASK_SCHEMA_INVALID: missing required task fields',
+        output: lines.join('\n')
+      };
+    }
+    if (t.backend === 'local') {
+      if (typeof t.isQuarantined !== 'boolean') {
+        log(`[ERROR] Task schema invalid: local task ${t.taskId} missing boolean isQuarantined flag`);
+        return {
+          exitCode: 2,
+          status: 'BLOCKED',
+          totalActiveLocal: summary.totalActiveLocal,
+          totalTargeted: summary.totalTargeted,
+          totalQuarantined: summary.totalQuarantined,
+          totalWithPriorClaimant: summary.totalWithPriorClaimant,
+          error: 'TASK_SCHEMA_INVALID: missing isQuarantined',
+          output: lines.join('\n')
+        };
+      }
+      if (t.isQuarantined && t.targetDeviceId) {
+        log(`[ERROR] Task schema contradiction: task ${t.taskId} isQuarantined=true but has targetDeviceId '${t.targetDeviceId}'`);
+        return {
+          exitCode: 2,
+          status: 'BLOCKED',
+          totalActiveLocal: summary.totalActiveLocal,
+          totalTargeted: summary.totalTargeted,
+          totalQuarantined: summary.totalQuarantined,
+          totalWithPriorClaimant: summary.totalWithPriorClaimant,
+          error: 'TASK_SCHEMA_INVALID: quarantined task has targetDeviceId',
+          output: lines.join('\n')
+        };
+      }
+      if (!t.isQuarantined && (!t.targetDeviceId || typeof t.targetDeviceId !== 'string')) {
+        log(`[ERROR] Task schema contradiction: task ${t.taskId} isQuarantined=false but missing targetDeviceId`);
+        return {
+          exitCode: 2,
+          status: 'BLOCKED',
+          totalActiveLocal: summary.totalActiveLocal,
+          totalTargeted: summary.totalTargeted,
+          totalQuarantined: summary.totalQuarantined,
+          totalWithPriorClaimant: summary.totalWithPriorClaimant,
+          error: 'TASK_SCHEMA_INVALID: non-quarantined task missing targetDeviceId',
+          output: lines.join('\n')
+        };
+      }
+    }
+  }
+
+  const totalActiveLocal = summary.totalActiveLocal ?? tasks.filter(t => t.backend === 'local' && ACTIVE_STATUS_SET.has(t.status)).length;
   const totalTargeted = summary.totalTargeted ?? tasks.filter(t => !!t.targetDeviceId).length;
   const totalQuarantined = summary.totalQuarantined ?? tasks.filter(t => t.isQuarantined).length;
   const totalWithPriorClaimant = summary.totalWithPriorClaimant ?? tasks.filter(t => t.priorClaimant).length;

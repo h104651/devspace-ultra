@@ -5,6 +5,8 @@ import {
   CreateTaskOptions,
   DurableTask,
   TaskStatus,
+  ACTIVE_TASK_STATUSES,
+  TERMINAL_TASK_STATUSES,
   TaskArtifactSummary,
   TaskAttempt,
   TaskAttemptStatus
@@ -12,7 +14,6 @@ import {
 import { ScopeChecker } from '../security/scope-checker';
 import { IStorageAdapter } from './storage-adapter.interface';
 
-const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['succeeded', 'failed', 'cancelled', 'stale']);
 const ACTIVE_ATTEMPT_STATUSES = new Set<TaskAttemptStatus>(['claimed', 'acknowledged', 'running']);
 const TASK_LOG_MAX_LINES = 2000;
 const TASK_LOG_MAX_ENTRY_BYTES = 4096;
@@ -424,20 +425,26 @@ export class TaskStore {
         // DO NOT mark as failed unconditionally.
         // Because claimTask() and claimTaskById() strictly require task.targetDeviceId === deviceId,
         // this task can NEVER be claimed by any agent until explicitly assigned.
-        quarantined++;
+        if (ACTIVE_TASK_STATUSES.has(task.status)) {
+          quarantined++;
+        }
       }
     }
     return { migrated, quarantined, failedAmbiguous };
   }
 
-  public assignQuarantinedTasks(targetDeviceId: string, taskIds?: string[]): { assigned: number; taskIds: string[] } {
+  public assignQuarantinedTasks(targetDeviceId: string, taskIds: string[]): { assigned: number; taskIds: string[] } {
     let assigned = 0;
     const assignedTaskIds: string[] = [];
-    const targetSet = taskIds && taskIds.length > 0 ? new Set(taskIds) : undefined;
+    if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+      return { assigned: 0, taskIds: [] };
+    }
+    const targetSet = new Set(taskIds);
 
     for (const task of this.tasks.values()) {
-      if (task.backend === 'local' && !task.targetDeviceId) {
-        if (targetSet && !targetSet.has(task.taskId)) {
+      // Must be local backend, unassigned, active (non-terminal), and explicitly in taskIds
+      if (task.backend === 'local' && !task.targetDeviceId && ACTIVE_TASK_STATUSES.has(task.status)) {
+        if (!targetSet.has(task.taskId)) {
           continue;
         }
         task.targetDeviceId = targetDeviceId;

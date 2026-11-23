@@ -77,10 +77,256 @@ export async function runInventoryTasksUnitTests(): Promise<{ passed: number; fa
     ok(res.status === 'LEGACY_ENDPOINT_DETECTED', 'Detects legacy schema');
     ok(res.exitCode === 2, 'Returns exit code 2 when legacy tasks found and readiness checked');
     ok(res.output.includes('[LEGACY_ENDPOINT_DETECTED]'), 'Output indicates legacy endpoint');
-    ok(res.output.includes('wrangler durable-objects sql query'), 'Output provides Wrangler direct SQL command');
+    ok(res.output.includes('Cloudflare Durable Objects Data Studio'), 'Output provides Data Studio fallback instructions');
+    ok(res.output.includes('GatewayDurableObject'), 'Output names correct Durable Object');
+    ok(res.output.includes('devspace-gateway-default'), 'Output names singleton instance');
+    ok(res.output.includes('SELECT id, status, backend'), 'Output contains correct SQL query');
     ok(res.output.includes('Zero Task Loss Quarantine'), 'Output explains Zero Task Loss Quarantine protection');
   } catch (err: any) {
     console.error('Test 4 failed:', err);
+  }
+
+  // Test 4b: Legacy Endpoint with 0 tasks MUST STILL RETURN exitCode 2 (Never false READY)
+  try {
+    const legacyEmptyResponse = {
+      total: 0,
+      tasks: []
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json(legacyEmptyResponse)
+    });
+
+    ok(res.status === 'LEGACY_ENDPOINT_DETECTED', 'Detects legacy schema even on empty tasks');
+    ok(res.exitCode === 2, 'Legacy endpoint with 0 tasks MUST return exit code 2 (Never false READY)');
+    ok(res.output.includes('STRICTLY BLOCKED from automated readiness'), 'Output explains Zero Trust blocked legacy endpoint');
+  } catch (err: any) {
+    console.error('Test 4b failed:', err);
+  }
+
+  // Test 4c: Legacy Endpoint with > 100 tasks MUST RETURN exitCode 2
+  try {
+    const legacyLargeTasks = Array.from({ length: 150 }, (_, i) => ({
+      taskId: `legacy-task-${i}`,
+      backend: 'local',
+      capability: 'local:read',
+      status: 'queued'
+    }));
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json({ total: 150, tasks: legacyLargeTasks })
+    });
+
+    ok(res.status === 'LEGACY_ENDPOINT_DETECTED', 'Detects legacy schema on large task set');
+    ok(res.exitCode === 2, 'Legacy endpoint with 150 tasks returns exit code 2');
+    ok(res.totalActiveLocal === 150, 'Reports 150 total active tasks');
+  } catch (err: any) {
+    console.error('Test 4c failed:', err);
+  }
+
+  // Test 4d: Modern Endpoint with Incomplete Summary (Schema Fail Closed -> exitCode 2)
+  try {
+    const incompleteSummaryResponse = {
+      ok: true,
+      total: 1,
+      offset: 0,
+      limit: 1000,
+      hasMore: false,
+      summary: {
+        totalActiveLocal: 1,
+        totalTargeted: 1
+        // missing totalQuarantined, byTargetDevice, byStatus
+      },
+      tasks: [{ taskId: 't-1', backend: 'local', status: 'queued', targetDeviceId: 'win11', isQuarantined: false }]
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json(incompleteSummaryResponse)
+    });
+
+    ok(res.exitCode === 2, 'Incomplete summary fails closed with exit code 2');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED on incomplete summary');
+    ok(res.error?.includes('SCHEMA_INVALID'), 'Error indicates schema invalidation');
+  } catch (err: any) {
+    console.error('Test 4d failed:', err);
+  }
+
+  // Test 4e: Modern Endpoint with Statistical Contradiction (totalActiveLocal != targeted + quarantined)
+  try {
+    const contradictionResponse = {
+      ok: true,
+      total: 2,
+      offset: 0,
+      limit: 1000,
+      hasMore: false,
+      summary: {
+        totalActiveLocal: 5, // Contradiction! 2 + 1 != 5
+        totalTargeted: 2,
+        totalQuarantined: 1,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: { 'win11': 2 },
+        byStatus: { 'queued': 5 }
+      },
+      tasks: []
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json(contradictionResponse)
+    });
+
+    ok(res.exitCode === 2, 'Statistical contradiction fails closed with exit code 2');
+    ok(res.status === 'BLOCKED', 'Status is BLOCKED on statistical contradiction');
+    ok(res.error?.includes('STATISTICAL_CONTRADICTION'), 'Error reports statistical contradiction');
+  } catch (err: any) {
+    console.error('Test 4e failed:', err);
+  }
+
+  // Test 4f: Modern Endpoint with Statistical Contradiction (totalWithPriorClaimant > totalQuarantined)
+  try {
+    const contradictionPriorResponse = {
+      ok: true,
+      total: 2,
+      offset: 0,
+      limit: 1000,
+      hasMore: false,
+      summary: {
+        totalActiveLocal: 2,
+        totalTargeted: 1,
+        totalQuarantined: 1,
+        totalWithPriorClaimant: 3, // Contradiction! 3 > 1
+        byTargetDevice: { 'win11': 1 },
+        byStatus: { 'queued': 2 }
+      },
+      tasks: []
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json(contradictionPriorResponse)
+    });
+
+    ok(res.exitCode === 2, 'Prior claimant contradiction fails closed with exit code 2');
+    ok(res.error?.includes('STATISTICAL_CONTRADICTION'), 'Error reports prior claimant contradiction');
+  } catch (err: any) {
+    console.error('Test 4f failed:', err);
+  }
+
+  // Test 4g: Modern Endpoint with Statistical Contradiction (byStatus sum != totalActiveLocal)
+  try {
+    const contradictionStatusResponse = {
+      ok: true,
+      total: 2,
+      offset: 0,
+      limit: 1000,
+      hasMore: false,
+      summary: {
+        totalActiveLocal: 2,
+        totalTargeted: 2,
+        totalQuarantined: 0,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: { 'win11': 2 },
+        byStatus: { 'queued': 1 } // Sum is 1, but totalActiveLocal is 2!
+      },
+      tasks: []
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json(contradictionStatusResponse)
+    });
+
+    ok(res.exitCode === 2, 'byStatus sum contradiction fails closed with exit code 2');
+    ok(res.error?.includes('STATISTICAL_CONTRADICTION'), 'Error reports byStatus contradiction');
+  } catch (err: any) {
+    console.error('Test 4g failed:', err);
+  }
+
+  // Test 4h: Modern Endpoint with Pagination Inconsistency (complete page count mismatch)
+  try {
+    const paginationInconsistentResponse = {
+      ok: true,
+      total: 5,
+      offset: 0,
+      limit: 1000,
+      hasMore: false, // Indicates full page!
+      summary: {
+        totalActiveLocal: 5,
+        totalTargeted: 5,
+        totalQuarantined: 0,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: { 'win11': 5 },
+        byStatus: { 'queued': 5 }
+      },
+      tasks: [{ taskId: 't-1', backend: 'local', status: 'queued', targetDeviceId: 'win11', isQuarantined: false }] // Only 1 task returned!
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json(paginationInconsistentResponse)
+    });
+
+    ok(res.exitCode === 2, 'Pagination inconsistency fails closed with exit code 2');
+    ok(res.error?.includes('PAGINATION_INCONSISTENCY'), 'Error reports pagination inconsistency');
+  } catch (err: any) {
+    console.error('Test 4h failed:', err);
+  }
+
+  // Test 4i: Modern Endpoint with Invalid Task Schema (isQuarantined=true but has targetDeviceId)
+  try {
+    const invalidTaskSchemaResponse = {
+      ok: true,
+      total: 1,
+      offset: 0,
+      limit: 1000,
+      hasMore: false,
+      summary: {
+        totalActiveLocal: 1,
+        totalTargeted: 0,
+        totalQuarantined: 1,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: {},
+        byStatus: { 'queued': 1 }
+      },
+      tasks: [
+        {
+          taskId: 't-invalid-schema',
+          backend: 'local',
+          status: 'queued',
+          targetDeviceId: 'win11', // Contradiction with isQuarantined=true!
+          isQuarantined: true
+        }
+      ]
+    };
+
+    const res = await runTaskInventory({
+      gatewayUrl: 'http://localhost:4000',
+      adminSecret: 'valid-secret',
+      checkReadiness: true,
+      fetchFn: async () => Response.json(invalidTaskSchemaResponse)
+    });
+
+    ok(res.exitCode === 2, 'Invalid task schema fails closed with exit code 2');
+    ok(res.error?.includes('TASK_SCHEMA_INVALID'), 'Error reports task schema invalidity');
+  } catch (err: any) {
+    console.error('Test 4i failed:', err);
   }
 
   // Test 5: Modern Inventory with all tasks properly targeted (READY)
@@ -199,7 +445,17 @@ export async function runInventoryTasksUnitTests(): Promise<{ passed: number; fa
     const sensitiveResponse = {
       ok: true,
       total: 1,
-      summary: { totalActiveLocal: 1, totalTargeted: 1, totalQuarantined: 0, totalWithPriorClaimant: 0 },
+      offset: 0,
+      limit: 1000,
+      hasMore: false,
+      summary: {
+        totalActiveLocal: 1,
+        totalTargeted: 1,
+        totalQuarantined: 0,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: { 'win11-arm64-workstation': 1 },
+        byStatus: { 'queued': 1 }
+      },
       tasks: [
         {
           taskId: 'task-secret-test',
@@ -230,7 +486,17 @@ export async function runInventoryTasksUnitTests(): Promise<{ passed: number; fa
     const jsonTestResponse = {
       ok: true,
       total: 1,
-      summary: { totalActiveLocal: 1, totalTargeted: 1, totalQuarantined: 0, totalWithPriorClaimant: 0 },
+      offset: 0,
+      limit: 1000,
+      hasMore: false,
+      summary: {
+        totalActiveLocal: 1,
+        totalTargeted: 1,
+        totalQuarantined: 0,
+        totalWithPriorClaimant: 0,
+        byTargetDevice: { 'win11': 1 },
+        byStatus: { 'queued': 1 }
+      },
       tasks: [{ taskId: 'json-t1', backend: 'local', status: 'queued', targetDeviceId: 'win11', isQuarantined: false }]
     };
 

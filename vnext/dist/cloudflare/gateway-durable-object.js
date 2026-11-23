@@ -55,6 +55,7 @@ const handlers_1 = require("../mcp/handlers");
 const tools = __importStar(require("../mcp/tools"));
 const reliability_tools_1 = require("../mcp/reliability-tools");
 const oauth_manager_1 = require("../oauth/oauth-manager");
+const task_1 = require("../types/task");
 const protocol_1 = require("../mcp/protocol");
 const DEFAULT_PUBLIC_BASE_URL = 'https://devspace-ultra-gateway.abdul-hsu.workers.dev';
 const KAGGLE_POLLS_STORAGE_KEY = 'devspace:kaggle-polls:v1';
@@ -815,7 +816,7 @@ class GatewayDurableObject {
                     if (backendParam && t.backend !== backendParam)
                         return false;
                     if (statusParam === 'active') {
-                        return !['completed', 'failed', 'cancelled'].includes(t.status);
+                        return task_1.ACTIVE_TASK_STATUSES.has(t.status);
                     }
                     if (statusParam && statusParam !== 'all' && t.status !== statusParam)
                         return false;
@@ -823,7 +824,7 @@ class GatewayDurableObject {
                 });
                 const paginatedTasks = filteredTasks.slice(offset, offset + limit);
                 const localTasks = allTasks.filter(t => t.backend === 'local');
-                const activeLocal = localTasks.filter(t => !['completed', 'failed', 'cancelled'].includes(t.status));
+                const activeLocal = localTasks.filter(t => task_1.ACTIVE_TASK_STATUSES.has(t.status));
                 const targetedLocal = activeLocal.filter(t => !!t.targetDeviceId);
                 const quarantinedLocal = activeLocal.filter(t => !t.targetDeviceId);
                 const withPriorClaimant = quarantinedLocal.filter(t => !!(t.lease?.claimedBy || (t.attempts && t.attempts.find(a => a.claimedBy)?.claimedBy)));
@@ -902,11 +903,14 @@ class GatewayDurableObject {
                 if (!targetDeviceId || typeof targetDeviceId !== 'string') {
                     return Response.json({ ok: false, error: 'INVALID_REQUEST: targetDeviceId is required and must be a string' }, { status: 400 });
                 }
+                if (!Array.isArray(taskIds) || taskIds.length === 0 || !taskIds.every(id => typeof id === 'string' && id.trim().length > 0)) {
+                    return Response.json({ ok: false, error: 'INVALID_REQUEST: taskIds is required and must be a non-empty array of task IDs' }, { status: 400 });
+                }
                 const dev = this.authManager.getDevice(targetDeviceId);
                 if (!dev || dev.status === 'revoked') {
                     return Response.json({ ok: false, error: `INVALID_DEVICE: targetDeviceId ${targetDeviceId} is not a valid registered active device` }, { status: 400 });
                 }
-                const res = this.taskStore.assignQuarantinedTasks(targetDeviceId, Array.isArray(taskIds) ? taskIds : undefined);
+                const res = this.taskStore.assignQuarantinedTasks(targetDeviceId, taskIds);
                 for (const tId of res.taskIds) {
                     const t = this.taskStore.getTask(tId);
                     if (t)

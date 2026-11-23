@@ -108,10 +108,14 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
     - **嚴禁自動綁定第一台連線或在線裝置**：`GatewayDurableObject` 與 `ConnectionManager` 在 `AGENT_REGISTER` 時**不再**調用 `migrateLegacyUnassignedTasks([deviceId])`。新電腦先連線、或舊電腦離線時新電腦連線，絕不自動搶奪舊任務。
     - **隔離佇列保護 (Quarantined in Queued, Zero Task Loss)**: 任務維持在 `status: 'queued'` 且 `targetDeviceId: undefined`。因本地任務認領要求 `t.backend === 'local' && (!t.targetDeviceId || t.targetDeviceId !== deviceId)` 判定，無 `targetDeviceId` 之任務嚴禁任何 Agent 認領（Fail Closed）。
     - **非破壞性零遺失**: 系統絕不無條件將歷史排隊任務標記為失敗或刪除，確保任務不遺失。
-  - **管理員安全指派 API (`POST /admin/tasks/assign-legacy`)**:
+  - **管理員安全指派 API (`POST /admin/tasks/assign-legacy`) 與活躍白名單防護**:
     - 需具備 `ADMIN_SECRET` 方可調用。
     - 強制校驗目標裝置必須為已註冊且未被撤銷（Non-Revoked）之裝置。
-    - 可批次或指定 `taskIds` 安全將隔離任務綁定至目標裝置，並寫入結構化稽核日誌。
+    - **非空 `taskIds: string[]` 強制要求**: 必須傳入非空任務 ID 陣列（若為空或未提供回傳 400 Bad Request），杜絕無邊界全量指派。
+    - **活躍狀態白名單 (`ACTIVE_TASK_STATUSES`) 與終態不可變性**:
+      - 僅允許對處於活躍狀態（`queued`, `claimed`, `acknowledged`, `running`, `retrying`）的任務進行改派。
+      - 終態任務（`succeeded`, `failed`, `cancelled`, `stale`）嚴格不可變，任何改派請求一律略過不變動。
+    - 寫入結構化稽核日誌（包含操作員、目標裝置、指派數量與任務 ID 清單）。
 
 ### 3. 資料庫 Schema 遷移相容性
 - 在 `devices` 資料表新增 `activeTokenId TEXT` 欄位。
@@ -137,11 +141,17 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
 
 - **功能與介面**:
   - 提供 `npm run inventory:tasks` 唯讀盤點腳本，支援分頁（`--limit`、`--offset`）、過濾（`--backend`、`--status`）、格式切換（`--format table|json`）與就緒檢查（`--check-readiness`）。
-  - 自動偵測舊版生產端點（`v2.1.0 @ 1a933d3`）：若缺少 `targetDeviceId` 欄位，自動輸出防禦告警與直接查詢 Cloudflare DO SQLite 之唯讀 Wrangler SQL 指令備援。
+  - **舊版端點 Fail Closed 安全防護**: 自動偵測舊版生產端點（`v2.1.0 @ 1a933d3`），由於舊版端點無法證明零未綁定任務，無論回傳幾筆資料一律回傳 Exit Code 2（BLOCKED），絕不因回傳 0 筆誤判 READY。
+  - **正式環境真實 SQL 備援機制**: 提示運維人員透過 Cloudflare Dashboard -> Workers & Pages -> Durable Objects -> `GatewayDurableObject` -> `devspace-gateway-default` -> Data Studio / SQL Console 執行真實唯讀 SQL 查詢。
+  - **嚴格 Schema 與統計一致性校驗**:
+    - 回應必須具備完整 `summary`、`offset`、`limit`、`hasMore` 與任務陣列。
+    - 嚴格校驗：`totalActiveLocal === totalTargeted + totalQuarantined`、`totalWithPriorClaimant <= totalQuarantined`，且 `byStatus` 各狀態加總精確等於 `totalActiveLocal`。
+    - 驗證分頁任務數不大於 `limit`、`hasMore` 布林值邏輯正確，各任務必須具備 `id`、`status`、`backend`、`isQuarantined` 等欄位。
+    - 任何統計矛盾、格式損壞或不完整均立即 Fail Closed（Exit Code 2）。
   - 嚴格資料脫敏：自動過濾任務代碼與敏感憑證，僅呈現狀態、裝置 ID、認領歷程與摘要統計。
-  - 明確退出碼：`0`（READY，無未綁定任務）、`1`（ERROR，網路或授權錯誤）、`2`（BLOCKED，存在隔離/未綁定任務，阻擋正式部署）。
+  - 明確退出碼：`0`（READY，無未綁定任務）、`1`（ERROR，網路或授權錯誤）、`2`（BLOCKED，存在隔離/未綁定任務或資料異常，阻擋正式部署）。
 - **受控單元測試覆蓋**:
-  - `tests/unit/inventory-tasks.test.ts` 包含 30 項測試，覆蓋遺失密鑰拒絕、網路超時、401 拒絕、舊版 DO 偵測、脫敏保證與就緒驗收。
+  - `tests/unit/inventory-tasks.test.ts` 擴充至 53 項測試，覆蓋遺失密鑰拒絕、網路超時、401 拒絕、舊版 0 筆阻擋、舊版 >100 筆阻擋、統計矛盾阻擋、分頁不完整阻擋、任務格式損壞阻擋、Data Studio 指引驗證、脫敏保證與就緒驗收。
 
 ---
 
@@ -153,6 +163,9 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
     - 限由授權操作員於 `refs/heads/main` 手動觸發。
     - 必須明確勾選 `deploy_production: true`。
     - 必須明確勾選 `preflight_inventory_confirmed: true`（確認已完成前置任務盤點且無風險）。
-    - 必須填寫 `target_commit_sha`，工作流比對該 SHA 必須與目標 Commit 完全吻合，防止併發推播導致錯誤部署。
+    - **`target_commit_sha` 強制必填（`required: true`）與安全鎖定**:
+      - 參數透過 safe `env:` 變數傳入（`INPUT_TARGET_SHA`），防範 Shell 腳本注入攻擊。
+      - 嚴格校驗格式為 40 位 16 進位字串（`^[0-9a-fA-F]{40}$`）。
+      - 工作流比對該 SHA 必須與目標 Commit (`$GITHUB_SHA`) 完全吻合，防止併發推播或任意 Commit 導致錯誤部署。
 - **受控單元測試覆蓋**:
-  - `tests/unit/workflow-deployment-gate.test.ts` 包含 22 項測試，涵蓋 PR 阻擋、Push 阻擋、缺少確認阻擋、非 main 分支阻擋與 SHA 吻合放行驗證。
+  - `tests/unit/workflow-deployment-gate.test.ts` 擴充至 32 項測試，涵蓋 PR 阻擋、Push 阻擋、缺少確認阻擋、非 main 分支阻擋、空 SHA 拒絕、短 SHA 拒絕、非 16 進位拒絕、注入字元拒絕、SHA 不吻合拒絕與 SHA 吻合放行驗證。

@@ -149,11 +149,11 @@
 | **GitHub Actions 部署門禁 (P0)** | 合併 PR 或 Push 至 `main` 時自動觸發正式 Cloudflare 部署 | 完全解耦：Push/PR 僅執行 CI 與 Dry Run；正式部署嚴格限定為手動 `workflow_dispatch` 雙核准門禁 |
 | **零裝置在線/註冊派工 (P0)** | 0 裝置且未指定目標時仍允許建立未綁定任務排隊，後續依賴遷移 | 0 裝置且未指定目標時嚴格 Fail-Closed，立即拒絕並拋出 `DEVICE_TARGET_REQUIRED`；指定目標時安全排隊等待該裝置 |
 | **未綁定任務認領保護 (P0)** | 歷史排隊任務無 `targetDeviceId` 時任何 Agent 皆可認領 | 嚴格要求本地任務必須具備 `targetDeviceId` 且等於請求裝置 ID，否則拒絕認領 |
-| **零裝置冷啟動舊任務安全遷移 (P0)** | 0 註冊裝置冷啟動時將未綁定任務直接標記為 `failed` | 0 註冊裝置冷啟動時安全保留在 `queued` 狀態（非破壞性隔離），待舊電腦重新連線時自動安全綁定（Zero Task Loss） |
+| **零裝置冷啟動舊任務安全遷移 (P0)** | 0 註冊裝置冷啟動時將未綁定任務直接標記為 `failed` | 0 註冊裝置冷啟動時安全保留在 `queued` 狀態（非破壞性隔離），嚴格禁止依連線自動綁定，需待管理員明確指派（Zero Task Loss 且無自動掠奪） |
 | **舊 Agent 補登安全性 (P1)** | 文件建議使用 `POST /admin/devices` 補登舊電腦 ID | 明確禁止補登舊電腦 ID（避免 `TOKEN_SUPERSEDED` 導致斷線），改由 Gateway 連線時自動收錄 |
 | **新電腦初次驗收權限 (P1)** | 部署範例包含 `local:write`、`local:test` | 嚴格限定為最小唯讀範圍 `['local:read', 'artifacts:read']`，並移除未被 CLI 解析之 `start` 參數 |
 | **Token 回應快取安全 (P1)** | 管理端註冊回應未設置安全快取限制標頭 | 嚴格強制回傳 `Cache-Control: no-store` 與 `Pragma: no-cache` |
-| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (519/519 PASS) |
+| **跨平臺 CI 穩定性** | 在 GitHub Actions Linux 虛擬機易受非同步排程影響拋出失敗 | 連續多次本機執行與 GitHub Actions 環境皆 100% PASS (553/553 PASS) |
 
 ---
 

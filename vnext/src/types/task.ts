@@ -9,6 +9,21 @@ export type TaskStatus =
   | 'retrying'
   | 'stale';
 
+export const ACTIVE_TASK_STATUSES = new Set<TaskStatus>([
+  'queued',
+  'claimed',
+  'acknowledged',
+  'running',
+  'retrying'
+]);
+
+export const TERMINAL_TASK_STATUSES = new Set<TaskStatus>([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'stale'
+]);
+
 export type TaskBackend = 'kaggle' | 'local' | 'browser' | 'swarm';
 
 export interface TaskLease {

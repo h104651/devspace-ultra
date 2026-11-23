@@ -84,6 +84,10 @@ class TestSqlStorage implements SqlStorage {
           const filtered = mapped.filter(r => params.includes(r.status));
           return { toArray: () => filtered, one: () => filtered[0] || null, raw: () => filtered };
         }
+        if (/backend\s*=\s*\?/i.test(query)) {
+          const filtered = mapped.filter(r => r.backend === params[0]);
+          return { toArray: () => filtered, one: () => filtered[0] || null, raw: () => filtered };
+        }
         if (params.length > 0) {
           const filtered = mapped.filter(r => r.taskId === params[0]);
           return { toArray: () => filtered, one: () => filtered[0] || null, raw: () => filtered };
@@ -1221,7 +1225,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       assert.strictEqual(migUnassigned.quarantined >= 1, true, 'Unassigned tasks are safely quarantined in queued');
 
       // Admin explicitly assigns quarantined tasks to sole-device-beta
-      const assignRes = store.assignQuarantinedTasks('sole-device-beta');
+      const assignRes = store.assignQuarantinedTasks('sole-device-beta', [legacySingle.taskId]);
       assert.strictEqual(assignRes.assigned >= 1, true, 'Quarantined tasks are assigned to designated device');
       assert.strictEqual(store.getTask(legacySingle.taskId)?.targetDeviceId, 'sole-device-beta');
 
@@ -1262,7 +1266,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
 
       // When the authoritative old agent reconnects and admin assigns:
       (doColdInstance as any).authManager.rememberAuthenticatedDevice('token-bootstrap-1', 'win11-arm64-workstation', 'Old PC', ['local:read_file']);
-      (doColdInstance as any).taskStore.assignQuarantinedTasks('win11-arm64-workstation');
+      (doColdInstance as any).taskStore.assignQuarantinedTasks('win11-arm64-workstation', ['do-cold-legacy-01']);
       const reconnectedLoaded = (doColdInstance as any).taskStore.getTask('do-cold-legacy-01');
       assert.strictEqual(reconnectedLoaded?.targetDeviceId, 'win11-arm64-workstation');
       const claimed = (doColdInstance as any).taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
@@ -1364,7 +1368,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       assert.strictEqual(taskAfterReconnect?.status, 'queued');
 
       // 6. Admin assigns quarantined tasks to authoritative device
-      const assignRes = (doCold as any).taskStore.assignQuarantinedTasks('win11-arm64-workstation');
+      const assignRes = (doCold as any).taskStore.assignQuarantinedTasks('win11-arm64-workstation', ['legacy-cold-queued-01']);
       assert.strictEqual(assignRes.assigned, 1);
       assert.strictEqual((doCold as any).taskStore.getTask('legacy-cold-queued-01')?.targetDeviceId, 'win11-arm64-workstation');
 
@@ -1561,7 +1565,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       const unauthReq = new Request('http://localhost/admin/tasks/assign-legacy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation' })
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation', taskIds: ['task-admin-assign-01'] })
       });
       const unauthRes = await doGateway.fetch(unauthReq);
       assert.strictEqual(unauthRes.status, 401);
@@ -1570,16 +1574,51 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       const invalidDevReq = new Request('http://localhost/admin/tasks/assign-legacy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
-        body: JSON.stringify({ targetDeviceId: 'non-existent-device' })
+        body: JSON.stringify({ targetDeviceId: 'non-existent-device', taskIds: ['task-admin-assign-01'] })
       });
       const invalidDevRes = await doGateway.fetch(invalidDevReq);
       assert.strictEqual(invalidDevRes.status, 400);
 
-      // 3. Valid admin assignment succeeds
-      const validReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+      // 3a. Missing taskIds fails with 400
+      const missingTaskIdsReq = new Request('http://localhost/admin/tasks/assign-legacy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
         body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation' })
+      });
+      const missingTaskIdsRes = await doGateway.fetch(missingTaskIdsReq);
+      assert.strictEqual(missingTaskIdsRes.status, 400);
+      const missingJson = await missingTaskIdsRes.json() as any;
+      assert.ok(missingJson.error.includes('taskIds is required'));
+
+      // 3b. Empty taskIds array fails with 400
+      const emptyTaskIdsReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation', taskIds: [] })
+      });
+      const emptyTaskIdsRes = await doGateway.fetch(emptyTaskIdsReq);
+      assert.strictEqual(emptyTaskIdsRes.status, 400);
+      const emptyJson = await emptyTaskIdsRes.json() as any;
+      assert.ok(emptyJson.error.includes('taskIds is required and must be a non-empty array'));
+
+      // 3c. Revoked device fails with 400
+      (doGateway as any).authManager.registerDevice('Revoked PC', 'windows', ['local:read'], 'revoked-pc');
+      (doGateway as any).authManager.revokeDevice('revoked-pc');
+      const revokedDevReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'revoked-pc', taskIds: ['task-admin-assign-01'] })
+      });
+      const revokedDevRes = await doGateway.fetch(revokedDevReq);
+      assert.strictEqual(revokedDevRes.status, 400);
+      const revokedJson = await revokedDevRes.json() as any;
+      assert.ok(revokedJson.error.includes('is not a valid registered active device'));
+
+      // 3d. Valid admin assignment succeeds with explicit taskIds
+      const validReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation', taskIds: ['task-admin-assign-01'] })
       });
       const validRes = await doGateway.fetch(validReq);
       assert.strictEqual(validRes.status, 200);
@@ -1663,6 +1702,95 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       const reclaimed = store.claimTask('device-gamma', ['local:read_file']);
       assert.ok(reclaimed);
       assert.strictEqual(reclaimed.taskId, task.taskId);
+    });
+
+    await test('Task B25: Active Task Status Whitelisting and Terminal Task Assignment Exclusion', async () => {
+      const sql = new TestSqlStorage();
+      const mockCtxDo: any = { storage: { sql }, getWebSockets: () => [] };
+      const mockEnvDo: any = { GATEWAY_DO: {}, MASTER_SECRET: testMasterSecret, ADMIN_SECRET: testAdminSecret };
+      const doGateway = new GatewayDurableObject(mockCtxDo, mockEnvDo);
+
+      const activeStatuses = ['queued', 'claimed', 'acknowledged', 'running', 'retrying'] as const;
+      const terminalStatuses = ['succeeded', 'failed', 'cancelled', 'stale'] as const;
+
+      const allTaskIds: string[] = [];
+
+      for (const st of activeStatuses) {
+        const taskId = `task-active-${st}`;
+        allTaskIds.push(taskId);
+        await (doGateway as any).storage.saveTask({
+          taskId,
+          backend: 'local',
+          capability: 'local:read_file',
+          requiredScope: 'local:read',
+          status: st,
+          priority: 0,
+          payload: { path: `${st}.txt` },
+          retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+          attempts: [],
+          createdAt: Date.now() - 10000,
+          updatedAt: Date.now() - 10000
+        });
+      }
+
+      for (const st of terminalStatuses) {
+        const taskId = `task-terminal-${st}`;
+        allTaskIds.push(taskId);
+        await (doGateway as any).storage.saveTask({
+          taskId,
+          backend: 'local',
+          capability: 'local:read_file',
+          requiredScope: 'local:read',
+          status: st,
+          priority: 0,
+          payload: { path: `${st}.txt` },
+          retryPolicy: { maxRetries: 3, retryCount: 0, backoffMs: 2000, requeueOnStale: true },
+          attempts: [],
+          createdAt: Date.now() - 20000,
+          updatedAt: Date.now() - 20000
+        });
+      }
+
+      await (doGateway as any).initializeFromDurableStorage();
+      (doGateway as any).authManager.registerDevice('Workstation', 'windows', ['local:read'], 'win11-arm64-workstation');
+
+      // 1. Query /admin/tasks?status=active -> must strictly whitelist the 5 active tasks
+      const activeReq = new Request('http://localhost/admin/tasks?view=inventory&backend=local&status=active', {
+        headers: { 'X-Admin-Secret': testAdminSecret }
+      });
+      const activeRes = await doGateway.fetch(activeReq);
+      assert.strictEqual(activeRes.status, 200);
+      const activeJson = await activeRes.json() as any;
+      assert.strictEqual(activeJson.total, 5, 'Must only return 5 active tasks');
+      assert.strictEqual(activeJson.summary.totalActiveLocal, 5, 'summary.totalActiveLocal must be 5');
+      assert.strictEqual(activeJson.summary.totalQuarantined, 5, 'summary.totalQuarantined must be 5');
+      for (const t of activeJson.tasks) {
+        assert.ok(activeStatuses.includes(t.status), `Task status ${t.status} must be in active whitelist`);
+        assert.ok(!terminalStatuses.includes(t.status), `Terminal task ${t.taskId} must not be in active tasks`);
+      }
+
+      // 2. Assign all tasks via assign-legacy -> MUST ONLY assign the 5 active tasks!
+      const assignReq = new Request('http://localhost/admin/tasks/assign-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': testAdminSecret },
+        body: JSON.stringify({ targetDeviceId: 'win11-arm64-workstation', taskIds: allTaskIds })
+      });
+      const assignRes = await doGateway.fetch(assignReq);
+      assert.strictEqual(assignRes.status, 200);
+      const assignJson = await assignRes.json() as any;
+      assert.strictEqual(assignJson.assignedCount, 5, 'Must only assign the 5 active quarantined tasks');
+
+      // 3. Verify terminal tasks were NEVER modified (targetDeviceId remains undefined)
+      for (const st of terminalStatuses) {
+        const termTask = (doGateway as any).taskStore.getTask(`task-terminal-${st}`);
+        assert.strictEqual(termTask?.targetDeviceId, undefined, `Terminal task task-terminal-${st} must remain immutable and unassigned`);
+      }
+
+      // 4. Verify all 5 active tasks were assigned
+      for (const st of activeStatuses) {
+        const actTask = (doGateway as any).taskStore.getTask(`task-active-${st}`);
+        assert.strictEqual(actTask?.targetDeviceId, 'win11-arm64-workstation');
+      }
     });
 
   } finally {

@@ -21,6 +21,7 @@ import { REMOTE_TASK_WAIT_TOOL, handleRemoteTaskWait } from '../mcp/reliability-
 import { OAuthManager } from '../oauth/oauth-manager';
 import { GatewayMessage } from '../types/gateway';
 import { TokenPayload } from '../types/auth';
+import { ACTIVE_TASK_STATUSES } from '../types/task';
 import {
   MCP_2026_VERSION,
   MCP_SUPPORTED_MODERN_VERSIONS,
@@ -854,7 +855,7 @@ export class GatewayDurableObject {
         const filteredTasks = allTasks.filter(t => {
           if (backendParam && t.backend !== backendParam) return false;
           if (statusParam === 'active') {
-            return !['completed', 'failed', 'cancelled'].includes(t.status);
+            return ACTIVE_TASK_STATUSES.has(t.status);
           }
           if (statusParam && statusParam !== 'all' && t.status !== statusParam) return false;
           return true;
@@ -863,7 +864,7 @@ export class GatewayDurableObject {
         const paginatedTasks = filteredTasks.slice(offset, offset + limit);
 
         const localTasks = allTasks.filter(t => t.backend === 'local');
-        const activeLocal = localTasks.filter(t => !['completed', 'failed', 'cancelled'].includes(t.status));
+        const activeLocal = localTasks.filter(t => ACTIVE_TASK_STATUSES.has(t.status));
         const targetedLocal = activeLocal.filter(t => !!t.targetDeviceId);
         const quarantinedLocal = activeLocal.filter(t => !t.targetDeviceId);
         const withPriorClaimant = quarantinedLocal.filter(t => !!(t.lease?.claimedBy || (t.attempts && t.attempts.find(a => a.claimedBy)?.claimedBy)));
@@ -944,11 +945,14 @@ export class GatewayDurableObject {
         if (!targetDeviceId || typeof targetDeviceId !== 'string') {
           return Response.json({ ok: false, error: 'INVALID_REQUEST: targetDeviceId is required and must be a string' }, { status: 400 });
         }
+        if (!Array.isArray(taskIds) || taskIds.length === 0 || !taskIds.every(id => typeof id === 'string' && id.trim().length > 0)) {
+          return Response.json({ ok: false, error: 'INVALID_REQUEST: taskIds is required and must be a non-empty array of task IDs' }, { status: 400 });
+        }
         const dev = this.authManager.getDevice(targetDeviceId);
         if (!dev || dev.status === 'revoked') {
           return Response.json({ ok: false, error: `INVALID_DEVICE: targetDeviceId ${targetDeviceId} is not a valid registered active device` }, { status: 400 });
         }
-        const res = this.taskStore.assignQuarantinedTasks(targetDeviceId, Array.isArray(taskIds) ? taskIds : undefined);
+        const res = this.taskStore.assignQuarantinedTasks(targetDeviceId, taskIds);
         for (const tId of res.taskIds) {
           const t = this.taskStore.getTask(tId);
           if (t) await this.storage.saveTask(t);

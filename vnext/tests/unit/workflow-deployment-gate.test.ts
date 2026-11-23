@@ -108,18 +108,44 @@ export async function runWorkflowDeploymentGateTests(): Promise<{ passed: number
   });
   ok(authorizedDeploy === true, 'Scenario F: Fully authorized manual trigger on main PERMITS deploy job');
 
-  // Test 6: In-step target_commit_sha validation
+  // Test 6: In-step target_commit_sha validation & environment variable safety
   ok(content.includes('Validate Deployment Authorization & Target SHA'), 'Job contains in-step target SHA validator');
-  ok(content.includes('inputs.target_commit_sha'), 'Validator inspects target_commit_sha');
-  ok(content.includes('GITHUB_SHA'), 'Validator matches against GITHUB_SHA');
+  ok(content.includes('INPUT_TARGET_SHA: ${{ inputs.target_commit_sha }}'), 'Passes target_commit_sha safely via environment variable');
+  ok(content.includes('INPUT_OPERATOR: ${{ inputs.operator_name }}'), 'Passes operator_name safely via environment variable');
+  ok(content.includes('ACTOR_NAME: ${{ github.actor }}'), 'Passes github.actor safely via environment variable');
+  ok(!content.includes('echo "Deployment authorized by: ${{'), 'Strictly avoids raw interpolation in echo/commands');
 
-  function evalShaCheck(targetSha: string | undefined, currentSha: string): boolean {
-    if (!targetSha || targetSha.trim() === '') return true; // optional
-    return targetSha.trim() === currentSha;
+  // Input definition must be required: true
+  const targetShaInputMatch = content.match(/target_commit_sha:[\s\S]*?required:\s*(true|false)/);
+  ok(targetShaInputMatch !== null && targetShaInputMatch[1] === 'true', 'target_commit_sha input is declared with required: true');
+
+  // SHA check simulation function
+  function evalShaCheck(targetSha: string | undefined, currentSha: string): { ok: boolean; reason?: string } {
+    if (!targetSha || targetSha.trim() === '') {
+      return { ok: false, reason: 'EMPTY_SHA' };
+    }
+    const cleanSha = targetSha.trim();
+    if (!/^[0-9a-fA-F]{40}$/.test(cleanSha)) {
+      return { ok: false, reason: 'INVALID_HEX_FORMAT' };
+    }
+    if (cleanSha !== currentSha) {
+      return { ok: false, reason: 'SHA_MISMATCH' };
+    }
+    return { ok: true };
   }
 
-  ok(evalShaCheck('abc1234', 'abc1234') === true, 'Matching SHA passes');
-  ok(evalShaCheck('mismatch', 'abc1234') === false, 'Mismatched SHA aborts deployment');
+  const validSha = '91cb12afbc749e79caf505bac4e99491015f8dea';
+  const otherSha = '3b99dc51ef740000dc2f44db9ea7d62d9a4bb327';
+
+  ok(evalShaCheck(validSha, validSha).ok === true, 'Exact matching 40-char SHA passes');
+  ok(evalShaCheck('', validSha).ok === false, 'Empty SHA is rejected');
+  ok(evalShaCheck(undefined, validSha).ok === false, 'Undefined SHA is rejected');
+  ok(evalShaCheck('   ', validSha).ok === false, 'Whitespace SHA is rejected');
+  ok(evalShaCheck('abc1234', validSha).ok === false, 'Short SHA (7 characters) is rejected');
+  ok(evalShaCheck('zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz', validSha).ok === false, 'Non-hex SHA (40 chars) is rejected');
+  ok(evalShaCheck('91cb12a; echo injected', validSha).ok === false, 'Command injection attempt in SHA is rejected');
+  ok(evalShaCheck(otherSha, validSha).ok === false, 'Mismatched 40-char SHA is rejected');
+  ok(evalShaCheck(otherSha, validSha).reason === 'SHA_MISMATCH', 'Rejection reason is SHA_MISMATCH');
 
   console.log(`Unit: GitHub Actions Deployment Gate: ${passed} passed, ${failed} failed`);
   return { passed, failed };

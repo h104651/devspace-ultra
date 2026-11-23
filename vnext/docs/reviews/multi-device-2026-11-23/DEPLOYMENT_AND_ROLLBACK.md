@@ -49,16 +49,31 @@
 - 正式部署必須透過手動 `workflow_dispatch`，且嚴格要求在 `refs/heads/main`、`deploy_production == true`、`preflight_inventory_confirmed == true` 並校驗 `target_commit_sha`。
 
 ### 階段 C：取得正式環境完整唯讀盤點及遷移風險報告
-- 在維護窗口內，由持有正式 `ADMIN_SECRET` 之運維人員執行唯讀任務盤點：
+- 在維護窗口內，由持有正式 `ADMIN_SECRET` 之運維人員執行唯讀任務盤點 CLI 工具：
   ```bash
   npm run inventory:tasks -- --gateway-url https://devspace-ultra-gateway.abdul-hsu.workers.dev --admin-secret "$PROD_ADMIN_SECRET"
   ```
-- 或透過 Cloudflare Wrangler 直接執行唯讀 SQL 查詢：
-  ```bash
-  npx wrangler durable-objects sql query DEVSPACE_GATEWAY_DO \
-    "SELECT taskId, status, backend, targetDeviceId, leaseJson, attemptsJson FROM tasks WHERE status IN ('queued', 'claimed', 'running', 'retrying')"
-  ```
-- 確認是否有懸空未指派（quarantined）任務；若有，必須透過 `POST /admin/tasks/assign-legacy` 指定目標裝置，或等待其執行完成。未完成盤點前，正式部署標記為 **NO-GO**。
+- **重要安全防禦保證**:
+  - 若遠端 Gateway 尚未升級（運行 `v2.1.0 @ 1a933d3` 舊版），盤點工具會自動偵測為 `LEGACY_ENDPOINT_DETECTED`，並**一律回傳 Exit Code 2（BLOCKED）**。
+  - **嚴禁因舊版 API 回傳 0 筆任務就誤判為 READY**：舊版 API 未暴露 `targetDeviceId` 欄位與全域統計，不能作為零未指派任務之證明。
+- **Cloudflare Durable Objects Data Studio 唯讀備援盤點流程**:
+  若需直接檢視生產環境 SQLite 底層任務資料表，依下列步驟於 Cloudflare 控制臺執行唯讀查詢：
+  1. 登入 Cloudflare Dashboard -> 前往 **Workers & Pages** -> 選擇 **`devspace-ultra-gateway`**。
+  2. 點擊 **Durable Objects** 標籤頁，選擇命名空間 **`GatewayDurableObject`**。
+  3. 點選單例實例：**`devspace-gateway-default`**（由 `idFromName("devspace-gateway-default")` 衍生）。
+  4. 開啟 **Data Studio** / **Storage SQL Console**，執行以下唯讀 SQL 查詢：
+     ```sql
+     SELECT id, status, backend,
+            json_extract(data, '$.targetDeviceId') AS targetDeviceId,
+            json_extract(data, '$.lease.claimedBy') AS claimedBy
+     FROM tasks
+     WHERE backend = 'local'
+       AND status IN ('queued', 'claimed', 'acknowledged', 'running', 'retrying');
+     ```
+  5. 權限需求：需具備 Account Administrator 或 Workers Administrator（含 Durable Objects Storage 讀取權限）。
+- **處置原則**:
+  - 確認是否有懸空未指派（quarantined）任務；若有，必須透過 `POST /admin/tasks/assign-legacy` 提供明確且非空的 `taskIds: [...]` 指定目標裝置，或等待其執行完成。
+  - 未完成上述盤點驗證前，正式部署門禁一律判定為 **NO-GO / PREFLIGHT BLOCKED**。
 
 ### 階段 D：確認舊 Windows Bootstrap Token、裝置身分及任務擁有權相容性
 - 確認舊電腦 `win11-arm64-workstation` 之 Bootstrap Token 在升級後無縫相容。
@@ -124,9 +139,9 @@
   - **敏感資訊脫敏**: 絕不輸出 Payload 內之程式碼、機密字串或 Token。
   - **分頁與全量支援**: 支援 `limit` 與 `offset`，杜絕單頁 100 筆之靜默截斷。
   - **明確 Exit Codes**:
-    - `0`: SUCCESS / READY（所有任務皆有明確目標裝置，無懸空任務）。
-    - `1`: ERROR（網路錯誤或認證失敗）。
-    - `2`: BLOCKED / MANUAL_REVIEW_REQUIRED（存在 quarantined 任務或未提供正式金鑰）。
+    - `0`: SUCCESS / READY（所有任務皆有明確目標裝置，無懸空任務，且通過完整 Schema 與統計一致性檢驗）。
+    - `1`: ERROR（網路錯誤、認證失敗或 JSON 解析錯誤）。
+    - `2`: BLOCKED / MANUAL_REVIEW_REQUIRED（存在 quarantined 任務、偵測到未升級之 Legacy Endpoint、或未提供正式金鑰）。
 - **預檢現況判定**: **PRODUCTION PREFLIGHT BLOCKED**。
   - 因本機環境未持有正式環境 `ADMIN_SECRET`，查詢遠端 Gateway 遭阻擋。
   - **嚴禁假設正式環境任務為零**，正式部署前必須在維護窗口由運維人員實際執行此腳本或直接 SQL 查詢盤點。

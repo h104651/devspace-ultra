@@ -57,6 +57,7 @@ const task_router_1 = require("./task-router");
 const handlers_1 = require("../mcp/handlers");
 const tools = __importStar(require("../mcp/tools"));
 const reliability_tools_1 = require("../mcp/reliability-tools");
+const task_1 = require("../types/task");
 const protocol_1 = require("../mcp/protocol");
 class GatewayServer {
     app;
@@ -263,7 +264,7 @@ class GatewayServer {
                 if (backendParam && t.backend !== backendParam)
                     return false;
                 if (statusParam === 'active') {
-                    return !['completed', 'failed', 'cancelled'].includes(t.status);
+                    return task_1.ACTIVE_TASK_STATUSES.has(t.status);
                 }
                 if (statusParam && statusParam !== 'all' && t.status !== statusParam)
                     return false;
@@ -271,7 +272,7 @@ class GatewayServer {
             });
             const paginatedTasks = filteredTasks.slice(offset, offset + limit);
             const localTasks = allTasks.filter(t => t.backend === 'local');
-            const activeLocal = localTasks.filter(t => !['completed', 'failed', 'cancelled'].includes(t.status));
+            const activeLocal = localTasks.filter(t => task_1.ACTIVE_TASK_STATUSES.has(t.status));
             const targetedLocal = activeLocal.filter(t => !!t.targetDeviceId);
             const quarantinedLocal = activeLocal.filter(t => !t.targetDeviceId);
             const withPriorClaimant = quarantinedLocal.filter(t => !!(t.lease?.claimedBy || (t.attempts && t.attempts.find(a => a.claimedBy)?.claimedBy)));
@@ -338,11 +339,14 @@ class GatewayServer {
             if (!targetDeviceId || typeof targetDeviceId !== 'string') {
                 return res.status(400).json({ ok: false, error: 'INVALID_REQUEST: targetDeviceId is required and must be a string' });
             }
+            if (!Array.isArray(taskIds) || taskIds.length === 0 || !taskIds.every(id => typeof id === 'string' && id.trim().length > 0)) {
+                return res.status(400).json({ ok: false, error: 'INVALID_REQUEST: taskIds is required and must be a non-empty array of task IDs' });
+            }
             const dev = this.authManager.getDevice(targetDeviceId);
             if (!dev || dev.status === 'revoked') {
                 return res.status(400).json({ ok: false, error: `INVALID_DEVICE: targetDeviceId ${targetDeviceId} is not a valid registered active device` });
             }
-            const result = this.taskStore.assignQuarantinedTasks(targetDeviceId, Array.isArray(taskIds) ? taskIds : undefined);
+            const result = this.taskStore.assignQuarantinedTasks(targetDeviceId, taskIds);
             this.auditLogger.log({
                 actor: req.auth?.subjectId || 'admin',
                 actorType: 'admin',

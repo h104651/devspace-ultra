@@ -37,8 +37,8 @@ exports.TaskStore = void 0;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto = __importStar(require("crypto"));
+const task_1 = require("../types/task");
 const scope_checker_1 = require("../security/scope-checker");
-const TERMINAL_TASK_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'stale']);
 const ACTIVE_ATTEMPT_STATUSES = new Set(['claimed', 'acknowledged', 'running']);
 const TASK_LOG_MAX_LINES = 2000;
 const TASK_LOG_MAX_ENTRY_BYTES = 4096;
@@ -301,7 +301,7 @@ class TaskStore {
         const initial = this.getTask(taskId);
         if (!initial)
             return Promise.reject(new Error(`TASK_NOT_FOUND: ${taskId}`));
-        if (TERMINAL_TASK_STATUSES.has(initial.status)) {
+        if (task_1.TERMINAL_TASK_STATUSES.has(initial.status)) {
             return Promise.resolve({ task: initial, timedOut: false });
         }
         const timeoutMs = Math.max(0, options?.timeoutMs ?? 30000);
@@ -324,7 +324,7 @@ class TaskStore {
                 resolve({ task, timedOut });
             };
             const listener = (task) => {
-                if (TERMINAL_TASK_STATUSES.has(task.status))
+                if (task_1.TERMINAL_TASK_STATUSES.has(task.status))
                     finish(task, false);
             };
             let listeners = this.taskWaiters.get(taskId);
@@ -336,13 +336,13 @@ class TaskStore {
             // Close the registration race: the task may have completed between the
             // initial snapshot and listener insertion.
             const refreshed = this.getTask(taskId);
-            if (refreshed && TERMINAL_TASK_STATUSES.has(refreshed.status)) {
+            if (refreshed && task_1.TERMINAL_TASK_STATUSES.has(refreshed.status)) {
                 finish(refreshed, false);
                 return;
             }
             timer = setTimeout(() => {
                 const current = this.getTask(taskId) || initial;
-                finish(current, !TERMINAL_TASK_STATUSES.has(current.status));
+                finish(current, !task_1.TERMINAL_TASK_STATUSES.has(current.status));
             }, timeoutMs);
         });
     }
@@ -422,7 +422,9 @@ class TaskStore {
                 // DO NOT mark as failed unconditionally.
                 // Because claimTask() and claimTaskById() strictly require task.targetDeviceId === deviceId,
                 // this task can NEVER be claimed by any agent until explicitly assigned.
-                quarantined++;
+                if (task_1.ACTIVE_TASK_STATUSES.has(task.status)) {
+                    quarantined++;
+                }
             }
         }
         return { migrated, quarantined, failedAmbiguous };
@@ -430,10 +432,14 @@ class TaskStore {
     assignQuarantinedTasks(targetDeviceId, taskIds) {
         let assigned = 0;
         const assignedTaskIds = [];
-        const targetSet = taskIds && taskIds.length > 0 ? new Set(taskIds) : undefined;
+        if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+            return { assigned: 0, taskIds: [] };
+        }
+        const targetSet = new Set(taskIds);
         for (const task of this.tasks.values()) {
-            if (task.backend === 'local' && !task.targetDeviceId) {
-                if (targetSet && !targetSet.has(task.taskId)) {
+            // Must be local backend, unassigned, active (non-terminal), and explicitly in taskIds
+            if (task.backend === 'local' && !task.targetDeviceId && task_1.ACTIVE_TASK_STATUSES.has(task.status)) {
+                if (!targetSet.has(task.taskId)) {
                     continue;
                 }
                 task.targetDeviceId = targetDeviceId;
@@ -549,7 +555,7 @@ class TaskStore {
     }
     completeTask(taskId, result) {
         const task = this.tasks.get(taskId);
-        if (!task || TERMINAL_TASK_STATUSES.has(task.status))
+        if (!task || task_1.TERMINAL_TASK_STATUSES.has(task.status))
             return false;
         this.finishActiveAttempt(task, 'succeeded');
         task.status = 'succeeded';
@@ -561,7 +567,7 @@ class TaskStore {
     }
     failTask(taskId, error, options) {
         const task = this.tasks.get(taskId);
-        if (!task || TERMINAL_TASK_STATUSES.has(task.status))
+        if (!task || task_1.TERMINAL_TASK_STATUSES.has(task.status))
             return false;
         this.finishActiveAttempt(task, 'failed', error);
         const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
