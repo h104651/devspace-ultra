@@ -81,6 +81,9 @@ export class GatewayDurableObject {
   private taskRouter: TaskRouter;
   private mcpHandlers: McpHandlers;
   private activeSessions: Map<string, AgentSessionInfo> = new Map();
+  // Durable authority is independent of residual WebSocket attachments.
+  private sessionAuthority = new Map<string, string>();
+  private watchdogDueAt?: number;
   private ready: Promise<void>;
   private baseUrl: string;
 
@@ -161,8 +164,9 @@ export class GatewayDurableObject {
             socket: ws
           };
         }).filter((a: any) => {
-          if (a.deviceId === 'unknown') return false;
-          if (this.killSwitch.isDeviceRevoked(a.deviceId)) return false;
+          if (a.deviceId === 'unknown' || this.sessionAuthority.get(a.deviceId) !== a.sessionId) return false;
+          if (a.socket.readyState !== undefined && a.socket.readyState !== 1) return false;
+          if (this.killSwitch.isDeviceRevoked(a.deviceId) || this.authManager.getDevice(a.deviceId)?.status === 'revoked') return false;
           if (options?.healthyOnly && !isSessionHealthy(a, now)) return false;
           return true;
         });
@@ -230,6 +234,10 @@ export class GatewayDurableObject {
       console.error('Failed to hydrate artifact metadata:', err);
     }
     try {
+      const authority = await this.ctx.storage.get('agent-session-authority-v1');
+      if (authority && typeof authority === 'object') this.sessionAuthority = new Map(Object.entries(authority as Record<string, string>));
+      const deadline = await this.ctx.storage.get('agent-watchdog-deadline-v1');
+      if (typeof deadline === 'number') this.watchdogDueAt = deadline;
       await this.rearmKaggleAlarm();
     } catch (err) {
       console.error('Failed to rearm durable Kaggle poll alarm:', err);
@@ -263,34 +271,25 @@ export class GatewayDurableObject {
     await this.rearmUnifiedAlarm(polls);
   }
 
+  private async persistSessionAuthority(): Promise<void> {
+    await this.ctx.storage.put('agent-session-authority-v1', Object.fromEntries(this.sessionAuthority));
+  }
+
   private getActiveSession(deviceId: string): AgentSessionInfo | undefined {
-    let session = this.activeSessions.get(deviceId);
-    if (!session) {
-      const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
-      let newest: AgentSessionInfo | undefined = undefined;
-      for (const ws of sockets) {
-        const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) as AgentSessionAttachment | null;
-        if (att && att.deviceId === deviceId && att.sessionId) {
-          if (!newest || (att.connectedAt || 0) > (newest.connectedAt || 0)) {
-            newest = {
-              sessionId: att.sessionId,
-              deviceId: att.deviceId,
-              name: att.name || att.deviceId,
-              platform: att.platform || 'windows',
-              capabilities: att.capabilities || [],
-              connectedAt: att.connectedAt || 0,
-              lastHeartbeatAt: att.lastHeartbeatAt || att.connectedAt || 0,
-              socket: ws
-            };
-          }
-        }
-      }
-      if (newest) {
-        this.activeSessions.set(deviceId, newest);
-        session = newest;
-      }
+    const authoritativeId = this.sessionAuthority.get(deviceId);
+    if (!authoritativeId) return undefined;
+    const cached = this.activeSessions.get(deviceId);
+    const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
+    for (const ws of sockets) {
+      if (ws.readyState !== undefined && ws.readyState !== 1) continue;
+      const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) as AgentSessionAttachment | null;
+      if (!att || att.deviceId !== deviceId || att.sessionId !== authoritativeId) continue;
+      if (cached && cached.sessionId === authoritativeId && cached.socket === ws) return cached;
+      const session = { ...att, socket: ws };
+      this.activeSessions.set(deviceId, session);
+      return session;
     }
-    return session;
+    return undefined;
   }
 
   private async rearmUnifiedAlarm(polls?: PendingKagglePolls): Promise<void> {
@@ -301,14 +300,16 @@ export class GatewayDurableObject {
 
     // Watchdog check: only schedule if there are connected WebSockets
     const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
-    let watchdogDueAt: number | undefined = undefined;
     if (sockets.length > 0) {
-      watchdogDueAt = Date.now() + 30_000;
+      if (this.watchdogDueAt === undefined) this.watchdogDueAt = Date.now() + 30_000;
+    } else {
+      this.watchdogDueAt = undefined;
     }
+    await this.ctx.storage.put('agent-watchdog-deadline-v1', this.watchdogDueAt ?? null);
 
     const candidates: number[] = [];
     if (earliestKaggle !== undefined) candidates.push(earliestKaggle);
-    if (watchdogDueAt !== undefined) candidates.push(watchdogDueAt);
+    if (this.watchdogDueAt !== undefined) candidates.push(this.watchdogDueAt);
 
     if (candidates.length === 0) {
       if (typeof this.ctx.storage?.deleteAlarm === 'function') await this.ctx.storage.deleteAlarm();
@@ -323,39 +324,14 @@ export class GatewayDurableObject {
     const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
     for (const ws of sockets) {
       const att = (typeof (ws as any).deserializeAttachment === 'function' ? (ws as any).deserializeAttachment() : null) as AgentSessionAttachment | null;
-      if (!att || !att.deviceId || !att.sessionId) continue;
-
-      if (!isSessionHealthy(att, now, HEARTBEAT_TTL_MS)) {
-        try {
-          (ws as any).close(1000, 'Heartbeat timeout');
-        } catch {}
-
-        this.auditLogger.log({
-          actor: att.deviceId,
-          actorType: 'device',
-          action: 'STALE_CONNECTION_EVICTED',
-          result: 'SUCCESS',
-          details: {
-            sessionId: att.sessionId,
-            lastHeartbeatAt: att.lastHeartbeatAt,
-            elapsedMs: now - (att.lastHeartbeatAt || 0)
-          }
-        });
-
-        const active = this.getActiveSession(att.deviceId);
-        if (active && active.sessionId === att.sessionId) {
-          const remainingHealthy = (this.ctx.getWebSockets ? this.ctx.getWebSockets() : [])
-            .filter((s: any) => s !== ws)
-            .some((s: any) => {
-              const a = (typeof s.deserializeAttachment === 'function' ? s.deserializeAttachment() : null);
-              return a && a.deviceId === att.deviceId && isSessionHealthy(a, now, HEARTBEAT_TTL_MS);
-            });
-          if (!remainingHealthy) {
-            this.activeSessions.delete(att.deviceId);
-            this.authManager.updateDeviceStatus(att.deviceId, 'offline');
-            await this.storage.updateDeviceStatus(att.deviceId, 'offline');
-          }
-        }
+      if (!att || !att.deviceId || !att.sessionId || this.sessionAuthority.get(att.deviceId) !== att.sessionId) {
+        try { ws.close(1008, 'Session fenced'); } catch {}
+        continue;
+      }
+      if (!isSessionHealthy(att, now, HEARTBEAT_TTL_MS) || this.killSwitch.isDeviceRevoked(att.deviceId) || this.authManager.getDevice(att.deviceId)?.status === 'revoked') {
+        // Invalidate the authority before asking the transport to close.
+        await this.handleSocketDisconnect(ws, 'ERROR', 1006, 'Heartbeat timeout or revoked session');
+        try { ws.close(1000, 'Heartbeat timeout'); } catch {}
       }
     }
   }
@@ -381,7 +357,10 @@ export class GatewayDurableObject {
     }
 
     await this.writePendingKagglePolls(polls);
-    await this.runWatchdogStaleEviction(now);
+    if (this.watchdogDueAt !== undefined && this.watchdogDueAt <= Date.now()) {
+      this.watchdogDueAt = undefined;
+      await this.runWatchdogStaleEviction(Date.now());
+    }
     await this.rearmUnifiedAlarm(polls);
   }
 
@@ -1237,7 +1216,12 @@ export class GatewayDurableObject {
           return ScopeChecker.hasScope(val.payload!.scopes, requiredScope);
         });
 
-        // Session Fencing & Eviction: Close any prior connection for this device ID to guarantee single active session
+        // Never displace a healthy incumbent; stale or legacy sockets cannot acquire authority again.
+        const priorAttachment = (ws as any).deserializeAttachment?.() as AgentSessionAttachment | null;
+        if (priorAttachment?.sessionId) { ws.close(1008, 'Already registered'); return; }
+        const incumbent = this.getActiveSession(authoritativeDeviceId);
+        if (incumbent && isSessionHealthy(incumbent)) { ws.close(1008, 'Duplicate active device session'); return; }
+        // Session Fencing & Eviction: close stale prior connections.
         const existingSockets = (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).filter((s: any) => {
           if (s === ws) return false;
           const att = (typeof s.deserializeAttachment === 'function' ? s.deserializeAttachment() : null) as AgentSessionAttachment | null;
@@ -1261,6 +1245,8 @@ export class GatewayDurableObject {
           });
         }
 
+        const previousSessionId = this.sessionAuthority.get(authoritativeDeviceId);
+        if (previousSessionId) this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, previousSessionId, 'Stale session replaced');
         const newSessionId = crypto.randomUUID();
         const now = Date.now();
         const attachmentData: AgentSessionAttachment = {
@@ -1279,6 +1265,8 @@ export class GatewayDurableObject {
           ...attachmentData,
           socket: ws
         });
+        this.sessionAuthority.set(authoritativeDeviceId, newSessionId);
+        await this.persistSessionAuthority();
 
         this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, (msg.platform as any) || 'windows');
         this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online');
@@ -1316,7 +1304,7 @@ export class GatewayDurableObject {
 
       // Session Fencing Check: delayed events from an old superseded session must be rejected
       const activeSession = this.getActiveSession(authenticatedDeviceId);
-      if (activeSession && activeSession.sessionId !== currentSessionId) {
+      if (!activeSession || activeSession.sessionId !== currentSessionId || activeSession.socket !== ws) {
         ws.send(JSON.stringify({ type: 'ERROR', error: 'SESSION_FENCED: Session is no longer active' }));
         try { ws.close(1008, 'Session fenced'); } catch {}
         this.auditLogger.log({
@@ -1324,7 +1312,7 @@ export class GatewayDurableObject {
           actorType: 'device',
           action: 'SESSION_FENCED_REJECT',
           result: 'DENY',
-          details: { fencedSessionId: currentSessionId, activeSessionId: activeSession.sessionId, messageType: msg.type }
+          details: { fencedSessionId: currentSessionId, activeSessionId: activeSession?.sessionId, messageType: msg.type }
         });
         return;
       }
@@ -1334,6 +1322,8 @@ export class GatewayDurableObject {
         ws.close(1008, 'Device revoked');
         return;
       }
+
+      if (!isSessionHealthy(attachment, Date.now(), HEARTBEAT_TTL_MS)) { ws.close(1000, 'Heartbeat timeout'); return; }
 
       if (msg.type === 'AGENT_HEARTBEAT') {
         const now = Date.now();
@@ -1349,7 +1339,7 @@ export class GatewayDurableObject {
         if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
           for (const tid of msg.activeTaskIds) {
             const task = this.taskStore.getTask(tid);
-            if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+            if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === currentSessionId) {
               this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, currentSessionId);
             }
           }
@@ -1382,7 +1372,7 @@ export class GatewayDurableObject {
 
       if (msg.type === 'TASK_ACK') {
         const task = this.taskStore.getTask(msg.taskId);
-        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || (task.lease?.claimedSessionId && task.lease.claimedSessionId !== currentSessionId)) {
+        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease?.claimedSessionId !== currentSessionId) {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
           return;
         }
@@ -1392,7 +1382,7 @@ export class GatewayDurableObject {
 
       if (msg.type === 'TASK_PROGRESS') {
         const task = this.taskStore.getTask(msg.taskId);
-        if (task && task.lease?.claimedBy === authenticatedDeviceId && (!task.lease.claimedSessionId || task.lease.claimedSessionId === currentSessionId)) {
+        if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === currentSessionId) {
           this.taskStore.startTask(msg.taskId, authenticatedDeviceId, currentSessionId);
           this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
         }
@@ -1401,7 +1391,7 @@ export class GatewayDurableObject {
 
       if (msg.type === 'TASK_LOG_APPEND') {
         const task = this.taskStore.getTask(msg.taskId);
-        if (task && task.lease?.claimedBy === authenticatedDeviceId && (!task.lease.claimedSessionId || task.lease.claimedSessionId === currentSessionId)) {
+        if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === currentSessionId) {
           this.taskStore.appendLogs(msg.taskId, msg.lines);
         }
         return;
@@ -1409,7 +1399,7 @@ export class GatewayDurableObject {
 
       if (msg.type === 'TASK_COMPLETE') {
         const task = this.taskStore.getTask(msg.taskId);
-        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || (task.lease?.claimedSessionId && task.lease.claimedSessionId !== currentSessionId)) {
+        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease?.claimedSessionId !== currentSessionId) {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
           return;
         }
@@ -1419,7 +1409,7 @@ export class GatewayDurableObject {
 
       if (msg.type === 'TASK_FAIL') {
         const task = this.taskStore.getTask(msg.taskId);
-        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || (task.lease?.claimedSessionId && task.lease.claimedSessionId !== currentSessionId)) {
+        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease?.claimedSessionId !== currentSessionId) {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
           return;
         }
@@ -1446,18 +1436,13 @@ export class GatewayDurableObject {
     const deviceId = att.deviceId;
     const sessionId = att.sessionId;
 
-    // Fencing: only mark offline if the socket closing is the currently active session
-    const active = this.getActiveSession(deviceId);
-    if (active && active.sessionId === sessionId) {
-      const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
-      const remainingHealthy = sockets.some((s: any) => {
-        if (s === ws) return false;
-        const a = (typeof s.deserializeAttachment === 'function' ? s.deserializeAttachment() : null) as AgentSessionAttachment | null;
-        return a && a.deviceId === deviceId && isSessionHealthy(a, Date.now(), HEARTBEAT_TTL_MS);
-      });
-
-      if (!remainingHealthy) {
-        this.activeSessions.delete(deviceId);
+    // A closed or stale session must never be restored from its attachment.
+    if (this.sessionAuthority.get(deviceId) === sessionId) {
+      this.sessionAuthority.delete(deviceId);
+      this.activeSessions.delete(deviceId);
+      this.taskStore.failTasksForSupersededSession(deviceId, sessionId, 'Connection ended');
+      await this.persistSessionAuthority();
+      if (!this.sessionAuthority.has(deviceId) && !this.killSwitch.isDeviceRevoked(deviceId) && this.authManager.getDevice(deviceId)?.status !== 'revoked') {
         this.authManager.updateDeviceStatus(deviceId, 'offline');
         await this.storage.updateDeviceStatus(deviceId, 'offline');
       }
