@@ -35,6 +35,8 @@ export class LocalAgentClient {
   private pollTimer?: NodeJS.Timeout;
   private activeTasks: Map<string, DurableTask> = new Map();
   private reconnectAttempts = 0;
+  private registeredSocket?: WebSocket;
+  private taskSockets = new Map<string, WebSocket>();
 
   constructor(config: LocalAgentClientConfig) {
     this.config = {
@@ -54,6 +56,7 @@ export class LocalAgentClient {
   }
 
   public start(): void {
+    if (this.isRunning || this.isStopping || this.activeTasks.size > 0) return;
     this.isRunning = true;
     this.connect();
   }
@@ -171,9 +174,11 @@ export class LocalAgentClient {
 
     const probe = EnvironmentProbe.probe({ allowRawShell: this.config.allowRawShell });
     const WSClass = (WebSocket as any).WebSocket || WebSocket;
-    this.ws = new WSClass(this.config.gatewayUrl);
+    const socket: WebSocket = new WSClass(this.config.gatewayUrl);
+    this.ws = socket;
 
-    this.ws.on('open', () => {
+    socket.on('open', () => {
+      if (this.ws !== socket || !this.isRunning) { socket.close(); return; }
       this.reconnectAttempts = 0;
       this.refreshExecutorConfigIfIdle();
       this.registerWithGateway(probe);
@@ -181,25 +186,34 @@ export class LocalAgentClient {
       this.startPollLoop(probe.capabilities);
     });
 
-    this.ws.on('message', (data: Buffer | string) => {
+    socket.on('message', (data: Buffer | string) => {
+      if (this.ws !== socket) return;
       try {
         const msg: GatewayMessage = JSON.parse(data.toString('utf-8'));
-        this.handleGatewayMessage(msg);
+        this.handleGatewayMessage(msg, socket);
       } catch (err) {
         console.error('[AGENT] Failed to parse message from gateway:', err);
       }
     });
 
-    this.ws.on('close', () => {
+    socket.on('close', (code: number, reason: Buffer) => {
+      if (this.ws !== socket) return;
+      this.ws = undefined;
+      this.registeredSocket = undefined;
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       if (this.pollTimer) clearInterval(this.pollTimer);
 
-      if (this.isRunning) {
-        this.scheduleReconnect();
+      // Policy rejection is not a transient transport failure. Require operator
+      // action rather than allowing two processes to continuously evict each other.
+      if (code === 1008 && /duplicate|superseded|fenced|already registered|revoked/i.test(reason.toString())) {
+        this.isRunning = false;
+        console.warn('[AGENT] Session rejected by gateway; restart manually after resolving duplicate or revoked identity.');
+        return;
       }
+      if (this.isRunning) this.scheduleReconnect();
     });
 
-    this.ws.on('error', (err: any) => {
+    socket.on('error', (err: any) => {
       // Handled by close event
     });
   }
@@ -208,13 +222,18 @@ export class LocalAgentClient {
     this.reconnectAttempts++;
     const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 30000);
     this.reconnectTimeout = setTimeout(() => {
+      if (this.activeTasks.size > 0) {
+        // Old executors must finish before this process can obtain new work.
+        if (this.isRunning) this.scheduleReconnect();
+        return;
+      }
       this.connect();
     }, delay);
   }
 
-  private send(msg: any): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+  private send(msg: any, socket = this.ws): void {
+    if (socket && socket === this.ws && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(msg));
     }
   }
 
@@ -240,7 +259,7 @@ export class LocalAgentClient {
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
         deviceId: this.config.deviceId,
-        activeTaskIds: Array.from(this.activeTasks.keys())
+        activeTaskIds: Array.from(this.activeTasks.keys()).filter(id => this.taskSockets.get(id) === this.ws)
       });
     }, this.config.heartbeatIntervalMs);
   }
@@ -249,6 +268,7 @@ export class LocalAgentClient {
     if (this.pollTimer) clearInterval(this.pollTimer);
 
     this.pollTimer = setInterval(() => {
+      if (!this.isRunning || this.isStopping || this.registeredSocket !== this.ws || this.activeTasks.size > 0) return;
       this.refreshExecutorConfigIfIdle();
       this.send({
         type: 'TASK_CLAIM_POLL',
@@ -260,14 +280,21 @@ export class LocalAgentClient {
     }, this.config.pollIntervalMs);
   }
 
-  private handleGatewayMessage(msg: GatewayMessage): void {
+  private handleGatewayMessage(msg: GatewayMessage, socket = this.ws): void {
+    if (!socket || socket !== this.ws) return;
+    if (msg.type === 'AGENT_REGISTERED') {
+      if (msg.deviceId === this.config.deviceId) this.registeredSocket = socket;
+      return;
+    }
     if (msg.type === 'TASK_ASSIGNED') {
+      if (!this.isRunning || this.isStopping || this.registeredSocket !== socket || this.activeTasks.has(msg.task.taskId)) return;
       const task = msg.task;
       if (task.targetDeviceId && task.targetDeviceId !== this.config.deviceId) {
         console.warn(`[AGENT] Task '${task.taskId}' was targeted to '${task.targetDeviceId}', but this agent is '${this.config.deviceId}'. Ignoring misrouted task.`);
         return;
       }
       this.activeTasks.set(task.taskId, task);
+      this.taskSockets.set(task.taskId, socket);
 
       // Send ACK
       this.send({
@@ -275,17 +302,22 @@ export class LocalAgentClient {
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
         taskId: task.taskId,
-        deviceId: this.config.deviceId
-      });
+        deviceId: this.config.deviceId,
+        attemptId: task.activeAttemptId
+      }, socket);
 
-      // Execute asynchronously
-      this.runAssignedTask(task);
+      // Execute asynchronously with the immutable originating socket.
+      this.runAssignedTask(task, socket);
     }
   }
 
-  private async runAssignedTask(task: DurableTask): Promise<void> {
+  private async runAssignedTask(task: DurableTask, socket = this.taskSockets.get(task.taskId)): Promise<void> {
+    const sendForAttempt = (message: any) => {
+      if (!socket || this.activeTasks.get(task.taskId) !== task || this.taskSockets.get(task.taskId) !== socket) return;
+      this.send({ ...message, attemptId: task.activeAttemptId }, socket);
+    };
     try {
-      this.send({
+      sendForAttempt({
         type: 'TASK_PROGRESS',
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
@@ -298,7 +330,7 @@ export class LocalAgentClient {
       const flushLogs = () => {
         if (logBuffer.length > 0) {
           const chunk = logBuffer.splice(0, logBuffer.length);
-          this.send({
+          sendForAttempt({
             type: 'TASK_LOG_APPEND',
             messageId: crypto.randomUUID(),
             timestamp: Date.now(),
@@ -318,7 +350,7 @@ export class LocalAgentClient {
 
       flushLogs();
 
-      this.send({
+      sendForAttempt({
         type: 'TASK_COMPLETE',
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
@@ -328,7 +360,7 @@ export class LocalAgentClient {
       });
     } catch (err: any) {
       const errCode = err.code || (typeof err.message === 'string' && err.message.split(':')[0]) || 'LOCAL_TASK_EXECUTION_ERROR';
-      this.send({
+      sendForAttempt({
         type: 'TASK_FAIL',
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
@@ -341,7 +373,10 @@ export class LocalAgentClient {
         }
       });
     } finally {
-      this.activeTasks.delete(task.taskId);
+      if (this.activeTasks.get(task.taskId) === task) {
+        this.activeTasks.delete(task.taskId);
+        this.taskSockets.delete(task.taskId);
+      }
       this.refreshExecutorConfigIfIdle();
     }
   }
