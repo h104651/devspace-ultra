@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
+import { isSessionHealthy } from '../gateway/connection-health-policy';
 import { GatewayServer } from '../gateway/server';
 import { redactObject } from '../security/redactor';
 import { ScopeChecker } from '../security/scope-checker';
@@ -1277,6 +1278,7 @@ export class McpHandlers {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'local:read', 'admin:*');
     const filterId = typeof args?.targetDeviceId === 'string' ? args.targetDeviceId.trim() : (typeof args?.deviceId === 'string' ? args.deviceId.trim() : undefined);
+    const now = Date.now();
     const devices = this.gateway.authManager.listDevices();
     const connected = this.gateway.connectionManager?.getConnectedAgents?.() || [];
 
@@ -1291,25 +1293,33 @@ export class McpHandlers {
 
     const deviceResults: any[] = [];
     const seenDeviceIds = new Set<string>();
+    let totalOnlineCount = 0;
 
     for (const d of devices) {
       seenDeviceIds.add(d.deviceId);
       const liveConns = connectedByDevice.get(d.deviceId) || [];
-      const isOnline = liveConns.length > 0;
-      const primaryLive = liveConns[0];
+      const healthyConns = liveConns.filter(c => isSessionHealthy(c, now));
+      const isDeviceRevoked = d.status === 'revoked' || !!this.gateway.killSwitch?.isDeviceRevoked?.(d.deviceId);
+      const isOnline = !isDeviceRevoked && healthyConns.length > 0;
+      if (isOnline) totalOnlineCount++;
+
+      const primaryLive = healthyConns[0] || liveConns[0];
       const connectionCount = liveConns.length;
       const duplicateConnection = connectionCount > 1;
 
       // Authoritative capabilities for online device come from live WebSocket connection
-      const capabilities = isOnline ? (primaryLive.capabilities || []) : (d.capabilities || []);
+      const capabilities = isOnline ? (primaryLive?.capabilities || []) : (d.capabilities || []);
+
+      // Monotonic heartbeat: highest timestamp from DB or active connections
+      const maxHb = Math.max(d.lastHeartbeatAt || 0, ...liveConns.map(c => c.lastHeartbeatAt || 0));
 
       const entry: any = {
         deviceId: d.deviceId,
-        name: isOnline ? (primaryLive.name || d.name) : d.name,
+        name: isOnline ? (primaryLive?.name || d.name) : d.name,
         platform: d.platform,
-        status: isOnline ? 'online' : 'offline',
+        status: isDeviceRevoked ? 'revoked' : (isOnline ? 'online' : 'offline'),
         capabilities,
-        lastHeartbeatAt: d.lastHeartbeatAt ? new Date(d.lastHeartbeatAt).toISOString() : undefined
+        lastHeartbeatAt: maxHb > 0 ? new Date(maxHb).toISOString() : undefined
       };
 
       if (isOnline) {
@@ -1324,18 +1334,28 @@ export class McpHandlers {
 
     for (const [deviceId, liveConns] of connectedByDevice.entries()) {
       if (!seenDeviceIds.has(deviceId)) {
-        const primaryLive = liveConns[0];
+        const healthyConns = liveConns.filter(c => isSessionHealthy(c, now));
+        const isDeviceRevoked = !!this.gateway.killSwitch?.isDeviceRevoked?.(deviceId);
+        const isOnline = !isDeviceRevoked && healthyConns.length > 0;
+        if (isOnline) totalOnlineCount++;
+
+        const primaryLive = healthyConns[0] || liveConns[0];
         const connectionCount = liveConns.length;
+        const maxHb = Math.max(...liveConns.map(c => c.lastHeartbeatAt || 0));
+
         const entry: any = {
           deviceId,
-          name: primaryLive.name || deviceId,
-          platform: primaryLive.platform || 'windows',
-          status: 'online',
-          capabilities: primaryLive.capabilities || [],
-          connectionCount
+          name: primaryLive?.name || deviceId,
+          platform: primaryLive?.platform || 'windows',
+          status: isDeviceRevoked ? 'revoked' : (isOnline ? 'online' : 'offline'),
+          capabilities: primaryLive?.capabilities || [],
+          lastHeartbeatAt: maxHb > 0 ? new Date(maxHb).toISOString() : undefined
         };
-        if (connectionCount > 1) {
-          entry.duplicateConnection = true;
+        if (isOnline) {
+          entry.connectionCount = connectionCount;
+          if (connectionCount > 1) {
+            entry.duplicateConnection = true;
+          }
         }
         deviceResults.push(entry);
       }
@@ -1344,7 +1364,7 @@ export class McpHandlers {
     const filteredResults = filterId ? deviceResults.filter(d => d.deviceId === filterId) : deviceResults;
     return {
       totalRegistered: devices.length,
-      totalOnline: connectedByDevice.size,
+      totalOnline: totalOnlineCount,
       totalConnections: connected.length,
       devices: filteredResults
     };

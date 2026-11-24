@@ -1,7 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.LOCAL_EXECUTABLE_CAPABILITIES = void 0;
+exports.SIDE_EFFECT_CAPABILITIES = exports.LOCAL_EXECUTABLE_CAPABILITIES = void 0;
 exports.isLocalExecutableCapability = isLocalExecutableCapability;
+exports.isSideEffectCapability = isSideEffectCapability;
 exports.getRequiredScopeForLocalCapability = getRequiredScopeForLocalCapability;
 exports.isCapabilityAuthorized = isCapabilityAuthorized;
 const scope_checker_1 = require("../security/scope-checker");
@@ -21,8 +22,19 @@ exports.LOCAL_EXECUTABLE_CAPABILITIES = [
     'local:build_project',
     'local:raw_shell'
 ];
+exports.SIDE_EFFECT_CAPABILITIES = [
+    'local:write_file',
+    'local:patch_file',
+    'local:create_directory',
+    'local:run_tests',
+    'local:build_project',
+    'local:raw_shell'
+];
 function isLocalExecutableCapability(capability) {
     return exports.LOCAL_EXECUTABLE_CAPABILITIES.includes(capability);
+}
+function isSideEffectCapability(capability) {
+    return exports.SIDE_EFFECT_CAPABILITIES.includes(capability);
 }
 function getRequiredScopeForLocalCapability(capability) {
     return scope_checker_1.ScopeChecker.getRequiredScopeForCapability(capability);

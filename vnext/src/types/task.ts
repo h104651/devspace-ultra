@@ -28,6 +28,7 @@ export type TaskBackend = 'kaggle' | 'local' | 'browser' | 'swarm';
 
 export interface TaskLease {
   claimedBy: string; // deviceId or workerId
+  claimedSessionId?: string; // sessionId of claiming connection
   claimedAt: number; // timestamp ms
   leaseExpiresAt: number; // timestamp ms
   lastHeartbeatAt: number; // timestamp ms
@@ -139,6 +140,7 @@ export interface CreateTaskOptions<TPayload = any> {
   priority?: number;
   payload: TPayload;
   maxRetries?: number;
+  requeueOnStale?: boolean;
   leaseDurationMs?: number;
   targetDeviceId?: string;
   metadata?: Record<string, any>;

@@ -77,9 +77,9 @@ class TaskRouter {
                 });
                 throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
             }
-            // Multi-device targeted routing enforcement
+            // Multi-device targeted routing enforcement: only consider healthy, unrevoked connected sessions
             const connected = (this.connectionManager && typeof this.connectionManager.getConnectedAgents === 'function')
-                ? (this.connectionManager.getConnectedAgents() || [])
+                ? (this.connectionManager.getConnectedAgents({ healthyOnly: true }) || [])
                 : [];
             const distinctDevices = Array.from(new Set(connected.map((a) => String(a.deviceId)).filter(Boolean)));
             const registeredDevices = (this.authManager && typeof this.authManager.listDevices === 'function')

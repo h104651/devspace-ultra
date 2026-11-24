@@ -271,23 +271,23 @@ class AuthManager {
             this.save();
         }
     }
-    updateDeviceStatus(deviceId, status, ip) {
+    updateDeviceStatus(deviceId, status, ip, timestamp = Date.now()) {
         const dev = this.devices.get(deviceId);
         if (dev && dev.status !== 'revoked') {
             dev.status = status;
             if (status === 'online') {
-                dev.lastConnectedAt = Date.now();
-                dev.lastHeartbeatAt = Date.now();
+                dev.lastConnectedAt = timestamp;
+                dev.lastHeartbeatAt = Math.max(dev.lastHeartbeatAt || 0, timestamp);
             }
             if (ip)
                 dev.ip = ip;
             this.save();
         }
     }
-    updateDeviceHeartbeat(deviceId) {
+    updateDeviceHeartbeat(deviceId, timestamp = Date.now()) {
         const dev = this.devices.get(deviceId);
         if (dev && dev.status === 'online') {
-            dev.lastHeartbeatAt = Date.now();
+            dev.lastHeartbeatAt = Math.max(dev.lastHeartbeatAt || 0, timestamp);
             this.save();
         }
     }

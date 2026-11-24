@@ -9,6 +9,7 @@ export interface AgentRegisterMessage {
   platform: 'windows' | 'linux' | 'darwin';
   capabilities: string[];
   token: string;
+  supportsAttemptFencing?: boolean;
 }
 
 export interface AgentRegisteredMessage {
@@ -16,6 +17,7 @@ export interface AgentRegisteredMessage {
   messageId: string;
   timestamp: number;
   deviceId: string;
+  sessionId?: string;
 }
 
 export interface AgentHeartbeatMessage {
@@ -24,6 +26,7 @@ export interface AgentHeartbeatMessage {
   timestamp: number;
   deviceId: string;
   activeTaskIds: string[];
+  activeTaskAttempts?: Array<{ taskId: string; attemptId: string }>;
 }
 
 export interface AgentHeartbeatAckMessage {
@@ -54,6 +57,7 @@ export interface TaskAckMessage {
   timestamp: number;
   taskId: string;
   deviceId: string;
+  attemptId?: string;
 }
 
 export interface TaskProgressMessage {
@@ -62,6 +66,7 @@ export interface TaskProgressMessage {
   timestamp: number;
   taskId: string;
   deviceId: string;
+  attemptId?: string;
   stage: string;
   percent?: number;
 }
@@ -72,6 +77,7 @@ export interface TaskLogAppendMessage {
   timestamp: number;
   taskId: string;
   deviceId: string;
+  attemptId?: string;
   lines: string[];
 }
 
@@ -81,6 +87,7 @@ export interface TaskCompleteMessage {
   timestamp: number;
   taskId: string;
   deviceId: string;
+  attemptId?: string;
   result: any;
 }
 
@@ -90,6 +97,7 @@ export interface TaskFailMessage {
   timestamp: number;
   taskId: string;
   deviceId: string;
+  attemptId?: string;
   error: {
     code: string;
     message: string;

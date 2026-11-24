@@ -40,6 +40,7 @@ import { runKaggleProjectTests } from './integration/kaggle-project.test';
 import { runKaggleWorkspaceTests } from './integration/kaggle-workspace.test';
 import { runKaggleDatasetFileTests } from './integration/kaggle-dataset-file.test';
 import { runKaggleDurableReconciliationTests } from './integration/kaggle-durable-reconciliation.test';
+import { runConnectionLifecycleFencingTests } from './integration/connection-lifecycle-fencing.test';
 
 async function main() {
   console.log('====================================================');
@@ -90,7 +91,8 @@ async function main() {
     { name: 'Security: Zero Trust, Injections, Shell & Rate Limits', runner: runSecurityTests },
     { name: 'Security: Bootstrap Token Security & Redaction', runner: runBootstrapTokenSecurityTests },
     { name: 'Unit: Read-Only Task Inventory & Preflight Verification', runner: runInventoryTasksUnitTests },
-    { name: 'Unit: GitHub Actions Deployment Gate & Authorization', runner: runWorkflowDeploymentGateTests }
+    { name: 'Unit: GitHub Actions Deployment Gate & Authorization', runner: runWorkflowDeploymentGateTests },
+    { name: 'Integration: Connection Lifecycle & Fencing (T01-T24)', runner: runConnectionLifecycleFencingTests }
   ];
 
   for (const suite of suites) {

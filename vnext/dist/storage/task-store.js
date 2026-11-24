@@ -39,6 +39,7 @@ const path = __importStar(require("path"));
 const crypto = __importStar(require("crypto"));
 const task_1 = require("../types/task");
 const scope_checker_1 = require("../security/scope-checker");
+const capabilities_1 = require("../local-agent/capabilities");
 const ACTIVE_ATTEMPT_STATUSES = new Set(['claimed', 'acknowledged', 'running']);
 const TASK_LOG_MAX_LINES = 2000;
 const TASK_LOG_MAX_ENTRY_BYTES = 4096;
@@ -254,7 +255,7 @@ class TaskStore {
                 maxRetries: options.maxRetries ?? 3,
                 retryCount: 0,
                 backoffMs: 2000,
-                requeueOnStale: true
+                requeueOnStale: options.requeueOnStale ?? true
             },
             attempts: [],
             artifacts: [],
@@ -346,7 +347,7 @@ class TaskStore {
             }, timeoutMs);
         });
     }
-    claimTask(deviceId, supportedCapabilities, leaseDurationMs) {
+    claimTask(deviceId, supportedCapabilities, leaseDurationMs, sessionId, supportsAttemptFencing = true) {
         this.recoverStaleTasks();
         const eligibleTasks = Array.from(this.tasks.values())
             .filter(t => {
@@ -357,15 +358,18 @@ class TaskStore {
             if (t.backend === 'local') {
                 if (!t.targetDeviceId || t.targetDeviceId !== deviceId)
                     return false;
+                // Legacy wire clients cannot distinguish multiple executions of one task.
+                if (!supportsAttemptFencing && (t.attempts?.length || 0) > 0)
+                    return false;
             }
             return true;
         })
             .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
         if (eligibleTasks.length === 0)
             return undefined;
-        return this.claimTaskById(eligibleTasks[0].taskId, deviceId, leaseDurationMs);
+        return this.claimTaskById(eligibleTasks[0].taskId, deviceId, leaseDurationMs, sessionId);
     }
-    claimTaskById(taskId, deviceId, leaseDurationMs) {
+    claimTaskById(taskId, deviceId, leaseDurationMs, sessionId) {
         const task = this.tasks.get(taskId);
         if (!task || task.status !== 'queued')
             return undefined;
@@ -379,6 +383,7 @@ class TaskStore {
         task.status = 'claimed';
         task.lease = {
             claimedBy: deviceId,
+            claimedSessionId: sessionId,
             claimedAt: now,
             leaseExpiresAt: now + duration,
             lastHeartbeatAt: now
@@ -455,9 +460,23 @@ class TaskStore {
         }
         return { assigned, taskIds: assignedTaskIds };
     }
-    acknowledgeTask(taskId, deviceId) {
+    ownsLocalAttempt(taskId, deviceId, sessionId, attemptId, supportsAttemptFencing) {
+        const task = this.tasks.get(taskId);
+        if (!task || task.backend !== 'local' || !task.lease || task.lease.claimedBy !== deviceId ||
+            task.lease.claimedSessionId !== sessionId || !task.activeAttemptId ||
+            !['claimed', 'acknowledged', 'running'].includes(task.status))
+            return false;
+        if (supportsAttemptFencing || attemptId !== undefined)
+            return attemptId === task.activeAttemptId;
+        // Legacy wire messages are safe only on a first, non-replayed execution.
+        return (task.attempts?.length || 0) === 1;
+    }
+    acknowledgeTask(taskId, deviceId, sessionId) {
         const task = this.tasks.get(taskId);
         if (!task || task.status !== 'claimed' || task.lease?.claimedBy !== deviceId) {
+            return false;
+        }
+        if (sessionId && task.lease?.claimedSessionId && task.lease.claimedSessionId !== sessionId) {
             return false;
         }
         const attempt = this.ensureActiveAttempt(task, deviceId);
@@ -474,7 +493,7 @@ class TaskStore {
         this.saveTask(task);
         return true;
     }
-    startTask(taskId, deviceId) {
+    startTask(taskId, deviceId, sessionId) {
         const task = this.tasks.get(taskId);
         if (!task)
             return false;
@@ -483,6 +502,8 @@ class TaskStore {
             // A claimed task has an authoritative owner. No caller — including an
             // internal backend — may take over that active attempt implicitly.
             if (task.lease.claimedBy !== deviceId)
+                return false;
+            if (sessionId && task.lease.claimedSessionId && task.lease.claimedSessionId !== sessionId)
                 return false;
             if (task.status !== 'claimed' && task.status !== 'acknowledged' && task.status !== 'running')
                 return false;
@@ -498,6 +519,7 @@ class TaskStore {
                 return false;
             task.lease = {
                 claimedBy: deviceId,
+                claimedSessionId: sessionId,
                 claimedAt: now,
                 leaseExpiresAt: now + this.defaultLeaseDurationMs,
                 lastHeartbeatAt: now
@@ -523,9 +545,12 @@ class TaskStore {
         this.saveTask(task);
         return true;
     }
-    renewLease(taskId, deviceId, extensionMs) {
+    renewLease(taskId, deviceId, extensionMs, sessionId) {
         const task = this.tasks.get(taskId);
         if (!task || !task.lease || task.lease.claimedBy !== deviceId) {
+            return false;
+        }
+        if (sessionId && task.lease.claimedSessionId && task.lease.claimedSessionId !== sessionId) {
             return false;
         }
         if (task.status !== 'claimed' && task.status !== 'acknowledged' && task.status !== 'running') {
@@ -558,9 +583,13 @@ class TaskStore {
             this.saveTask(task);
         }
     }
-    completeTask(taskId, result) {
+    completeTask(taskId, result, deviceId, sessionId) {
         const task = this.tasks.get(taskId);
         if (!task || task_1.TERMINAL_TASK_STATUSES.has(task.status))
+            return false;
+        if (deviceId && task.lease && task.lease.claimedBy !== deviceId)
+            return false;
+        if (sessionId && task.lease?.claimedSessionId && task.lease.claimedSessionId !== sessionId)
             return false;
         this.finishActiveAttempt(task, 'succeeded');
         task.status = 'succeeded';
@@ -574,8 +603,13 @@ class TaskStore {
         const task = this.tasks.get(taskId);
         if (!task || task_1.TERMINAL_TASK_STATUSES.has(task.status))
             return false;
+        if (options?.deviceId && task.lease && task.lease.claimedBy !== options.deviceId)
+            return false;
+        if (options?.sessionId && task.lease?.claimedSessionId && task.lease.claimedSessionId !== options.sessionId)
+            return false;
         this.finishActiveAttempt(task, 'failed', error);
-        const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+        const isRetryable = !(task.backend === 'local' && (0, capabilities_1.isSideEffectCapability)(task.capability)) &&
+            options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
         if (isRetryable) {
             task.retryPolicy.retryCount++;
             task.lease = undefined;
@@ -609,6 +643,42 @@ class TaskStore {
         }
         this.saveTask(task);
         return true;
+    }
+    failTasksForSupersededSession(deviceId, supersededSessionId, reason = 'Session superseded') {
+        let count = 0;
+        for (const task of this.tasks.values()) {
+            if (task.backend === 'local' &&
+                task.lease?.claimedBy === deviceId &&
+                task.lease?.claimedSessionId === supersededSessionId &&
+                (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running')) {
+                if ((0, capabilities_1.isSideEffectCapability)(task.capability)) {
+                    this.finishActiveAttempt(task, 'interrupted', {
+                        code: 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN',
+                        message: `${reason}: Task execution interrupted while side effects may have been applied. Manual recovery required.`
+                    });
+                    task.status = 'stale';
+                    task.error = {
+                        code: 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN',
+                        message: `${reason}: Task execution interrupted while side effects may have been applied. Manual recovery required.`
+                    };
+                    task.completedAt = Date.now();
+                    task.lease = undefined;
+                    this.saveTask(task);
+                    count++;
+                }
+                else {
+                    this.finishActiveAttempt(task, 'interrupted', {
+                        code: 'SESSION_SUPERSEDED_RESET',
+                        message: `${reason}: Read-only task requeued.`
+                    });
+                    task.status = 'queued';
+                    task.lease = undefined;
+                    this.saveTask(task);
+                    count++;
+                }
+            }
+        }
+        return count;
     }
     failTaskTerminal(taskId, error) {
         return this.failTask(taskId, error, { retryable: false });
@@ -668,7 +738,19 @@ class TaskStore {
                     code: 'TASK_LEASE_EXPIRED',
                     message: `Task lease expired without heartbeat or completion from worker ${claimedBy}`
                 });
-                if (task.retryPolicy.requeueOnStale && task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
+                if (task.backend === 'local' && (0, capabilities_1.isSideEffectCapability)(task.capability)) {
+                    // Dispatch may have reached the executor before ACK or RUNNING was persisted.
+                    // No automatic replay of a potentially applied local mutation.
+                    task.status = 'stale';
+                    task.error = {
+                        code: 'MUTATION_UNCERTAIN_ON_STALE',
+                        message: `Task lease expired after dispatch of mutating capability '${task.capability}'. Manual recovery required.`
+                    };
+                    task.completedAt = now;
+                    task.lease = undefined;
+                    failedCount++;
+                }
+                else if (task.retryPolicy.requeueOnStale && task.retryPolicy.retryCount < task.retryPolicy.maxRetries) {
                     task.retryPolicy.retryCount++;
                     task.status = 'queued';
                     task.lease = undefined;

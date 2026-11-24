@@ -240,19 +240,25 @@ export class AuthManager {
     }
   }
 
-  public updateDeviceStatus(deviceId: string, status: 'online' | 'offline', ip?: string): void {
+  public updateDeviceStatus(deviceId: string, status: 'online' | 'offline', ip?: string, timestamp = Date.now()): void {
     const dev = this.devices.get(deviceId);
     if (dev && dev.status !== 'revoked') {
       dev.status = status;
-      if (status === 'online') { dev.lastConnectedAt = Date.now(); dev.lastHeartbeatAt = Date.now(); }
+      if (status === 'online') {
+        dev.lastConnectedAt = timestamp;
+        dev.lastHeartbeatAt = Math.max(dev.lastHeartbeatAt || 0, timestamp);
+      }
       if (ip) dev.ip = ip;
       this.save();
     }
   }
 
-  public updateDeviceHeartbeat(deviceId: string): void {
+  public updateDeviceHeartbeat(deviceId: string, timestamp = Date.now()): void {
     const dev = this.devices.get(deviceId);
-    if (dev && dev.status === 'online') { dev.lastHeartbeatAt = Date.now(); this.save(); }
+    if (dev && dev.status === 'online') {
+      dev.lastHeartbeatAt = Math.max(dev.lastHeartbeatAt || 0, timestamp);
+      this.save();
+    }
   }
 
   public getDevice(deviceId: string): DeviceRecord | undefined { return this.devices.get(deviceId); }

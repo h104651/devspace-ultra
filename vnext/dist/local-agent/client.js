@@ -47,11 +47,14 @@ class LocalAgentClient {
     rejectedExecutorConfigRevision;
     ws;
     isRunning = false;
+    isStopping = false;
     reconnectTimeout;
     heartbeatTimer;
     pollTimer;
     activeTasks = new Map();
     reconnectAttempts = 0;
+    registeredSocket;
+    taskSockets = new Map();
     constructor(config) {
         this.config = {
             ...config,
@@ -68,22 +71,67 @@ class LocalAgentClient {
         this.executor = new task_executor_1.TaskExecutor(this.executorConfig);
         this.executorConfigRevision = this.computeExecutorConfigRevision();
     }
+    hasInFlightTasks() {
+        return this.activeTasks.size > 0;
+    }
     start() {
+        if (this.isRunning || this.isStopping || this.activeTasks.size > 0)
+            return;
         this.isRunning = true;
         this.connect();
     }
-    stop() {
+    async stop(options) {
+        if (this.isStopping)
+            return;
+        this.isStopping = true;
         this.isRunning = false;
-        if (this.reconnectTimeout)
+        if (this.reconnectTimeout) {
             clearTimeout(this.reconnectTimeout);
-        if (this.heartbeatTimer)
-            clearInterval(this.heartbeatTimer);
-        if (this.pollTimer)
-            clearInterval(this.pollTimer);
-        if (this.ws) {
-            this.ws.close();
-            this.ws = undefined;
+            this.reconnectTimeout = undefined;
         }
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = undefined;
+        }
+        if (this.pollTimer) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = undefined;
+        }
+        // Await bounded completion of in-flight active tasks if any
+        const timeout = options?.timeoutMs ?? 2000;
+        const start = Date.now();
+        while (this.activeTasks.size > 0 && Date.now() - start < timeout) {
+            await new Promise(res => setTimeout(res, 50));
+        }
+        // Orderly WebSocket close handshake
+        if (this.ws) {
+            const socket = this.ws;
+            this.ws = undefined;
+            if (socket.readyState === ws_1.WebSocket.OPEN) {
+                await new Promise((resolve) => {
+                    const timer = setTimeout(() => {
+                        try {
+                            if (typeof socket.terminate === 'function')
+                                socket.terminate();
+                        }
+                        catch { }
+                        resolve();
+                    }, Math.min(timeout, 1500));
+                    socket.once('close', () => {
+                        clearTimeout(timer);
+                        resolve();
+                    });
+                    try {
+                        socket.close(1000, 'Agent shutting down gracefully');
+                    }
+                    catch {
+                        clearTimeout(timer);
+                        resolve();
+                    }
+                });
+            }
+        }
+        this.isStopping = false;
     }
     /**
      * Returns a content revision for the only executor configuration source that
@@ -141,33 +189,50 @@ class LocalAgentClient {
             return;
         const probe = environment_probe_1.EnvironmentProbe.probe({ allowRawShell: this.config.allowRawShell });
         const WSClass = ws_1.WebSocket.WebSocket || ws_1.WebSocket;
-        this.ws = new WSClass(this.config.gatewayUrl);
-        this.ws.on('open', () => {
+        const socket = new WSClass(this.config.gatewayUrl);
+        this.ws = socket;
+        socket.on('open', () => {
+            if (this.ws !== socket || !this.isRunning) {
+                socket.close();
+                return;
+            }
             this.reconnectAttempts = 0;
             this.refreshExecutorConfigIfIdle();
             this.registerWithGateway(probe);
             this.startHeartbeat();
             this.startPollLoop(probe.capabilities);
         });
-        this.ws.on('message', (data) => {
+        socket.on('message', (data) => {
+            if (this.ws !== socket)
+                return;
             try {
                 const msg = JSON.parse(data.toString('utf-8'));
-                this.handleGatewayMessage(msg);
+                this.handleGatewayMessage(msg, socket);
             }
             catch (err) {
                 console.error('[AGENT] Failed to parse message from gateway:', err);
             }
         });
-        this.ws.on('close', () => {
+        socket.on('close', (code, reason) => {
+            if (this.ws !== socket)
+                return;
+            this.ws = undefined;
+            this.registeredSocket = undefined;
             if (this.heartbeatTimer)
                 clearInterval(this.heartbeatTimer);
             if (this.pollTimer)
                 clearInterval(this.pollTimer);
-            if (this.isRunning) {
-                this.scheduleReconnect();
+            // Policy rejection is not a transient transport failure. Require operator
+            // action rather than allowing two processes to continuously evict each other.
+            if (code === 1008 && /duplicate|superseded|fenced|already registered|revoked/i.test(reason.toString())) {
+                this.isRunning = false;
+                console.warn('[AGENT] Session rejected by gateway; restart manually after resolving duplicate or revoked identity.');
+                return;
             }
+            if (this.isRunning)
+                this.scheduleReconnect();
         });
-        this.ws.on('error', (err) => {
+        socket.on('error', (err) => {
             // Handled by close event
         });
     }
@@ -175,12 +240,18 @@ class LocalAgentClient {
         this.reconnectAttempts++;
         const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 30000);
         this.reconnectTimeout = setTimeout(() => {
+            if (this.activeTasks.size > 0) {
+                // Old executors must finish before this process can obtain new work.
+                if (this.isRunning)
+                    this.scheduleReconnect();
+                return;
+            }
             this.connect();
         }, delay);
     }
-    send(msg) {
-        if (this.ws && this.ws.readyState === ws_1.WebSocket.OPEN) {
-            this.ws.send(JSON.stringify(msg));
+    send(msg, socket = this.ws) {
+        if (socket && socket === this.ws && socket.readyState === ws_1.WebSocket.OPEN) {
+            socket.send(JSON.stringify(msg));
         }
     }
     registerWithGateway(probe) {
@@ -192,7 +263,8 @@ class LocalAgentClient {
             name: this.config.name || `Local-Agent-${probe.hostname}`,
             platform: probe.platform,
             capabilities: probe.capabilities,
-            token: this.config.token
+            token: this.config.token,
+            supportsAttemptFencing: true
         });
     }
     startHeartbeat() {
@@ -204,7 +276,10 @@ class LocalAgentClient {
                 messageId: crypto.randomUUID(),
                 timestamp: Date.now(),
                 deviceId: this.config.deviceId,
-                activeTaskIds: Array.from(this.activeTasks.keys())
+                activeTaskIds: Array.from(this.activeTasks.keys()).filter(id => this.taskSockets.get(id) === this.ws),
+                activeTaskAttempts: Array.from(this.activeTasks.values())
+                    .filter(task => this.taskSockets.get(task.taskId) === this.ws && !!task.activeAttemptId)
+                    .map(task => ({ taskId: task.taskId, attemptId: task.activeAttemptId }))
             });
         }, this.config.heartbeatIntervalMs);
     }
@@ -212,6 +287,8 @@ class LocalAgentClient {
         if (this.pollTimer)
             clearInterval(this.pollTimer);
         this.pollTimer = setInterval(() => {
+            if (!this.isRunning || this.isStopping || this.registeredSocket !== this.ws || this.activeTasks.size > 0)
+                return;
             this.refreshExecutorConfigIfIdle();
             this.send({
                 type: 'TASK_CLAIM_POLL',
@@ -222,29 +299,45 @@ class LocalAgentClient {
             });
         }, this.config.pollIntervalMs);
     }
-    handleGatewayMessage(msg) {
+    handleGatewayMessage(msg, socket = this.ws) {
+        if (!socket || socket !== this.ws)
+            return;
+        if (msg.type === 'AGENT_REGISTERED') {
+            if (msg.deviceId === this.config.deviceId)
+                this.registeredSocket = socket;
+            return;
+        }
         if (msg.type === 'TASK_ASSIGNED') {
+            if (!this.isRunning || this.isStopping || this.registeredSocket !== socket || this.activeTasks.size > 0)
+                return;
             const task = msg.task;
             if (task.targetDeviceId && task.targetDeviceId !== this.config.deviceId) {
                 console.warn(`[AGENT] Task '${task.taskId}' was targeted to '${task.targetDeviceId}', but this agent is '${this.config.deviceId}'. Ignoring misrouted task.`);
                 return;
             }
             this.activeTasks.set(task.taskId, task);
+            this.taskSockets.set(task.taskId, socket);
             // Send ACK
             this.send({
                 type: 'TASK_ACK',
                 messageId: crypto.randomUUID(),
                 timestamp: Date.now(),
                 taskId: task.taskId,
-                deviceId: this.config.deviceId
-            });
-            // Execute asynchronously
-            this.runAssignedTask(task);
+                deviceId: this.config.deviceId,
+                attemptId: task.activeAttemptId
+            }, socket);
+            // Execute asynchronously with the immutable originating socket.
+            this.runAssignedTask(task, socket);
         }
     }
-    async runAssignedTask(task) {
+    async runAssignedTask(task, socket = this.taskSockets.get(task.taskId)) {
+        const sendForAttempt = (message) => {
+            if (!socket || this.activeTasks.get(task.taskId) !== task || this.taskSockets.get(task.taskId) !== socket)
+                return;
+            this.send({ ...message, attemptId: task.activeAttemptId }, socket);
+        };
         try {
-            this.send({
+            sendForAttempt({
                 type: 'TASK_PROGRESS',
                 messageId: crypto.randomUUID(),
                 timestamp: Date.now(),
@@ -256,7 +349,7 @@ class LocalAgentClient {
             const flushLogs = () => {
                 if (logBuffer.length > 0) {
                     const chunk = logBuffer.splice(0, logBuffer.length);
-                    this.send({
+                    sendForAttempt({
                         type: 'TASK_LOG_APPEND',
                         messageId: crypto.randomUUID(),
                         timestamp: Date.now(),
@@ -273,7 +366,7 @@ class LocalAgentClient {
                 }
             });
             flushLogs();
-            this.send({
+            sendForAttempt({
                 type: 'TASK_COMPLETE',
                 messageId: crypto.randomUUID(),
                 timestamp: Date.now(),
@@ -284,7 +377,7 @@ class LocalAgentClient {
         }
         catch (err) {
             const errCode = err.code || (typeof err.message === 'string' && err.message.split(':')[0]) || 'LOCAL_TASK_EXECUTION_ERROR';
-            this.send({
+            sendForAttempt({
                 type: 'TASK_FAIL',
                 messageId: crypto.randomUUID(),
                 timestamp: Date.now(),
@@ -298,7 +391,10 @@ class LocalAgentClient {
             });
         }
         finally {
-            this.activeTasks.delete(task.taskId);
+            if (this.activeTasks.get(task.taskId) === task) {
+                this.activeTasks.delete(task.taskId);
+                this.taskSockets.delete(task.taskId);
+            }
             this.refreshExecutorConfigIfIdle();
         }
     }
