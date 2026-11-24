@@ -50,6 +50,8 @@ class TaskStore {
     tasks = new Map();
     defaultLeaseDurationMs;
     storageAdapter;
+    // Never resume local dispatch in a process that has lost durable state.
+    localPersistenceFailed = false;
     taskWaiters = new Map();
     constructor(storageDir, defaultLeaseDurationMs = 60000, storageAdapter) {
         this.defaultLeaseDurationMs = defaultLeaseDurationMs;
@@ -62,8 +64,14 @@ class TaskStore {
                 }
                 this.loadAll();
             }
-            catch { }
+            catch {
+                this.blockLocalDispatch();
+            }
         }
+    }
+    /** Fail closed after an unreadable or unconfirmed durable task state. */
+    blockLocalDispatch() {
+        this.localPersistenceFailed = true;
     }
     hydrate(tasks) {
         for (const task of tasks || []) {
@@ -89,12 +97,14 @@ class TaskStore {
                         this.tasks.set(task.taskId, task);
                     }
                     catch (err) {
+                        this.blockLocalDispatch();
                         console.error(`Failed to load task file ${file}:`, err);
                     }
                 }
             }
         }
         catch (err) {
+            this.blockLocalDispatch();
             console.error('Failed to read tasks directory:', err);
         }
     }
@@ -139,9 +149,76 @@ class TaskStore {
         const newest = task.logs.slice(-(TASK_LOG_MAX_LINES - 1));
         task.logs = [TASK_LOG_RETENTION_MARKER, ...newest];
     }
+    persistLocalTask(task) {
+        if (this.localPersistenceFailed)
+            throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked; reconcile durable state before restart.');
+        try {
+            if (this.storageAdapter) {
+                if (typeof this.storageAdapter.saveTaskSync !== 'function') {
+                    throw new Error('Synchronous local task persistence is not supported by the configured adapter');
+                }
+                this.storageAdapter.saveTaskSync(task);
+            }
+            if (this.tasksDir) {
+                fs.mkdirSync(this.tasksDir, { recursive: true });
+                const destination = path.join(this.tasksDir, `${task.taskId}.json`);
+                const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+                try {
+                    const fd = fs.openSync(temporary, 'wx', 0o600);
+                    try {
+                        fs.writeFileSync(fd, JSON.stringify(task, null, 2), 'utf-8');
+                        fs.fsyncSync(fd);
+                    }
+                    finally {
+                        fs.closeSync(fd);
+                    }
+                    fs.renameSync(temporary, destination);
+                    // Windows does not support portable directory fsync via Node.
+                    if (process.platform !== 'win32') {
+                        const dirFd = fs.openSync(this.tasksDir, 'r');
+                        try {
+                            fs.fsyncSync(dirFd);
+                        }
+                        finally {
+                            fs.closeSync(dirFd);
+                        }
+                    }
+                }
+                finally {
+                    // A failed replacement must leave the preceding JSON file intact.
+                    try {
+                        fs.unlinkSync(temporary);
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch {
+            this.localPersistenceFailed = true;
+            // The operation may already have reached storage. Do not roll back to
+            // queued or report success based on uncommitted memory.
+            throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local task state could not be confirmed; dispatch is blocked until reconciliation.');
+        }
+    }
     saveTask(task) {
         this.enforceLogRetention(task);
         task.updatedAt = Date.now();
+        if (task.backend === 'local') {
+            try {
+                this.persistLocalTask(task);
+            }
+            catch (err) {
+                // Do not expose an in-memory success as a durable success. The stored
+                // record is still authoritative and must be reconciled by an operator.
+                task.status = 'stale';
+                task.error = { code: 'LOCAL_TASK_PERSISTENCE_UNAVAILABLE', message: 'Local task persistence is unconfirmed; manual reconciliation required.' };
+                task.result = undefined;
+                task.completedAt = Date.now();
+                throw err;
+            }
+            this.notifyTaskChanged(task);
+            return;
+        }
         if (this.tasksDir) {
             try {
                 if (!fs.existsSync(this.tasksDir)) {
@@ -348,6 +425,8 @@ class TaskStore {
         });
     }
     claimTask(deviceId, supportedCapabilities, leaseDurationMs, sessionId, supportsAttemptFencing = true) {
+        if (this.localPersistenceFailed)
+            throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked until reconciliation.');
         this.recoverStaleTasks();
         const eligibleTasks = Array.from(this.tasks.values())
             .filter(t => {
@@ -375,6 +454,8 @@ class TaskStore {
             return undefined;
         if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId))
             return undefined;
+        if (task.backend === 'local' && this.localPersistenceFailed)
+            throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked until reconciliation.');
         const now = Date.now();
         const attempt = this.createAttempt(task, deviceId, now);
         if (!attempt)

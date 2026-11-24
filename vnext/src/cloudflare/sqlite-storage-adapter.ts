@@ -106,6 +106,10 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
   }
 
   async saveTask(task: DurableTask): Promise<void> {
+    this.saveTaskSync(task);
+  }
+
+  saveTaskSync(task: DurableTask): void {
     task.updatedAt = Date.now();
     this.sql.exec(
       `INSERT OR REPLACE INTO tasks (

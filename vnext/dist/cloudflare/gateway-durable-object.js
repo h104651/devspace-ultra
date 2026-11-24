@@ -213,7 +213,8 @@ class GatewayDurableObject {
             this.kaggleBackend.reconcileDanglingTasks().catch(err => console.warn('[DO] Background Kaggle reconciliation warning:', err));
         }
         catch (err) {
-            console.error('Failed to hydrate durable task state:', err);
+            this.taskStore.blockLocalDispatch();
+            console.error('Failed to hydrate durable task state; local dispatch blocked:', err);
         }
         try {
             this.artifactStore.hydrate(await this.storage.listArtifacts());
@@ -1374,6 +1375,13 @@ class GatewayDurableObject {
             }
         }
         catch (err) {
+            if (err instanceof Error && err.message.startsWith('LOCAL_TASK_PERSISTENCE_UNAVAILABLE:')) {
+                try {
+                    ws.send(JSON.stringify({ type: 'ERROR', error: 'LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch requires durable state reconciliation.' }));
+                }
+                catch { }
+                return;
+            }
             console.error('Error handling WebSocket message in Durable Object:', err);
         }
     }
@@ -1395,8 +1403,16 @@ class GatewayDurableObject {
         if (this.sessionAuthority.get(deviceId) === sessionId) {
             this.sessionAuthority.delete(deviceId);
             this.activeSessions.delete(deviceId);
-            this.taskStore.failTasksForSupersededSession(deviceId, sessionId, 'Connection ended');
             await this.persistSessionAuthority();
+            try {
+                this.taskStore.failTasksForSupersededSession(deviceId, sessionId, 'Connection ended');
+            }
+            catch (err) {
+                if (!(err instanceof Error) || !err.message.startsWith('LOCAL_TASK_PERSISTENCE_UNAVAILABLE:'))
+                    throw err;
+                // Authority has already been invalidated. Keep dispatch blocked while
+                // allowing offline status reconciliation to finish.
+            }
             if (!this.sessionAuthority.has(deviceId) && !this.killSwitch.isDeviceRevoked(deviceId) && this.authManager.getDevice(deviceId)?.status !== 'revoked') {
                 this.authManager.updateDeviceStatus(deviceId, 'offline');
                 await this.storage.updateDeviceStatus(deviceId, 'offline');
