@@ -8,6 +8,8 @@ export interface IStorageAdapter {
   getTask(taskId: string): Promise<DurableTask | undefined>;
   getTaskSync?(taskId: string): DurableTask | undefined;
   saveTask(task: DurableTask): Promise<void>;
+  /** Synchronous durable write; must throw on failure. Required for local dispatch. */
+  saveTaskSync?(task: DurableTask): void;
   listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number; offset?: number }): Promise<DurableTask[]>;
   deleteTask(taskId: string): Promise<boolean>;
 
