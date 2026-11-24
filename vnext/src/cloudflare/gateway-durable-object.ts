@@ -1251,6 +1251,7 @@ export class GatewayDurableObject {
         const now = Date.now();
         const attachmentData: AgentSessionAttachment = {
           sessionId: newSessionId,
+          supportsAttemptFencing: msg.supportsAttemptFencing === true,
           deviceId: authoritativeDeviceId,
           name: msg.name || authoritativeDeviceId,
           platform: (msg.platform as any) || 'windows',
@@ -1301,6 +1302,8 @@ export class GatewayDurableObject {
       const authenticatedDeviceId = attachment.deviceId;
       const currentSessionId = attachment.sessionId;
       const authorizedCapabilities = attachment.capabilities || [];
+      const supportsAttemptFencing = attachment.supportsAttemptFencing === true;
+      const ownsAttempt = (taskId: string, attemptId?: string) => this.taskStore.ownsLocalAttempt(taskId, authenticatedDeviceId, currentSessionId, attemptId, supportsAttemptFencing);
 
       // Session Fencing Check: delayed events from an old superseded session must be rejected
       const activeSession = this.getActiveSession(authenticatedDeviceId);
@@ -1338,8 +1341,8 @@ export class GatewayDurableObject {
 
         if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
           for (const tid of msg.activeTaskIds) {
-            const task = this.taskStore.getTask(tid);
-            if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === currentSessionId) {
+            const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
+            if (ownsAttempt(tid, attemptId)) {
               this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, currentSessionId);
             }
           }
@@ -1358,7 +1361,7 @@ export class GatewayDurableObject {
           return;
         }
         this.taskStore.recoverStaleTasks();
-        const task = this.taskStore.claimTask(authenticatedDeviceId, authorizedCapabilities, undefined, currentSessionId);
+        const task = this.taskStore.claimTask(authenticatedDeviceId, authorizedCapabilities, undefined, currentSessionId, supportsAttemptFencing);
         if (task) {
           ws.send(JSON.stringify({
             type: 'TASK_ASSIGNED',
@@ -1371,8 +1374,7 @@ export class GatewayDurableObject {
       }
 
       if (msg.type === 'TASK_ACK') {
-        const task = this.taskStore.getTask(msg.taskId);
-        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease?.claimedSessionId !== currentSessionId) {
+        if (!ownsAttempt(msg.taskId, msg.attemptId)) {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
           return;
         }
@@ -1381,8 +1383,7 @@ export class GatewayDurableObject {
       }
 
       if (msg.type === 'TASK_PROGRESS') {
-        const task = this.taskStore.getTask(msg.taskId);
-        if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === currentSessionId) {
+        if (ownsAttempt(msg.taskId, msg.attemptId)) {
           this.taskStore.startTask(msg.taskId, authenticatedDeviceId, currentSessionId);
           this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
         }
@@ -1390,16 +1391,14 @@ export class GatewayDurableObject {
       }
 
       if (msg.type === 'TASK_LOG_APPEND') {
-        const task = this.taskStore.getTask(msg.taskId);
-        if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === currentSessionId) {
+        if (ownsAttempt(msg.taskId, msg.attemptId)) {
           this.taskStore.appendLogs(msg.taskId, msg.lines);
         }
         return;
       }
 
       if (msg.type === 'TASK_COMPLETE') {
-        const task = this.taskStore.getTask(msg.taskId);
-        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease?.claimedSessionId !== currentSessionId) {
+        if (!ownsAttempt(msg.taskId, msg.attemptId)) {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
           return;
         }
@@ -1408,8 +1407,7 @@ export class GatewayDurableObject {
       }
 
       if (msg.type === 'TASK_FAIL') {
-        const task = this.taskStore.getTask(msg.taskId);
-        if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease?.claimedSessionId !== currentSessionId) {
+        if (!ownsAttempt(msg.taskId, msg.attemptId)) {
           ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
           return;
         }
@@ -1422,10 +1420,12 @@ export class GatewayDurableObject {
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    await this.ready;
     await this.handleSocketDisconnect(ws, 'CLOSE', code, reason);
   }
 
   async webSocketError(ws: WebSocket, error: any): Promise<void> {
+    await this.ready;
     await this.handleSocketDisconnect(ws, 'ERROR', 1006, error?.message || String(error));
   }
 
