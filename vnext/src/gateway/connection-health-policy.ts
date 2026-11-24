@@ -10,6 +10,7 @@ export const HEARTBEAT_TTL_MS = 45_000;      // 45 seconds timeout (3x interval,
 
 export interface AgentSessionAttachment {
   sessionId: string;
+  supportsAttemptFencing?: boolean;
   deviceId: string;
   name: string;
   platform: 'windows' | 'linux' | 'darwin';
@@ -20,6 +21,7 @@ export interface AgentSessionAttachment {
 
 export interface AgentSessionInfo {
   sessionId: string;
+  supportsAttemptFencing?: boolean;
   deviceId: string;
   name: string;
   platform: string;
