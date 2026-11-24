@@ -126,6 +126,9 @@ class CloudflareSqliteStorageAdapter {
         return this.getTaskSync(taskId);
     }
     async saveTask(task) {
+        this.saveTaskSync(task);
+    }
+    saveTaskSync(task) {
         task.updatedAt = Date.now();
         this.sql.exec(`INSERT OR REPLACE INTO tasks (
         taskId, taskKey, idempotencyKey, clientRequestId, backend, capability, requiredScope, status, priority,

@@ -11,6 +11,9 @@ import { AuthManager } from '../../src/security/auth-manager';
 import { KillSwitch } from '../../src/security/kill-switch';
 import { TaskStore } from '../../src/storage/task-store';
 import { GatewayServer } from '../../src/gateway/server';
+import { LeaseMonitor } from '../../src/gateway/lease-monitor';
+import { ConnectionManager } from '../../src/gateway/connection-manager';
+import { AuditLogger } from '../../src/security/audit-logger';
 import { LocalAgentClient } from '../../src/local-agent/client';
 import {
   isSessionHealthy,
@@ -1028,7 +1031,7 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
     const { gateway, sql, webSockets } = setupTestDO();
     const auth = (gateway as any).authManager as AuthManager;
     const store = (gateway as any).taskStore as TaskStore;
-    const { deviceId, token } = auth.registerDevice('Durability test', 'windows', ['local:write_file']);
+    const { deviceId, token } = auth.registerDevice('Durability test', 'windows', ['local:write', 'local:write_file']);
     const ws = new MockDOWebSocket();
     webSockets.push(ws);
     await gateway.webSocketMessage(ws as any, JSON.stringify({ type: 'AGENT_REGISTER', deviceId, token, capabilities: ['local:write_file'], supportsAttemptFencing: true }));
@@ -1053,7 +1056,7 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
     const { gateway, sql, webSockets } = setupTestDO();
     const auth = (gateway as any).authManager as AuthManager;
     const store = (gateway as any).taskStore as TaskStore;
-    const { deviceId, token } = auth.registerDevice('Durability completion', 'windows', ['local:write_file']);
+    const { deviceId, token } = auth.registerDevice('Durability completion', 'windows', ['local:write', 'local:write_file']);
     const ws = new MockDOWebSocket();
     webSockets.push(ws);
     await gateway.webSocketMessage(ws as any, JSON.stringify({ type: 'AGENT_REGISTER', deviceId, token, capabilities: ['local:write_file'], supportsAttemptFencing: true }));
@@ -1106,6 +1109,29 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
     passed++;
   } catch (err) { console.error('D03 FAILED:', err); failed++; }
+
+  // D08: TaskStore startup with corrupted task JSON files must fail-closed.
+  try {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devspace-durable-corrupt-'));
+    try {
+      const taskDir = path.join(root, 'tasks');
+      fs.mkdirSync(taskDir, { recursive: true });
+      fs.writeFileSync(path.join(taskDir, 'corrupted-task.json'), '{ broken_json');
+      const store = new TaskStore(root);
+      assert.throws(() => store.claimTask('any-dev', ['local:read_file'], undefined, 's1'), /LOCAL_TASK_PERSISTENCE_UNAVAILABLE/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    passed++;
+  } catch (err) { console.error('D08 FAILED:', err); failed++; }
+
+  // D09: LeaseMonitor tick survives persistence quarantine without unhandled exception.
+  try {
+    const store = new TaskStore();
+    store.blockLocalDispatch();
+    const monitor = new LeaseMonitor(store, { getConnectedAgents: () => [] } as any, { log: () => {} } as any, 1000);
+    monitor.tick();
+    monitor.stop();
+    passed++;
+  } catch (err) { console.error('D09 FAILED:', err); failed++; }
 
   console.log(`Connection Lifecycle & Session Fencing Tests: ${passed} passed, ${failed} failed\n`);
   return { passed, failed };
