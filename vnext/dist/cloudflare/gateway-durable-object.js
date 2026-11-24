@@ -83,6 +83,9 @@ class GatewayDurableObject {
     taskRouter;
     mcpHandlers;
     activeSessions = new Map();
+    // Durable authority is independent of residual WebSocket attachments.
+    sessionAuthority = new Map();
+    watchdogDueAt;
     ready;
     baseUrl;
     constructor(ctx, env) {
@@ -153,9 +156,11 @@ class GatewayDurableObject {
                         socket: ws
                     };
                 }).filter((a) => {
-                    if (a.deviceId === 'unknown')
+                    if (a.deviceId === 'unknown' || this.sessionAuthority.get(a.deviceId) !== a.sessionId)
                         return false;
-                    if (this.killSwitch.isDeviceRevoked(a.deviceId))
+                    if (a.socket.readyState !== undefined && a.socket.readyState !== 1)
+                        return false;
+                    if (this.killSwitch.isDeviceRevoked(a.deviceId) || this.authManager.getDevice(a.deviceId)?.status === 'revoked')
                         return false;
                     if (options?.healthyOnly && !(0, connection_health_policy_1.isSessionHealthy)(a, now))
                         return false;
@@ -217,6 +222,14 @@ class GatewayDurableObject {
             console.error('Failed to hydrate artifact metadata:', err);
         }
         try {
+            if (typeof this.ctx.storage?.get === 'function') {
+                const authority = await this.ctx.storage.get('agent-session-authority-v1');
+                if (authority && typeof authority === 'object')
+                    this.sessionAuthority = new Map(Object.entries(authority));
+                const deadline = await this.ctx.storage.get('agent-watchdog-deadline-v1');
+                if (typeof deadline === 'number')
+                    this.watchdogDueAt = deadline;
+            }
             await this.rearmKaggleAlarm();
         }
         catch (err) {
@@ -255,34 +268,27 @@ class GatewayDurableObject {
     async rearmKaggleAlarm(polls) {
         await this.rearmUnifiedAlarm(polls);
     }
+    async persistSessionAuthority() {
+        if (typeof this.ctx.storage?.put !== 'function')
+            return;
+        await this.ctx.storage.put('agent-session-authority-v1', Object.fromEntries(this.sessionAuthority));
+    }
     getActiveSession(deviceId) {
-        let session = this.activeSessions.get(deviceId);
-        if (!session) {
-            const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
-            let newest = undefined;
-            for (const ws of sockets) {
-                const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null);
-                if (att && att.deviceId === deviceId && att.sessionId) {
-                    if (!newest || (att.connectedAt || 0) > (newest.connectedAt || 0)) {
-                        newest = {
-                            sessionId: att.sessionId,
-                            deviceId: att.deviceId,
-                            name: att.name || att.deviceId,
-                            platform: att.platform || 'windows',
-                            capabilities: att.capabilities || [],
-                            connectedAt: att.connectedAt || 0,
-                            lastHeartbeatAt: att.lastHeartbeatAt || att.connectedAt || 0,
-                            socket: ws
-                        };
-                    }
-                }
-            }
-            if (newest) {
-                this.activeSessions.set(deviceId, newest);
-                session = newest;
-            }
+        const authoritativeId = this.sessionAuthority.get(deviceId);
+        if (!authoritativeId)
+            return undefined;
+        const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
+        for (const ws of sockets) {
+            if (ws.readyState !== undefined && ws.readyState !== 1)
+                continue;
+            const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null);
+            if (!att || att.deviceId !== deviceId || att.sessionId !== authoritativeId)
+                continue;
+            const session = { ...att, socket: ws };
+            this.activeSessions.set(deviceId, session);
+            return session;
         }
-        return session;
+        return undefined;
     }
     async rearmUnifiedAlarm(polls) {
         if (typeof this.ctx.storage?.setAlarm !== 'function')
@@ -292,59 +298,48 @@ class GatewayDurableObject {
         const earliestKaggle = kaggleEntries.length > 0 ? Math.min(...kaggleEntries.map(item => item.dueAt)) : undefined;
         // Watchdog check: only schedule if there are connected WebSockets
         const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
-        let watchdogDueAt = undefined;
         if (sockets.length > 0) {
-            watchdogDueAt = Date.now() + 30_000;
+            if (this.watchdogDueAt === undefined)
+                this.watchdogDueAt = Date.now() + 30_000;
+        }
+        else {
+            this.watchdogDueAt = undefined;
+        }
+        if (typeof this.ctx.storage?.put === 'function') {
+            await this.ctx.storage.put('agent-watchdog-deadline-v1', this.watchdogDueAt ?? null);
         }
         const candidates = [];
         if (earliestKaggle !== undefined)
             candidates.push(earliestKaggle);
-        if (watchdogDueAt !== undefined)
-            candidates.push(watchdogDueAt);
+        if (this.watchdogDueAt !== undefined)
+            candidates.push(this.watchdogDueAt);
         if (candidates.length === 0) {
             if (typeof this.ctx.storage?.deleteAlarm === 'function')
                 await this.ctx.storage.deleteAlarm();
             return;
         }
         const earliest = Math.min(...candidates);
-        await this.ctx.storage.setAlarm(Math.max(Date.now() + 1000, earliest));
+        // Preserve the already due deadline; an unrelated rearm must not postpone it.
+        await this.ctx.storage.setAlarm(Math.max(Date.now(), earliest));
     }
     async runWatchdogStaleEviction(now = Date.now()) {
         const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
         for (const ws of sockets) {
             const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null);
-            if (!att || !att.deviceId || !att.sessionId)
+            if (!att || !att.deviceId || !att.sessionId || this.sessionAuthority.get(att.deviceId) !== att.sessionId) {
+                try {
+                    ws.close(1008, 'Session fenced');
+                }
+                catch { }
                 continue;
-            if (!(0, connection_health_policy_1.isSessionHealthy)(att, now, connection_health_policy_1.HEARTBEAT_TTL_MS)) {
+            }
+            if (!(0, connection_health_policy_1.isSessionHealthy)(att, now, connection_health_policy_1.HEARTBEAT_TTL_MS) || this.killSwitch.isDeviceRevoked(att.deviceId) || this.authManager.getDevice(att.deviceId)?.status === 'revoked') {
+                // Invalidate the authority before asking the transport to close.
+                await this.handleSocketDisconnect(ws, 'ERROR', 1006, 'Heartbeat timeout or revoked session');
                 try {
                     ws.close(1000, 'Heartbeat timeout');
                 }
                 catch { }
-                this.auditLogger.log({
-                    actor: att.deviceId,
-                    actorType: 'device',
-                    action: 'STALE_CONNECTION_EVICTED',
-                    result: 'SUCCESS',
-                    details: {
-                        sessionId: att.sessionId,
-                        lastHeartbeatAt: att.lastHeartbeatAt,
-                        elapsedMs: now - (att.lastHeartbeatAt || 0)
-                    }
-                });
-                const active = this.getActiveSession(att.deviceId);
-                if (active && active.sessionId === att.sessionId) {
-                    const remainingHealthy = (this.ctx.getWebSockets ? this.ctx.getWebSockets() : [])
-                        .filter((s) => s !== ws)
-                        .some((s) => {
-                        const a = (typeof s.deserializeAttachment === 'function' ? s.deserializeAttachment() : null);
-                        return a && a.deviceId === att.deviceId && (0, connection_health_policy_1.isSessionHealthy)(a, now, connection_health_policy_1.HEARTBEAT_TTL_MS);
-                    });
-                    if (!remainingHealthy) {
-                        this.activeSessions.delete(att.deviceId);
-                        this.authManager.updateDeviceStatus(att.deviceId, 'offline');
-                        await this.storage.updateDeviceStatus(att.deviceId, 'offline');
-                    }
-                }
             }
         }
     }
@@ -353,6 +348,10 @@ class GatewayDurableObject {
         const now = Date.now();
         const polls = await this.readPendingKagglePolls();
         const due = Object.values(polls).filter(item => item.dueAt <= now + 250);
+        if (this.watchdogDueAt !== undefined && this.watchdogDueAt <= now) {
+            this.watchdogDueAt = undefined;
+            await this.runWatchdogStaleEviction(now);
+        }
         for (const item of due) {
             try {
                 const stillRunning = await this.kaggleBackend.pollKaggleTask(item.taskId, item.kernelSlug, false);
@@ -369,7 +368,6 @@ class GatewayDurableObject {
             }
         }
         await this.writePendingKagglePolls(polls);
-        await this.runWatchdogStaleEviction(now);
         await this.rearmUnifiedAlarm(polls);
     }
     corsHeaders() {
@@ -735,7 +733,10 @@ class GatewayDurableObject {
                     } : undefined,
                     kaggleConfigured: this.kaggleHttpClient.hasCredentials(),
                     version: '2.0.1',
-                    connectedAgents: this.ctx.getWebSockets().length,
+                    connectedAgents: Array.from(this.sessionAuthority.keys()).filter(id => {
+                        const session = this.getActiveSession(id);
+                        return !!session && (0, connection_health_policy_1.isSessionHealthy)(session) && !this.killSwitch.isDeviceRevoked(id) && this.authManager.getDevice(id)?.status !== 'revoked';
+                    }).length,
                     killSwitch: this.killSwitch.getState().globalEmergencyStop ? 'EMERGENCY_STOP' : 'ACTIVE'
                 });
             }
@@ -1180,7 +1181,18 @@ class GatewayDurableObject {
                     const requiredScope = scope_checker_1.ScopeChecker.getRequiredScopeForCapability(cap);
                     return scope_checker_1.ScopeChecker.hasScope(val.payload.scopes, requiredScope);
                 });
-                // Session Fencing & Eviction: Close any prior connection for this device ID to guarantee single active session
+                // Never displace a healthy incumbent; stale or legacy sockets cannot acquire authority again.
+                const priorAttachment = ws.deserializeAttachment?.();
+                if (priorAttachment?.sessionId) {
+                    ws.close(1008, 'Already registered');
+                    return;
+                }
+                const incumbent = this.getActiveSession(authoritativeDeviceId);
+                if (incumbent && (0, connection_health_policy_1.isSessionHealthy)(incumbent)) {
+                    ws.close(1008, 'Duplicate active device session');
+                    return;
+                }
+                // Session Fencing & Eviction: close stale prior connections.
                 const existingSockets = (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).filter((s) => {
                     if (s === ws)
                         return false;
@@ -1204,10 +1216,14 @@ class GatewayDurableObject {
                         details: { oldSessionId: oldAtt?.sessionId, reason: 'Duplicate registration' }
                     });
                 }
+                const previousSessionId = this.sessionAuthority.get(authoritativeDeviceId);
+                if (previousSessionId)
+                    this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, previousSessionId, 'Stale session replaced');
                 const newSessionId = crypto.randomUUID();
                 const now = Date.now();
                 const attachmentData = {
                     sessionId: newSessionId,
+                    supportsAttemptFencing: msg.supportsAttemptFencing === true,
                     deviceId: authoritativeDeviceId,
                     name: msg.name || authoritativeDeviceId,
                     platform: msg.platform || 'windows',
@@ -1220,6 +1236,8 @@ class GatewayDurableObject {
                     ...attachmentData,
                     socket: ws
                 });
+                this.sessionAuthority.set(authoritativeDeviceId, newSessionId);
+                await this.persistSessionAuthority();
                 this.authManager.rememberAuthenticatedDevice(msg.token, authoritativeDeviceId, msg.name || authoritativeDeviceId, authorizedCaps, msg.platform || 'windows');
                 this.authManager.updateDeviceStatus(authoritativeDeviceId, 'online');
                 this.authManager.updateDeviceHeartbeat(authoritativeDeviceId, now);
@@ -1248,9 +1266,11 @@ class GatewayDurableObject {
             const authenticatedDeviceId = attachment.deviceId;
             const currentSessionId = attachment.sessionId;
             const authorizedCapabilities = attachment.capabilities || [];
+            const supportsAttemptFencing = attachment.supportsAttemptFencing === true;
+            const ownsAttempt = (taskId, attemptId) => this.taskStore.ownsLocalAttempt(taskId, authenticatedDeviceId, currentSessionId, attemptId, supportsAttemptFencing);
             // Session Fencing Check: delayed events from an old superseded session must be rejected
             const activeSession = this.getActiveSession(authenticatedDeviceId);
-            if (activeSession && activeSession.sessionId !== currentSessionId) {
+            if (!activeSession || activeSession.sessionId !== currentSessionId || activeSession.socket !== ws) {
                 ws.send(JSON.stringify({ type: 'ERROR', error: 'SESSION_FENCED: Session is no longer active' }));
                 try {
                     ws.close(1008, 'Session fenced');
@@ -1261,13 +1281,17 @@ class GatewayDurableObject {
                     actorType: 'device',
                     action: 'SESSION_FENCED_REJECT',
                     result: 'DENY',
-                    details: { fencedSessionId: currentSessionId, activeSessionId: activeSession.sessionId, messageType: msg.type }
+                    details: { fencedSessionId: currentSessionId, activeSessionId: activeSession?.sessionId, messageType: msg.type }
                 });
                 return;
             }
             if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
                 ws.send(JSON.stringify({ type: 'ERROR', error: 'DEVICE_REVOKED: Device is revoked' }));
                 ws.close(1008, 'Device revoked');
+                return;
+            }
+            if (!(0, connection_health_policy_1.isSessionHealthy)(attachment, Date.now(), connection_health_policy_1.HEARTBEAT_TTL_MS)) {
+                ws.close(1000, 'Heartbeat timeout');
                 return;
             }
             if (msg.type === 'AGENT_HEARTBEAT') {
@@ -1281,8 +1305,8 @@ class GatewayDurableObject {
                 await this.storage.updateDeviceHeartbeat(authenticatedDeviceId, attachment.lastHeartbeatAt);
                 if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
                     for (const tid of msg.activeTaskIds) {
-                        const task = this.taskStore.getTask(tid);
-                        if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+                        const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
+                        if (ownsAttempt(tid, attemptId)) {
                             this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, currentSessionId);
                         }
                     }
@@ -1300,7 +1324,7 @@ class GatewayDurableObject {
                     return;
                 }
                 this.taskStore.recoverStaleTasks();
-                const task = this.taskStore.claimTask(authenticatedDeviceId, authorizedCapabilities, undefined, currentSessionId);
+                const task = this.taskStore.claimTask(authenticatedDeviceId, authorizedCapabilities, undefined, currentSessionId, supportsAttemptFencing);
                 if (task) {
                     ws.send(JSON.stringify({
                         type: 'TASK_ASSIGNED',
@@ -1312,8 +1336,7 @@ class GatewayDurableObject {
                 return;
             }
             if (msg.type === 'TASK_ACK') {
-                const task = this.taskStore.getTask(msg.taskId);
-                if (!task || task.lease?.claimedBy !== authenticatedDeviceId || (task.lease?.claimedSessionId && task.lease.claimedSessionId !== currentSessionId)) {
+                if (!ownsAttempt(msg.taskId, msg.attemptId)) {
                     ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
                     return;
                 }
@@ -1321,23 +1344,20 @@ class GatewayDurableObject {
                 return;
             }
             if (msg.type === 'TASK_PROGRESS') {
-                const task = this.taskStore.getTask(msg.taskId);
-                if (task && task.lease?.claimedBy === authenticatedDeviceId && (!task.lease.claimedSessionId || task.lease.claimedSessionId === currentSessionId)) {
+                if (ownsAttempt(msg.taskId, msg.attemptId)) {
                     this.taskStore.startTask(msg.taskId, authenticatedDeviceId, currentSessionId);
                     this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
                 }
                 return;
             }
             if (msg.type === 'TASK_LOG_APPEND') {
-                const task = this.taskStore.getTask(msg.taskId);
-                if (task && task.lease?.claimedBy === authenticatedDeviceId && (!task.lease.claimedSessionId || task.lease.claimedSessionId === currentSessionId)) {
+                if (ownsAttempt(msg.taskId, msg.attemptId)) {
                     this.taskStore.appendLogs(msg.taskId, msg.lines);
                 }
                 return;
             }
             if (msg.type === 'TASK_COMPLETE') {
-                const task = this.taskStore.getTask(msg.taskId);
-                if (!task || task.lease?.claimedBy !== authenticatedDeviceId || (task.lease?.claimedSessionId && task.lease.claimedSessionId !== currentSessionId)) {
+                if (!ownsAttempt(msg.taskId, msg.attemptId)) {
                     ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
                     return;
                 }
@@ -1345,8 +1365,7 @@ class GatewayDurableObject {
                 return;
             }
             if (msg.type === 'TASK_FAIL') {
-                const task = this.taskStore.getTask(msg.taskId);
-                if (!task || task.lease?.claimedBy !== authenticatedDeviceId || (task.lease?.claimedSessionId && task.lease.claimedSessionId !== currentSessionId)) {
+                if (!ownsAttempt(msg.taskId, msg.attemptId)) {
                     ws.send(JSON.stringify({ type: 'ERROR', error: 'LEASE_VIOLATION: Task lease not owned by device session' }));
                     return;
                 }
@@ -1359,9 +1378,11 @@ class GatewayDurableObject {
         }
     }
     async webSocketClose(ws, code, reason) {
+        await this.ready;
         await this.handleSocketDisconnect(ws, 'CLOSE', code, reason);
     }
     async webSocketError(ws, error) {
+        await this.ready;
         await this.handleSocketDisconnect(ws, 'ERROR', 1006, error?.message || String(error));
     }
     async handleSocketDisconnect(ws, source, code, reason) {
@@ -1370,18 +1391,13 @@ class GatewayDurableObject {
             return;
         const deviceId = att.deviceId;
         const sessionId = att.sessionId;
-        // Fencing: only mark offline if the socket closing is the currently active session
-        const active = this.getActiveSession(deviceId);
-        if (active && active.sessionId === sessionId) {
-            const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
-            const remainingHealthy = sockets.some((s) => {
-                if (s === ws)
-                    return false;
-                const a = (typeof s.deserializeAttachment === 'function' ? s.deserializeAttachment() : null);
-                return a && a.deviceId === deviceId && (0, connection_health_policy_1.isSessionHealthy)(a, Date.now(), connection_health_policy_1.HEARTBEAT_TTL_MS);
-            });
-            if (!remainingHealthy) {
-                this.activeSessions.delete(deviceId);
+        // A closed or stale session must never be restored from its attachment.
+        if (this.sessionAuthority.get(deviceId) === sessionId) {
+            this.sessionAuthority.delete(deviceId);
+            this.activeSessions.delete(deviceId);
+            this.taskStore.failTasksForSupersededSession(deviceId, sessionId, 'Connection ended');
+            await this.persistSessionAuthority();
+            if (!this.sessionAuthority.has(deviceId) && !this.killSwitch.isDeviceRevoked(deviceId) && this.authManager.getDevice(deviceId)?.status !== 'revoked') {
                 this.authManager.updateDeviceStatus(deviceId, 'offline');
                 await this.storage.updateDeviceStatus(deviceId, 'offline');
             }

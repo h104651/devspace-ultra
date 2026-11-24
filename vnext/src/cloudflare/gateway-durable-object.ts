@@ -234,10 +234,12 @@ export class GatewayDurableObject {
       console.error('Failed to hydrate artifact metadata:', err);
     }
     try {
-      const authority = await this.ctx.storage.get('agent-session-authority-v1');
-      if (authority && typeof authority === 'object') this.sessionAuthority = new Map(Object.entries(authority as Record<string, string>));
-      const deadline = await this.ctx.storage.get('agent-watchdog-deadline-v1');
-      if (typeof deadline === 'number') this.watchdogDueAt = deadline;
+      if (typeof this.ctx.storage?.get === 'function') {
+        const authority = await this.ctx.storage.get('agent-session-authority-v1');
+        if (authority && typeof authority === 'object') this.sessionAuthority = new Map(Object.entries(authority as Record<string, string>));
+        const deadline = await this.ctx.storage.get('agent-watchdog-deadline-v1');
+        if (typeof deadline === 'number') this.watchdogDueAt = deadline;
+      }
       await this.rearmKaggleAlarm();
     } catch (err) {
       console.error('Failed to rearm durable Kaggle poll alarm:', err);
@@ -272,6 +274,7 @@ export class GatewayDurableObject {
   }
 
   private async persistSessionAuthority(): Promise<void> {
+    if (typeof this.ctx.storage?.put !== 'function') return;
     await this.ctx.storage.put('agent-session-authority-v1', Object.fromEntries(this.sessionAuthority));
   }
 
@@ -303,7 +306,9 @@ export class GatewayDurableObject {
     } else {
       this.watchdogDueAt = undefined;
     }
-    await this.ctx.storage.put('agent-watchdog-deadline-v1', this.watchdogDueAt ?? null);
+    if (typeof this.ctx.storage?.put === 'function') {
+      await this.ctx.storage.put('agent-watchdog-deadline-v1', this.watchdogDueAt ?? null);
+    }
 
     const candidates: number[] = [];
     if (earliestKaggle !== undefined) candidates.push(earliestKaggle);

@@ -347,7 +347,7 @@ class TaskStore {
             }, timeoutMs);
         });
     }
-    claimTask(deviceId, supportedCapabilities, leaseDurationMs, sessionId) {
+    claimTask(deviceId, supportedCapabilities, leaseDurationMs, sessionId, supportsAttemptFencing = true) {
         this.recoverStaleTasks();
         const eligibleTasks = Array.from(this.tasks.values())
             .filter(t => {
@@ -357,6 +357,9 @@ class TaskStore {
                 return false;
             if (t.backend === 'local') {
                 if (!t.targetDeviceId || t.targetDeviceId !== deviceId)
+                    return false;
+                // Legacy wire clients cannot distinguish multiple executions of one task.
+                if (!supportsAttemptFencing && (t.attempts?.length || 0) > 0)
                     return false;
             }
             return true;
@@ -456,6 +459,17 @@ class TaskStore {
             }
         }
         return { assigned, taskIds: assignedTaskIds };
+    }
+    ownsLocalAttempt(taskId, deviceId, sessionId, attemptId, supportsAttemptFencing) {
+        const task = this.tasks.get(taskId);
+        if (!task || task.backend !== 'local' || !task.lease || task.lease.claimedBy !== deviceId ||
+            task.lease.claimedSessionId !== sessionId || !task.activeAttemptId ||
+            !['claimed', 'acknowledged', 'running'].includes(task.status))
+            return false;
+        if (supportsAttemptFencing || attemptId !== undefined)
+            return attemptId === task.activeAttemptId;
+        // Legacy wire messages are safe only on a first, non-replayed execution.
+        return (task.attempts?.length || 0) === 1;
     }
     acknowledgeTask(taskId, deviceId, sessionId) {
         const task = this.tasks.get(taskId);
@@ -594,7 +608,8 @@ class TaskStore {
         if (options?.sessionId && task.lease?.claimedSessionId && task.lease.claimedSessionId !== options.sessionId)
             return false;
         this.finishActiveAttempt(task, 'failed', error);
-        const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+        const isRetryable = !(task.backend === 'local' && (0, capabilities_1.isSideEffectCapability)(task.capability)) &&
+            options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
         if (isRetryable) {
             task.retryPolicy.retryCount++;
             task.lease = undefined;
@@ -646,6 +661,7 @@ class TaskStore {
                         code: 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN',
                         message: `${reason}: Task execution interrupted while side effects may have been applied. Manual recovery required.`
                     };
+                    task.completedAt = Date.now();
                     task.lease = undefined;
                     this.saveTask(task);
                     count++;
@@ -722,13 +738,13 @@ class TaskStore {
                     code: 'TASK_LEASE_EXPIRED',
                     message: `Task lease expired without heartbeat or completion from worker ${claimedBy}`
                 });
-                const wasRunning = task.status === 'running';
-                if (wasRunning && (0, capabilities_1.isSideEffectCapability)(task.capability)) {
-                    // Mutating task was interrupted while actively running: fail closed to prevent uncontrolled duplicate execution
+                if (task.backend === 'local' && (0, capabilities_1.isSideEffectCapability)(task.capability)) {
+                    // Dispatch may have reached the executor before ACK or RUNNING was persisted.
+                    // No automatic replay of a potentially applied local mutation.
                     task.status = 'stale';
                     task.error = {
                         code: 'MUTATION_UNCERTAIN_ON_STALE',
-                        message: `Task lease expired while running mutating capability '${task.capability}'. Manual recovery required.`
+                        message: `Task lease expired after dispatch of mutating capability '${task.capability}'. Manual recovery required.`
                     };
                     task.completedAt = now;
                     task.lease = undefined;

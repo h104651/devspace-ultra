@@ -40,6 +40,8 @@ const client_1 = require("../local-agent/client");
 const dotenv_1 = __importDefault(require("dotenv"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
+const os = __importStar(require("os"));
+const crypto = __importStar(require("crypto"));
 dotenv_1.default.config();
 async function main() {
     const gatewayUrl = process.env.GATEWAY_URL || 'ws://localhost:4000/ws/agent';
@@ -86,6 +88,37 @@ async function main() {
         projectsConfigFile: projectsConfigFile ? path.resolve(projectsConfigFile) : undefined,
         allowedWorkspaces,
         allowRawShell
+    });
+    // Per-user, per-device exclusive CLI ownership. A crashed process may leave
+    // the lock; never auto-take over an unverified executor or child process.
+    const lockDir = path.join(os.homedir(), '.devspace-ultra', 'agent-locks');
+    fs.mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+    const lockName = crypto.createHash('sha256').update(deviceId.toLowerCase()).digest('hex');
+    const lockPath = path.join(lockDir, `${lockName}.lock`);
+    const lockOwner = JSON.stringify({ pid: process.pid, deviceId, startedAt: Date.now(), nonce: crypto.randomUUID() });
+    try {
+        const fd = fs.openSync(lockPath, 'wx', 0o600);
+        try {
+            fs.writeFileSync(fd, lockOwner);
+        }
+        finally {
+            fs.closeSync(fd);
+        }
+    }
+    catch (err) {
+        if (err?.code === 'EEXIST') {
+            throw new Error(`Agent lock already exists: ${lockPath}. Verify the previous agent AND its child processes have stopped and reconcile uncertain tasks before manual lock recovery.`);
+        }
+        throw err;
+    }
+    process.once('exit', () => {
+        if (agent.hasInFlightTasks())
+            return;
+        try {
+            if (fs.readFileSync(lockPath, 'utf8') === lockOwner)
+                fs.unlinkSync(lockPath);
+        }
+        catch { /* Leave an unverifiable lock intact. */ }
     });
     agent.start();
     console.log('[AGENT] Local Agent connected outbound. Waiting for tasks...');

@@ -596,7 +596,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
     await test('Task B7: Task lease expiration and retry preserves targetDeviceId binding', async () => {
       const task = server.taskStore.createTask({
         backend: 'local',
-        capability: 'local:run_tests',
+        capability: 'local:read_file',
         payload: { projectId: 'project-new' },
         targetDeviceId: 'win11-arm64-workstation-2',
         maxRetries: 3
@@ -619,7 +619,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       assert.strictEqual(recoveredTask.attempts?.[0]?.errorCode, 'TASK_LEASE_EXPIRED');
 
       // Old PC still cannot claim recovered task
-      const stealAttempt = server.taskStore.claimTask('win11-arm64-workstation', ['local:run_tests']);
+      const stealAttempt = server.taskStore.claimTask('win11-arm64-workstation', ['local:read_file']);
       if (stealAttempt) {
         assert.notStrictEqual(stealAttempt.taskId, task.taskId, 'Old PC must not be assigned recovered task targeted to New PC');
       }
@@ -636,7 +636,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       const isolatedStore = new TaskStore();
       const task = isolatedStore.createTask({
         backend: 'local',
-        capability: 'local:run_tests',
+        capability: 'local:read_file',
         payload: { projectId: 'project-isolated' },
         targetDeviceId: 'isolated-device-target',
         maxRetries: 2
@@ -655,7 +655,7 @@ export async function runMultiDeviceRoutingTests(): Promise<{ passed: number; fa
       assert.strictEqual(afterRec1.attempts?.[0]?.errorCode, 'TASK_LEASE_EXPIRED');
 
       // Other device cannot steal it
-      const stolen = isolatedStore.claimTask('wrong-device', ['local:run_tests']);
+      const stolen = isolatedStore.claimTask('wrong-device', ['local:read_file']);
       assert.strictEqual(stolen, undefined);
 
       // Attempt 2: Target device re-claims and expires

@@ -77,11 +77,13 @@ class ConnectionManager {
             if (authenticatedDeviceId) {
                 const active = this.agents.get(authenticatedDeviceId);
                 // Fencing: Only update device offline status if the closing socket matches the active session
-                if (!active || (closedAgent && active.sessionId === closedAgent.sessionId)) {
+                if (closedAgent && active && active.sessionId === closedAgent.sessionId) {
                     const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
                     if (remaining.length === 0) {
                         this.agents.delete(authenticatedDeviceId);
-                        this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+                        if (this.authManager.getDevice(authenticatedDeviceId)?.status !== 'revoked' && !this.killSwitch.isDeviceRevoked(authenticatedDeviceId)) {
+                            this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+                        }
                     }
                     else {
                         this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
@@ -100,6 +102,10 @@ class ConnectionManager {
     }
     processMessage(socket, msg, authenticatedDeviceId, setDeviceId, ip) {
         if (msg.type === 'AGENT_REGISTER') {
+            if (authenticatedDeviceId || this.sockets.has(socket)) {
+                socket.close(1008, 'Already registered');
+                return;
+            }
             const auth = this.authManager.validateToken(msg.token);
             if (!auth.valid || !auth.payload || auth.payload.type !== 'device') {
                 socket.send(JSON.stringify({
@@ -143,6 +149,10 @@ class ConnectionManager {
             });
             // Evict any prior connection for this device ID to maintain single active session
             const oldAgent = this.agents.get(authoritativeDeviceId);
+            if (oldAgent && oldAgent.socket !== socket && (0, connection_health_policy_1.isSessionHealthy)(oldAgent) && oldAgent.socket.readyState === ws_1.WebSocket.OPEN) {
+                socket.close(1008, 'Duplicate active device session');
+                return;
+            }
             if (oldAgent && oldAgent.socket !== socket) {
                 try {
                     oldAgent.socket.close(1008, 'Superseded by new registration');
@@ -163,6 +173,7 @@ class ConnectionManager {
             setDeviceId(authoritativeDeviceId);
             const agent = {
                 sessionId,
+                supportsAttemptFencing: msg.supportsAttemptFencing === true,
                 deviceId: authoritativeDeviceId,
                 name: msg.name || authoritativeDeviceId,
                 platform: msg.platform || 'windows',
@@ -204,9 +215,18 @@ class ConnectionManager {
             socket.close();
             return;
         }
-        const agent = this.agents.get(authenticatedDeviceId);
-        if (!agent)
+        const agent = this.sockets.get(socket);
+        if (!agent || agent.deviceId !== authenticatedDeviceId || this.agents.get(authenticatedDeviceId)?.sessionId !== agent.sessionId) {
+            socket.close(1008, 'Session fenced');
             return;
+        }
+        if (!(0, connection_health_policy_1.isSessionHealthy)(agent)) {
+            socket.close(1008, 'Heartbeat timeout');
+            return;
+        }
+        const sessionId = agent.sessionId;
+        const supportsAttemptFencing = agent.supportsAttemptFencing === true;
+        const ownsAttempt = (taskId, attemptId) => this.taskStore.ownsLocalAttempt(taskId, authenticatedDeviceId, sessionId, attemptId, supportsAttemptFencing);
         if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
             socket.send(JSON.stringify({
                 type: 'ERROR',
@@ -225,9 +245,9 @@ class ConnectionManager {
             // Renew lease for all owned active tasks
             if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
                 for (const tid of msg.activeTaskIds) {
-                    const task = this.taskStore.getTask(tid);
-                    if (task && task.lease?.claimedBy === authenticatedDeviceId) {
-                        this.taskStore.renewLease(tid, authenticatedDeviceId);
+                    const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
+                    if (ownsAttempt(tid, attemptId)) {
+                        this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, sessionId);
                     }
                 }
             }
@@ -240,7 +260,7 @@ class ConnectionManager {
         }
         if (msg.type === 'TASK_CLAIM_POLL') {
             // Use strictly the agent's authorized capabilities, ignoring unauthorized escalation
-            const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities);
+            const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities, undefined, sessionId, supportsAttemptFencing);
             if (task) {
                 socket.send(JSON.stringify({
                     type: 'TASK_ASSIGNED',
@@ -252,8 +272,7 @@ class ConnectionManager {
             return;
         }
         if (msg.type === 'TASK_ACK') {
-            const task = this.taskStore.getTask(msg.taskId);
-            if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+            if (!ownsAttempt(msg.taskId, msg.attemptId)) {
                 this.auditLogger.log({
                     actor: authenticatedDeviceId,
                     actorType: 'device',
@@ -270,27 +289,24 @@ class ConnectionManager {
                 }));
                 return;
             }
-            this.taskStore.acknowledgeTask(msg.taskId, authenticatedDeviceId);
+            this.taskStore.acknowledgeTask(msg.taskId, authenticatedDeviceId, sessionId);
             return;
         }
         if (msg.type === 'TASK_PROGRESS') {
-            const task = this.taskStore.getTask(msg.taskId);
-            if (task && task.lease?.claimedBy === authenticatedDeviceId) {
-                this.taskStore.startTask(msg.taskId, authenticatedDeviceId);
+            if (ownsAttempt(msg.taskId, msg.attemptId)) {
+                this.taskStore.startTask(msg.taskId, authenticatedDeviceId, sessionId);
                 this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
             }
             return;
         }
         if (msg.type === 'TASK_LOG_APPEND') {
-            const task = this.taskStore.getTask(msg.taskId);
-            if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+            if (ownsAttempt(msg.taskId, msg.attemptId)) {
                 this.taskStore.appendLogs(msg.taskId, msg.lines);
             }
             return;
         }
         if (msg.type === 'TASK_COMPLETE') {
-            const task = this.taskStore.getTask(msg.taskId);
-            if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+            if (!ownsAttempt(msg.taskId, msg.attemptId)) {
                 this.auditLogger.log({
                     actor: authenticatedDeviceId,
                     actorType: 'device',
@@ -307,7 +323,7 @@ class ConnectionManager {
                 }));
                 return;
             }
-            this.taskStore.completeTask(msg.taskId, msg.result);
+            this.taskStore.completeTask(msg.taskId, msg.result, authenticatedDeviceId, sessionId);
             this.auditLogger.log({
                 actor: authenticatedDeviceId,
                 actorType: 'device',
@@ -318,8 +334,7 @@ class ConnectionManager {
             return;
         }
         if (msg.type === 'TASK_FAIL') {
-            const task = this.taskStore.getTask(msg.taskId);
-            if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+            if (!ownsAttempt(msg.taskId, msg.attemptId)) {
                 this.auditLogger.log({
                     actor: authenticatedDeviceId,
                     actorType: 'device',
@@ -336,7 +351,7 @@ class ConnectionManager {
                 }));
                 return;
             }
-            this.taskStore.failTask(msg.taskId, msg.error, { retryable: msg.retryable ?? false });
+            this.taskStore.failTask(msg.taskId, msg.error, { retryable: msg.retryable ?? false, deviceId: authenticatedDeviceId, sessionId });
             this.auditLogger.log({
                 actor: authenticatedDeviceId,
                 actorType: 'device',
@@ -353,7 +368,7 @@ class ConnectionManager {
         if (!options?.healthyOnly)
             return all;
         const now = Date.now();
-        return all.filter(a => (0, connection_health_policy_1.isSessionHealthy)(a, now));
+        return all.filter(a => this.agents.get(a.deviceId)?.sessionId === a.sessionId && a.socket.readyState === ws_1.WebSocket.OPEN && !this.killSwitch.isDeviceRevoked(a.deviceId) && this.authManager.getDevice(a.deviceId)?.status !== 'revoked' && (0, connection_health_policy_1.isSessionHealthy)(a, now));
     }
     getAgent(deviceId) {
         return this.agents.get(deviceId);
