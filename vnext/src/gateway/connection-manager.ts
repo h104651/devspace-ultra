@@ -67,11 +67,13 @@ export class ConnectionManager {
       if (authenticatedDeviceId) {
         const active = this.agents.get(authenticatedDeviceId);
         // Fencing: Only update device offline status if the closing socket matches the active session
-        if (!active || (closedAgent && active.sessionId === closedAgent.sessionId)) {
+        if (closedAgent && active && active.sessionId === closedAgent.sessionId) {
           const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
           if (remaining.length === 0) {
             this.agents.delete(authenticatedDeviceId);
-            this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+            if (this.authManager.getDevice(authenticatedDeviceId)?.status !== 'revoked' && !this.killSwitch.isDeviceRevoked(authenticatedDeviceId)) {
+              this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+            }
           } else {
             this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
           }
@@ -96,6 +98,10 @@ export class ConnectionManager {
     ip?: string
   ) {
     if (msg.type === 'AGENT_REGISTER') {
+      if (authenticatedDeviceId || this.sockets.has(socket)) {
+        socket.close(1008, 'Already registered');
+        return;
+      }
       const auth = this.authManager.validateToken(msg.token);
       if (!auth.valid || !auth.payload || auth.payload.type !== 'device') {
         socket.send(JSON.stringify({
@@ -144,6 +150,10 @@ export class ConnectionManager {
 
       // Evict any prior connection for this device ID to maintain single active session
       const oldAgent = this.agents.get(authoritativeDeviceId);
+      if (oldAgent && oldAgent.socket !== socket && isSessionHealthy(oldAgent) && oldAgent.socket.readyState === WebSocket.OPEN) {
+        socket.close(1008, 'Duplicate active device session');
+        return;
+      }
       if (oldAgent && oldAgent.socket !== socket) {
         try {
           oldAgent.socket.close(1008, 'Superseded by new registration');
@@ -209,8 +219,16 @@ export class ConnectionManager {
       return;
     }
 
-    const agent = this.agents.get(authenticatedDeviceId);
-    if (!agent) return;
+    const agent = this.sockets.get(socket);
+    if (!agent || agent.deviceId !== authenticatedDeviceId || this.agents.get(authenticatedDeviceId)?.sessionId !== agent.sessionId) {
+      socket.close(1008, 'Session fenced');
+      return;
+    }
+    if (!isSessionHealthy(agent)) {
+      socket.close(1008, 'Heartbeat timeout');
+      return;
+    }
+    const sessionId = agent.sessionId;
 
     if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
       socket.send(JSON.stringify({
@@ -233,8 +251,8 @@ export class ConnectionManager {
       if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
         for (const tid of msg.activeTaskIds) {
           const task = this.taskStore.getTask(tid);
-          if (task && task.lease?.claimedBy === authenticatedDeviceId) {
-            this.taskStore.renewLease(tid, authenticatedDeviceId);
+          if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === sessionId) {
+            this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, sessionId);
           }
         }
       }
@@ -249,7 +267,7 @@ export class ConnectionManager {
 
     if (msg.type === 'TASK_CLAIM_POLL') {
       // Use strictly the agent's authorized capabilities, ignoring unauthorized escalation
-      const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities);
+      const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities, undefined, sessionId);
       if (task) {
         socket.send(JSON.stringify({
           type: 'TASK_ASSIGNED',
@@ -263,7 +281,7 @@ export class ConnectionManager {
 
     if (msg.type === 'TASK_ACK') {
       const task = this.taskStore.getTask(msg.taskId);
-      if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+      if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease.claimedSessionId !== sessionId) {
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
@@ -280,14 +298,14 @@ export class ConnectionManager {
         }));
         return;
       }
-      this.taskStore.acknowledgeTask(msg.taskId, authenticatedDeviceId);
+      this.taskStore.acknowledgeTask(msg.taskId, authenticatedDeviceId, sessionId);
       return;
     }
 
     if (msg.type === 'TASK_PROGRESS') {
       const task = this.taskStore.getTask(msg.taskId);
-      if (task && task.lease?.claimedBy === authenticatedDeviceId) {
-        this.taskStore.startTask(msg.taskId, authenticatedDeviceId);
+      if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === sessionId) {
+        this.taskStore.startTask(msg.taskId, authenticatedDeviceId, sessionId);
         this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
       }
       return;
@@ -295,7 +313,7 @@ export class ConnectionManager {
 
     if (msg.type === 'TASK_LOG_APPEND') {
       const task = this.taskStore.getTask(msg.taskId);
-      if (task && task.lease?.claimedBy === authenticatedDeviceId) {
+      if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === sessionId) {
         this.taskStore.appendLogs(msg.taskId, msg.lines);
       }
       return;
@@ -303,7 +321,7 @@ export class ConnectionManager {
 
     if (msg.type === 'TASK_COMPLETE') {
       const task = this.taskStore.getTask(msg.taskId);
-      if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+      if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease.claimedSessionId !== sessionId) {
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
@@ -320,7 +338,7 @@ export class ConnectionManager {
         }));
         return;
       }
-      this.taskStore.completeTask(msg.taskId, msg.result);
+      this.taskStore.completeTask(msg.taskId, msg.result, authenticatedDeviceId, sessionId);
       this.auditLogger.log({
         actor: authenticatedDeviceId,
         actorType: 'device',
@@ -333,7 +351,7 @@ export class ConnectionManager {
 
     if (msg.type === 'TASK_FAIL') {
       const task = this.taskStore.getTask(msg.taskId);
-      if (!task || task.lease?.claimedBy !== authenticatedDeviceId) {
+      if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease.claimedSessionId !== sessionId) {
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
@@ -350,7 +368,7 @@ export class ConnectionManager {
         }));
         return;
       }
-      this.taskStore.failTask(msg.taskId, msg.error, { retryable: msg.retryable ?? false });
+      this.taskStore.failTask(msg.taskId, msg.error, { retryable: msg.retryable ?? false, deviceId: authenticatedDeviceId, sessionId });
       this.auditLogger.log({
         actor: authenticatedDeviceId,
         actorType: 'device',
@@ -367,7 +385,7 @@ export class ConnectionManager {
     const all = Array.from(this.sockets.values());
     if (!options?.healthyOnly) return all;
     const now = Date.now();
-    return all.filter(a => isSessionHealthy(a, now));
+    return all.filter(a => this.agents.get(a.deviceId)?.sessionId === a.sessionId && a.socket.readyState === WebSocket.OPEN && !this.killSwitch.isDeviceRevoked(a.deviceId) && this.authManager.getDevice(a.deviceId)?.status !== 'revoked' && isSessionHealthy(a, now));
   }
 
   public getAgent(deviceId: string): ConnectedAgent | undefined {
