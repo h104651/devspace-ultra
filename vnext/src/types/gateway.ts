@@ -16,6 +16,7 @@ export interface AgentRegisteredMessage {
   messageId: string;
   timestamp: number;
   deviceId: string;
+  sessionId?: string;
 }
 
 export interface AgentHeartbeatMessage {

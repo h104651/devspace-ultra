@@ -61,11 +61,23 @@ async function main() {
   agent.start();
   console.log('[AGENT] Local Agent connected outbound. Waiting for tasks...');
 
-  process.on('SIGINT', () => {
-    console.log('\n[AGENT] Stopping Local Agent...');
-    agent.stop();
-    process.exit(0);
-  });
+  let isTerminating = false;
+  const handleShutdown = async (signal: string) => {
+    if (isTerminating) return;
+    isTerminating = true;
+    console.log(`\n[AGENT] Received ${signal}, stopping agent gracefully...`);
+    try {
+      await agent.stop({ timeoutMs: 3000 });
+      console.log('[AGENT] Agent stopped cleanly.');
+    } catch (err) {
+      console.error('[AGENT] Error during shutdown:', err);
+    } finally {
+      process.exit(0);
+    }
+  };
+
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 }
 
 main().catch((err) => {

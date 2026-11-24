@@ -219,6 +219,17 @@ class CloudflareSqliteStorageAdapter {
     async saveDevice(device) {
         this.sql.exec(`INSERT OR REPLACE INTO devices (deviceId, name, platform, status, capabilitiesJson, registeredAt, lastConnectedAt, lastHeartbeatAt, revokedAt, revocationReason, tokenHash, ip, activeTokenId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, device.deviceId, device.name, device.platform, device.status, JSON.stringify(device.capabilities), device.registeredAt, device.lastConnectedAt || null, device.lastHeartbeatAt || null, device.revokedAt || null, device.revocationReason || null, device.tokenHash, device.ip || null, device.activeTokenId || null);
     }
+    async updateDeviceHeartbeat(deviceId, heartbeatAt) {
+        this.sql.exec('UPDATE devices SET lastHeartbeatAt = MAX(COALESCE(lastHeartbeatAt, 0), ?) WHERE deviceId = ?', heartbeatAt, deviceId);
+    }
+    async updateDeviceStatus(deviceId, status, lastConnectedAt) {
+        if (lastConnectedAt) {
+            this.sql.exec('UPDATE devices SET status = ?, lastConnectedAt = ? WHERE deviceId = ?', status, lastConnectedAt, deviceId);
+        }
+        else {
+            this.sql.exec('UPDATE devices SET status = ? WHERE deviceId = ?', status, deviceId);
+        }
+    }
     async listDevices() { return this.sql.exec('SELECT * FROM devices').toArray().map(r => this.rowToDevice(r)); }
     rowToDevice(r) {
         return { deviceId: r.deviceId, name: r.name, platform: r.platform, status: r.status, capabilities: JSON.parse(r.capabilitiesJson), registeredAt: r.registeredAt, lastConnectedAt: r.lastConnectedAt || undefined, lastHeartbeatAt: r.lastHeartbeatAt || undefined, revokedAt: r.revokedAt || undefined, revocationReason: r.revocationReason || undefined, tokenHash: r.tokenHash, ip: r.ip || undefined, activeTokenId: r.activeTokenId || undefined };

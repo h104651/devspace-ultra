@@ -29,6 +29,7 @@ export class LocalAgentClient {
   private rejectedExecutorConfigRevision?: string;
   private ws?: WebSocket;
   private isRunning = false;
+  private isStopping = false;
   private reconnectTimeout?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
   private pollTimer?: NodeJS.Timeout;
@@ -57,15 +58,59 @@ export class LocalAgentClient {
     this.connect();
   }
 
-  public stop(): void {
+  public async stop(options?: { timeoutMs?: number }): Promise<void> {
+    if (this.isStopping) return;
+    this.isStopping = true;
     this.isRunning = false;
-    if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    if (this.ws) {
-      this.ws.close();
-      this.ws = undefined;
+
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = undefined;
     }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = undefined;
+    }
+
+    // Await bounded completion of in-flight active tasks if any
+    const timeout = options?.timeoutMs ?? 2000;
+    const start = Date.now();
+    while (this.activeTasks.size > 0 && Date.now() - start < timeout) {
+      await new Promise(res => setTimeout(res, 50));
+    }
+
+    // Orderly WebSocket close handshake
+    if (this.ws) {
+      const socket = this.ws;
+      this.ws = undefined;
+      if (socket.readyState === WebSocket.OPEN) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            try {
+              if (typeof (socket as any).terminate === 'function') (socket as any).terminate();
+            } catch {}
+            resolve();
+          }, Math.min(timeout, 1500));
+
+          socket.once('close', () => {
+            clearTimeout(timer);
+            resolve();
+          });
+
+          try {
+            socket.close(1000, 'Agent shutting down gracefully');
+          } catch {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+      }
+    }
+    this.isStopping = false;
   }
 
   /**

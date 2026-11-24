@@ -214,6 +214,16 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       device.deviceId, device.name, device.platform, device.status, JSON.stringify(device.capabilities), device.registeredAt,
       device.lastConnectedAt || null, device.lastHeartbeatAt || null, device.revokedAt || null, device.revocationReason || null, device.tokenHash, device.ip || null, device.activeTokenId || null);
   }
+  async updateDeviceHeartbeat(deviceId: string, heartbeatAt: number): Promise<void> {
+    this.sql.exec('UPDATE devices SET lastHeartbeatAt = MAX(COALESCE(lastHeartbeatAt, 0), ?) WHERE deviceId = ?', heartbeatAt, deviceId);
+  }
+  async updateDeviceStatus(deviceId: string, status: string, lastConnectedAt?: number): Promise<void> {
+    if (lastConnectedAt) {
+      this.sql.exec('UPDATE devices SET status = ?, lastConnectedAt = ? WHERE deviceId = ?', status, lastConnectedAt, deviceId);
+    } else {
+      this.sql.exec('UPDATE devices SET status = ? WHERE deviceId = ?', status, deviceId);
+    }
+  }
   async listDevices(): Promise<DeviceRecord[]> { return this.sql.exec('SELECT * FROM devices').toArray().map(r => this.rowToDevice(r)); }
   private rowToDevice(r: any): DeviceRecord {
     return { deviceId: r.deviceId, name: r.name, platform: r.platform, status: r.status, capabilities: JSON.parse(r.capabilitiesJson), registeredAt: r.registeredAt, lastConnectedAt: r.lastConnectedAt || undefined, lastHeartbeatAt: r.lastHeartbeatAt || undefined, revokedAt: r.revokedAt || undefined, revocationReason: r.revocationReason || undefined, tokenHash: r.tokenHash, ip: r.ip || undefined, activeTokenId: r.activeTokenId || undefined };

@@ -52,6 +52,36 @@ class MockSqlStorage implements SqlStorage {
       return { toArray: () => [], one: () => null, raw: () => [] };
     }
 
+    if (q.startsWith('UPDATE')) {
+      const match = query.match(/UPDATE\s+([a-zA-Z0-9_]+)/i);
+      if (match && match[1] === 'devices') {
+        const table = this.tables.get('devices');
+        if (table) {
+          if (query.includes('lastHeartbeatAt')) {
+            const [hb, devId] = params;
+            const row = table.get(String(devId));
+            if (row) {
+              row[7] = Math.max(Number(row[7]) || 0, Number(hb));
+            }
+          } else if (query.includes('lastConnectedAt')) {
+            const [status, connAt, devId] = params;
+            const row = table.get(String(devId));
+            if (row) {
+              row[3] = status;
+              row[6] = connAt;
+            }
+          } else if (query.includes('status')) {
+            const [status, devId] = params;
+            const row = table.get(String(devId));
+            if (row) {
+              row[3] = status;
+            }
+          }
+        }
+      }
+      return { toArray: () => [], one: () => null, raw: () => [] };
+    }
+
     if (q.startsWith('SELECT')) {
       const match = query.match(/FROM\s+([a-zA-Z0-9_]+)/i);
       if (!match) return { toArray: () => [], one: () => null, raw: () => [] };

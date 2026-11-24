@@ -1,9 +1,44 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ConnectionManager = void 0;
+const crypto = __importStar(require("crypto"));
 const ws_1 = require("ws");
 const scope_checker_1 = require("../security/scope-checker");
 const capabilities_1 = require("../local-agent/capabilities");
+const connection_health_policy_1 = require("./connection-health-policy");
 class ConnectionManager {
     agents = new Map();
     sockets = new Map();
@@ -37,21 +72,27 @@ class ConnectionManager {
             }
         });
         socket.on('close', () => {
+            const closedAgent = this.sockets.get(socket);
             this.sockets.delete(socket);
             if (authenticatedDeviceId) {
-                const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
-                if (remaining.length === 0) {
-                    this.agents.delete(authenticatedDeviceId);
-                    this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
-                }
-                else {
-                    this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
+                const active = this.agents.get(authenticatedDeviceId);
+                // Fencing: Only update device offline status if the closing socket matches the active session
+                if (!active || (closedAgent && active.sessionId === closedAgent.sessionId)) {
+                    const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
+                    if (remaining.length === 0) {
+                        this.agents.delete(authenticatedDeviceId);
+                        this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+                    }
+                    else {
+                        this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
+                    }
                 }
                 this.auditLogger.log({
                     actor: authenticatedDeviceId,
                     actorType: 'device',
                     action: 'AGENT_DISCONNECT',
                     result: 'SUCCESS',
+                    details: { sessionId: closedAgent?.sessionId },
                     ip
                 });
             }
@@ -100,8 +141,28 @@ class ConnectionManager {
                 const requiredScope = scope_checker_1.ScopeChecker.getRequiredScopeForCapability(cap);
                 return scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, requiredScope);
             });
+            // Evict any prior connection for this device ID to maintain single active session
+            const oldAgent = this.agents.get(authoritativeDeviceId);
+            if (oldAgent && oldAgent.socket !== socket) {
+                try {
+                    oldAgent.socket.close(1008, 'Superseded by new registration');
+                }
+                catch { }
+                this.sockets.delete(oldAgent.socket);
+                this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, oldAgent.sessionId, 'New registration superseded session');
+                this.auditLogger.log({
+                    actor: authoritativeDeviceId,
+                    actorType: 'device',
+                    action: 'AGENT_SESSION_SUPERSEDED',
+                    result: 'SUCCESS',
+                    details: { oldSessionId: oldAgent.sessionId, reason: 'Duplicate registration' },
+                    ip
+                });
+            }
+            const sessionId = crypto.randomUUID();
             setDeviceId(authoritativeDeviceId);
             const agent = {
+                sessionId,
                 deviceId: authoritativeDeviceId,
                 name: msg.name || authoritativeDeviceId,
                 platform: msg.platform || 'windows',
@@ -128,7 +189,8 @@ class ConnectionManager {
                 type: 'AGENT_REGISTERED',
                 messageId: msg.messageId,
                 timestamp: Date.now(),
-                deviceId: authoritativeDeviceId
+                deviceId: authoritativeDeviceId,
+                sessionId
             }));
             return;
         }
@@ -286,8 +348,12 @@ class ConnectionManager {
             return;
         }
     }
-    getConnectedAgents() {
-        return Array.from(this.sockets.values());
+    getConnectedAgents(options) {
+        const all = Array.from(this.sockets.values());
+        if (!options?.healthyOnly)
+            return all;
+        const now = Date.now();
+        return all.filter(a => (0, connection_health_policy_1.isSessionHealthy)(a, now));
     }
     getAgent(deviceId) {
         return this.agents.get(deviceId);

@@ -18,10 +18,24 @@ export const LOCAL_EXECUTABLE_CAPABILITIES = [
   'local:raw_shell'
 ] as const;
 
+export const SIDE_EFFECT_CAPABILITIES = [
+  'local:write_file',
+  'local:patch_file',
+  'local:create_directory',
+  'local:run_tests',
+  'local:build_project',
+  'local:raw_shell'
+] as const;
+
 export type LocalExecutableCapability = typeof LOCAL_EXECUTABLE_CAPABILITIES[number];
+export type SideEffectCapability = typeof SIDE_EFFECT_CAPABILITIES[number];
 
 export function isLocalExecutableCapability(capability: string): capability is LocalExecutableCapability {
   return (LOCAL_EXECUTABLE_CAPABILITIES as readonly string[]).includes(capability);
+}
+
+export function isSideEffectCapability(capability: string): capability is SideEffectCapability {
+  return (SIDE_EFFECT_CAPABILITIES as readonly string[]).includes(capability);
 }
 
 export function getRequiredScopeForLocalCapability(capability: string): StandardScope {

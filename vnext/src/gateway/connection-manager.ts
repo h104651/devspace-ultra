@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { WebSocket } from 'ws';
 import { AuthManager } from '../security/auth-manager';
 import { KillSwitch } from '../security/kill-switch';
@@ -6,8 +7,10 @@ import { ScopeChecker } from '../security/scope-checker';
 import { isLocalExecutableCapability, LOCAL_EXECUTABLE_CAPABILITIES } from '../local-agent/capabilities';
 import { TaskStore } from '../storage/task-store';
 import { GatewayMessage } from '../types/gateway';
+import { isSessionHealthy } from './connection-health-policy';
 
 export interface ConnectedAgent {
+  sessionId: string;
   deviceId: string;
   name: string;
   platform: string;
@@ -59,20 +62,26 @@ export class ConnectionManager {
     });
 
     socket.on('close', () => {
+      const closedAgent = this.sockets.get(socket);
       this.sockets.delete(socket);
       if (authenticatedDeviceId) {
-        const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
-        if (remaining.length === 0) {
-          this.agents.delete(authenticatedDeviceId);
-          this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
-        } else {
-          this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
+        const active = this.agents.get(authenticatedDeviceId);
+        // Fencing: Only update device offline status if the closing socket matches the active session
+        if (!active || (closedAgent && active.sessionId === closedAgent.sessionId)) {
+          const remaining = Array.from(this.sockets.values()).filter(a => a.deviceId === authenticatedDeviceId);
+          if (remaining.length === 0) {
+            this.agents.delete(authenticatedDeviceId);
+            this.authManager.updateDeviceStatus(authenticatedDeviceId, 'offline');
+          } else {
+            this.agents.set(authenticatedDeviceId, remaining[remaining.length - 1]);
+          }
         }
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
           action: 'AGENT_DISCONNECT',
           result: 'SUCCESS',
+          details: { sessionId: closedAgent?.sessionId },
           ip
         });
       }
@@ -133,8 +142,28 @@ export class ConnectionManager {
         return ScopeChecker.hasScope(auth.payload!.scopes, requiredScope);
       });
 
+      // Evict any prior connection for this device ID to maintain single active session
+      const oldAgent = this.agents.get(authoritativeDeviceId);
+      if (oldAgent && oldAgent.socket !== socket) {
+        try {
+          oldAgent.socket.close(1008, 'Superseded by new registration');
+        } catch {}
+        this.sockets.delete(oldAgent.socket);
+        this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, oldAgent.sessionId, 'New registration superseded session');
+        this.auditLogger.log({
+          actor: authoritativeDeviceId,
+          actorType: 'device',
+          action: 'AGENT_SESSION_SUPERSEDED',
+          result: 'SUCCESS',
+          details: { oldSessionId: oldAgent.sessionId, reason: 'Duplicate registration' },
+          ip
+        });
+      }
+
+      const sessionId = crypto.randomUUID();
       setDeviceId(authoritativeDeviceId);
       const agent: ConnectedAgent = {
+        sessionId,
         deviceId: authoritativeDeviceId,
         name: msg.name || authoritativeDeviceId,
         platform: msg.platform || 'windows',
@@ -163,7 +192,8 @@ export class ConnectionManager {
         type: 'AGENT_REGISTERED',
         messageId: msg.messageId,
         timestamp: Date.now(),
-        deviceId: authoritativeDeviceId
+        deviceId: authoritativeDeviceId,
+        sessionId
       }));
       return;
     }
@@ -333,8 +363,11 @@ export class ConnectionManager {
     }
   }
 
-  public getConnectedAgents(): ConnectedAgent[] {
-    return Array.from(this.sockets.values());
+  public getConnectedAgents(options?: { healthyOnly?: boolean }): ConnectedAgent[] {
+    const all = Array.from(this.sockets.values());
+    if (!options?.healthyOnly) return all;
+    const now = Date.now();
+    return all.filter(a => isSessionHealthy(a, now));
   }
 
   public getAgent(deviceId: string): ConnectedAgent | undefined {
