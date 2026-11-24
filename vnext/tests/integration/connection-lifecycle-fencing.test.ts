@@ -361,7 +361,7 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
   }
 
   // =========================================================================
-  // T07: 相同 Device ID 重複註冊 (Duplicate registration evicts old socket)
+  // T07: 相同 Device ID 重複註冊 (Healthy incumbent remains authoritative)
   // =========================================================================
   try {
     const { gateway, webSockets } = setupTestDO();
@@ -388,12 +388,10 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
       deviceId,
       capabilities: ['local:read_file']
     }));
-    const s2Id = ws2.sentMessages[0].sessionId;
-
-    assert.notStrictEqual(s1Id, s2Id, 'New session must have new sessionId');
-    assert.strictEqual(ws1.closed, true, 'Old socket must be closed on new registration');
-    assert.strictEqual(ws1.closeCode, 1008);
-    assert.strictEqual(ws2.closed, false, 'New socket must remain open');
+    assert.strictEqual(ws1.closed, false, 'Healthy incumbent must not be evicted');
+    assert.strictEqual(ws2.closed, true, 'Duplicate newcomer must be rejected');
+    assert.strictEqual(ws2.closeCode, 1008);
+    assert.strictEqual((gateway as any).getActiveSession(deviceId)?.sessionId, s1Id);
     passed++;
   } catch (err: any) {
     console.error('T07 FAILED:', err);
@@ -416,6 +414,11 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
       deviceId,
       capabilities: ['local:read_file']
     }));
+
+    // Expire the incumbent without closing the underlying edge socket.
+    const staleAttachment = ws1.deserializeAttachment();
+    staleAttachment.lastHeartbeatAt = Date.now() - HEARTBEAT_TTL_MS - 1000;
+    ws1.serializeAttachment(staleAttachment);
 
     const ws2 = new MockDOWebSocket();
     webSockets.push(ws2);
@@ -455,6 +458,11 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
       deviceId,
       capabilities: ['local:read_file']
     }));
+
+    // Expire the incumbent without closing the underlying edge socket.
+    const staleAttachment = ws1.deserializeAttachment();
+    staleAttachment.lastHeartbeatAt = Date.now() - HEARTBEAT_TTL_MS - 1000;
+    ws1.serializeAttachment(staleAttachment);
 
     const ws2 = new MockDOWebSocket();
     webSockets.push(ws2);
@@ -524,6 +532,11 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
       capabilities: ['local:read_file']
     }));
 
+    // Expire the incumbent without closing the underlying edge socket.
+    const staleAttachment = ws1.deserializeAttachment();
+    staleAttachment.lastHeartbeatAt = Date.now() - HEARTBEAT_TTL_MS - 1000;
+    ws1.serializeAttachment(staleAttachment);
+
     const ws2 = new MockDOWebSocket();
     webSockets.push(ws2);
     await gateway.webSocketMessage(ws2 as any, JSON.stringify({
@@ -577,6 +590,11 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
       deviceId,
       capabilities: ['local:read_file']
     }));
+
+    // Expire the incumbent without closing the underlying edge socket.
+    const staleAttachment = ws1.deserializeAttachment();
+    staleAttachment.lastHeartbeatAt = Date.now() - HEARTBEAT_TTL_MS - 1000;
+    ws1.serializeAttachment(staleAttachment);
 
     const ws2 = new MockDOWebSocket();
     webSockets.push(ws2);
@@ -968,6 +986,39 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
     console.error('T24 FAILED:', err);
     failed++;
   }
+
+  // R06/R07: an assignment may already have side effects even if ACK/RUNNING is lost.
+  try {
+    for (const stage of ['claimed', 'acknowledged', 'running'] as const) {
+      const store = new TaskStore();
+      const task = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: 'mutation-dev', payload: {}, maxRetries: 3 });
+      store.claimTaskById(task.taskId, 'mutation-dev', 1, 'session-a');
+      if (stage !== 'claimed') store.acknowledgeTask(task.taskId, 'mutation-dev', 'session-a');
+      if (stage === 'running') store.startTask(task.taskId, 'mutation-dev', 'session-a');
+      task.lease!.leaseExpiresAt = Date.now() - 1000;
+      store.recoverStaleTasks();
+      assert.strictEqual(task.status, 'stale', stage);
+      assert.strictEqual(task.error?.code, 'MUTATION_UNCERTAIN_ON_STALE', stage);
+    }
+    passed++;
+  } catch (err) { console.error('R06/R07 FAILED:', err); failed++; }
+
+  // R04: old attempt ID cannot be accepted through a fresh authenticated session.
+  try {
+    const store = new TaskStore();
+    const task = store.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'attempt-dev', payload: {} });
+    store.claimTaskById(task.taskId, 'attempt-dev', undefined, 'session-a');
+    const oldAttempt = task.activeAttemptId;
+    assert.ok(oldAttempt);
+    store.failTasksForSupersededSession('attempt-dev', 'session-a');
+    assert.strictEqual(store.claimTask('attempt-dev', ['local:read_file'], undefined, 'legacy', false), undefined);
+    store.claimTask('attempt-dev', ['local:read_file'], undefined, 'session-b', true);
+    assert.ok(task.activeAttemptId && task.activeAttemptId !== oldAttempt);
+    assert.strictEqual(store.ownsLocalAttempt(task.taskId, 'attempt-dev', 'session-b', oldAttempt, true), false);
+    assert.strictEqual(store.ownsLocalAttempt(task.taskId, 'attempt-dev', 'session-b', undefined, true), false);
+    assert.strictEqual(store.ownsLocalAttempt(task.taskId, 'attempt-dev', 'session-b', task.activeAttemptId, true), true);
+    passed++;
+  } catch (err) { console.error('R04 FAILED:', err); failed++; }
 
   console.log(`Connection Lifecycle & Session Fencing Tests: ${passed} passed, ${failed} failed\n`);
   return { passed, failed };
