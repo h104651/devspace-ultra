@@ -11,6 +11,7 @@ import { isSessionHealthy } from './connection-health-policy';
 
 export interface ConnectedAgent {
   sessionId: string;
+  supportsAttemptFencing?: boolean;
   deviceId: string;
   name: string;
   platform: string;
@@ -174,6 +175,7 @@ export class ConnectionManager {
       setDeviceId(authoritativeDeviceId);
       const agent: ConnectedAgent = {
         sessionId,
+        supportsAttemptFencing: msg.supportsAttemptFencing === true,
         deviceId: authoritativeDeviceId,
         name: msg.name || authoritativeDeviceId,
         platform: msg.platform || 'windows',
@@ -229,6 +231,8 @@ export class ConnectionManager {
       return;
     }
     const sessionId = agent.sessionId;
+    const supportsAttemptFencing = agent.supportsAttemptFencing === true;
+    const ownsAttempt = (taskId: string, attemptId?: string) => this.taskStore.ownsLocalAttempt(taskId, authenticatedDeviceId, sessionId, attemptId, supportsAttemptFencing);
 
     if (this.killSwitch.isDeviceRevoked(authenticatedDeviceId) || this.authManager.getDevice(authenticatedDeviceId)?.status === 'revoked') {
       socket.send(JSON.stringify({
@@ -250,8 +254,8 @@ export class ConnectionManager {
       // Renew lease for all owned active tasks
       if (msg.activeTaskIds && Array.isArray(msg.activeTaskIds)) {
         for (const tid of msg.activeTaskIds) {
-          const task = this.taskStore.getTask(tid);
-          if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === sessionId) {
+          const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
+          if (ownsAttempt(tid, attemptId)) {
             this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, sessionId);
           }
         }
@@ -267,7 +271,7 @@ export class ConnectionManager {
 
     if (msg.type === 'TASK_CLAIM_POLL') {
       // Use strictly the agent's authorized capabilities, ignoring unauthorized escalation
-      const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities, undefined, sessionId);
+      const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities, undefined, sessionId, supportsAttemptFencing);
       if (task) {
         socket.send(JSON.stringify({
           type: 'TASK_ASSIGNED',
@@ -280,8 +284,7 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'TASK_ACK') {
-      const task = this.taskStore.getTask(msg.taskId);
-      if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease.claimedSessionId !== sessionId) {
+      if (!ownsAttempt(msg.taskId, msg.attemptId)) {
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
@@ -303,8 +306,7 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'TASK_PROGRESS') {
-      const task = this.taskStore.getTask(msg.taskId);
-      if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === sessionId) {
+      if (ownsAttempt(msg.taskId, msg.attemptId)) {
         this.taskStore.startTask(msg.taskId, authenticatedDeviceId, sessionId);
         this.taskStore.appendLogs(msg.taskId, [`[PROGRESS] ${msg.stage} ${msg.percent !== undefined ? msg.percent + '%' : ''}`]);
       }
@@ -312,16 +314,14 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'TASK_LOG_APPEND') {
-      const task = this.taskStore.getTask(msg.taskId);
-      if (task && task.lease?.claimedBy === authenticatedDeviceId && task.lease.claimedSessionId === sessionId) {
+      if (ownsAttempt(msg.taskId, msg.attemptId)) {
         this.taskStore.appendLogs(msg.taskId, msg.lines);
       }
       return;
     }
 
     if (msg.type === 'TASK_COMPLETE') {
-      const task = this.taskStore.getTask(msg.taskId);
-      if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease.claimedSessionId !== sessionId) {
+      if (!ownsAttempt(msg.taskId, msg.attemptId)) {
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
@@ -350,8 +350,7 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'TASK_FAIL') {
-      const task = this.taskStore.getTask(msg.taskId);
-      if (!task || task.lease?.claimedBy !== authenticatedDeviceId || task.lease.claimedSessionId !== sessionId) {
+      if (!ownsAttempt(msg.taskId, msg.attemptId)) {
         this.auditLogger.log({
           actor: authenticatedDeviceId,
           actorType: 'device',
