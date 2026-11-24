@@ -246,7 +246,8 @@ export class LocalAgentClient {
       name: this.config.name || `Local-Agent-${probe.hostname}`,
       platform: probe.platform,
       capabilities: probe.capabilities,
-      token: this.config.token
+      token: this.config.token,
+      supportsAttemptFencing: true
     });
   }
 
@@ -259,7 +260,10 @@ export class LocalAgentClient {
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
         deviceId: this.config.deviceId,
-        activeTaskIds: Array.from(this.activeTasks.keys()).filter(id => this.taskSockets.get(id) === this.ws)
+        activeTaskIds: Array.from(this.activeTasks.keys()).filter(id => this.taskSockets.get(id) === this.ws),
+        activeTaskAttempts: Array.from(this.activeTasks.values())
+          .filter(task => this.taskSockets.get(task.taskId) === this.ws && !!task.activeAttemptId)
+          .map(task => ({ taskId: task.taskId, attemptId: task.activeAttemptId! }))
       });
     }, this.config.heartbeatIntervalMs);
   }
