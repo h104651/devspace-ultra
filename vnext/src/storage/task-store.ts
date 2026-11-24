@@ -611,7 +611,8 @@ export class TaskStore {
     if (options?.sessionId && task.lease?.claimedSessionId && task.lease.claimedSessionId !== options.sessionId) return false;
 
     this.finishActiveAttempt(task, 'failed', error);
-    const isRetryable = options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
+    const isRetryable = !(task.backend === 'local' && isSideEffectCapability(task.capability)) &&
+      options?.retryable !== false && task.retryPolicy.retryCount < task.retryPolicy.maxRetries;
 
     if (isRetryable) {
       task.retryPolicy.retryCount++;
@@ -670,6 +671,7 @@ export class TaskStore {
             code: 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN',
             message: `${reason}: Task execution interrupted while side effects may have been applied. Manual recovery required.`
           };
+          task.completedAt = Date.now();
           task.lease = undefined;
           this.saveTask(task);
           count++;
@@ -753,13 +755,13 @@ export class TaskStore {
           message: `Task lease expired without heartbeat or completion from worker ${claimedBy}`
         });
 
-        const wasRunning = task.status === 'running';
-        if (wasRunning && isSideEffectCapability(task.capability)) {
-          // Mutating task was interrupted while actively running: fail closed to prevent uncontrolled duplicate execution
+        if (task.backend === 'local' && isSideEffectCapability(task.capability)) {
+          // Dispatch may have reached the executor before ACK or RUNNING was persisted.
+          // No automatic replay of a potentially applied local mutation.
           task.status = 'stale';
           task.error = {
             code: 'MUTATION_UNCERTAIN_ON_STALE',
-            message: `Task lease expired while running mutating capability '${task.capability}'. Manual recovery required.`
+            message: `Task lease expired after dispatch of mutating capability '${task.capability}'. Manual recovery required.`
           };
           task.completedAt = now;
           task.lease = undefined;
