@@ -347,7 +347,8 @@ export class TaskStore {
     deviceId: string,
     supportedCapabilities: string[],
     leaseDurationMs?: number,
-    sessionId?: string
+    sessionId?: string,
+    supportsAttemptFencing = true
   ): DurableTask | undefined {
     this.recoverStaleTasks();
 
@@ -357,6 +358,8 @@ export class TaskStore {
         if (!supportedCapabilities.includes(t.capability)) return false;
         if (t.backend === 'local') {
           if (!t.targetDeviceId || t.targetDeviceId !== deviceId) return false;
+          // Legacy wire clients cannot distinguish multiple executions of one task.
+          if (!supportsAttemptFencing && (t.attempts?.length || 0) > 0) return false;
         }
         return true;
       })
@@ -467,6 +470,16 @@ export class TaskStore {
       }
     }
     return { assigned, taskIds: assignedTaskIds };
+  }
+
+  public ownsLocalAttempt(taskId: string, deviceId: string, sessionId: string, attemptId: string | undefined, supportsAttemptFencing: boolean): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task || task.backend !== 'local' || !task.lease || task.lease.claimedBy !== deviceId ||
+        task.lease.claimedSessionId !== sessionId || !task.activeAttemptId ||
+        !['claimed', 'acknowledged', 'running'].includes(task.status)) return false;
+    if (supportsAttemptFencing || attemptId !== undefined) return attemptId === task.activeAttemptId;
+    // Legacy wire messages are safe only on a first, non-replayed execution.
+    return (task.attempts?.length || 0) === 1;
   }
 
   public acknowledgeTask(taskId: string, deviceId: string, sessionId?: string): boolean {
