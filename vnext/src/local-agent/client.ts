@@ -55,6 +55,10 @@ export class LocalAgentClient {
     this.executorConfigRevision = this.computeExecutorConfigRevision();
   }
 
+  public hasInFlightTasks(): boolean {
+    return this.activeTasks.size > 0;
+  }
+
   public start(): void {
     if (this.isRunning || this.isStopping || this.activeTasks.size > 0) return;
     this.isRunning = true;
@@ -291,7 +295,7 @@ export class LocalAgentClient {
       return;
     }
     if (msg.type === 'TASK_ASSIGNED') {
-      if (!this.isRunning || this.isStopping || this.registeredSocket !== socket || this.activeTasks.has(msg.task.taskId)) return;
+      if (!this.isRunning || this.isStopping || this.registeredSocket !== socket || this.activeTasks.size > 0) return;
       const task = msg.task;
       if (task.targetDeviceId && task.targetDeviceId !== this.config.deviceId) {
         console.warn(`[AGENT] Task '${task.taskId}' was targeted to '${task.targetDeviceId}', but this agent is '${this.config.deviceId}'. Ignoring misrouted task.`);
