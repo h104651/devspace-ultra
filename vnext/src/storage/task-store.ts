@@ -47,8 +47,13 @@ export class TaskStore {
           fs.mkdirSync(this.tasksDir, { recursive: true });
         }
         this.loadAll();
-      } catch {}
+      } catch { this.blockLocalDispatch(); }
     }
+  }
+
+  /** Fail closed after an unreadable or unconfirmed durable task state. */
+  public blockLocalDispatch(): void {
+    this.localPersistenceFailed = true;
   }
 
   public hydrate(tasks: DurableTask[]): void {
@@ -74,11 +79,13 @@ export class TaskStore {
             this.normalizeLogEntries(task);
             this.tasks.set(task.taskId, task);
           } catch (err) {
+            this.blockLocalDispatch();
             console.error(`Failed to load task file ${file}:`, err);
           }
         }
       }
     } catch (err) {
+      this.blockLocalDispatch();
       console.error('Failed to read tasks directory:', err);
     }
   }
