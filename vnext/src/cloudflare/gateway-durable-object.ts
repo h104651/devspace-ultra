@@ -278,13 +278,11 @@ export class GatewayDurableObject {
   private getActiveSession(deviceId: string): AgentSessionInfo | undefined {
     const authoritativeId = this.sessionAuthority.get(deviceId);
     if (!authoritativeId) return undefined;
-    const cached = this.activeSessions.get(deviceId);
     const sockets = this.ctx.getWebSockets ? this.ctx.getWebSockets() : [];
     for (const ws of sockets) {
       if (ws.readyState !== undefined && ws.readyState !== 1) continue;
       const att = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) as AgentSessionAttachment | null;
       if (!att || att.deviceId !== deviceId || att.sessionId !== authoritativeId) continue;
-      if (cached && cached.sessionId === authoritativeId && cached.socket === ws) return cached;
       const session = { ...att, socket: ws };
       this.activeSessions.set(deviceId, session);
       return session;
@@ -317,7 +315,8 @@ export class GatewayDurableObject {
     }
 
     const earliest = Math.min(...candidates);
-    await this.ctx.storage.setAlarm(Math.max(Date.now() + 1000, earliest));
+    // Preserve the already due deadline; an unrelated rearm must not postpone it.
+    await this.ctx.storage.setAlarm(Math.max(Date.now(), earliest));
   }
 
   private async runWatchdogStaleEviction(now = Date.now()): Promise<void> {
@@ -341,6 +340,10 @@ export class GatewayDurableObject {
     const now = Date.now();
     const polls = await this.readPendingKagglePolls();
     const due = Object.values(polls).filter(item => item.dueAt <= now + 250);
+    if (this.watchdogDueAt !== undefined && this.watchdogDueAt <= now) {
+      this.watchdogDueAt = undefined;
+      await this.runWatchdogStaleEviction(now);
+    }
 
     for (const item of due) {
       try {
@@ -357,10 +360,6 @@ export class GatewayDurableObject {
     }
 
     await this.writePendingKagglePolls(polls);
-    if (this.watchdogDueAt !== undefined && this.watchdogDueAt <= Date.now()) {
-      this.watchdogDueAt = undefined;
-      await this.runWatchdogStaleEviction(Date.now());
-    }
     await this.rearmUnifiedAlarm(polls);
   }
 
@@ -759,7 +758,10 @@ export class GatewayDurableObject {
           } : undefined,
           kaggleConfigured: this.kaggleHttpClient.hasCredentials(),
           version: '2.0.1',
-          connectedAgents: this.ctx.getWebSockets().length,
+          connectedAgents: Array.from(this.sessionAuthority.keys()).filter(id => {
+            const session = this.getActiveSession(id);
+            return !!session && isSessionHealthy(session) && !this.killSwitch.isDeviceRevoked(id) && this.authManager.getDevice(id)?.status !== 'revoked';
+          }).length,
           killSwitch: this.killSwitch.getState().globalEmergencyStop ? 'EMERGENCY_STOP' : 'ACTIVE'
         });
       }
