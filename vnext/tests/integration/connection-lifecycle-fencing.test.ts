@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { GatewayDurableObject } from '../../src/cloudflare/gateway-durable-object';
 import { CloudflareSqliteStorageAdapter, SqlStorage } from '../../src/cloudflare/sqlite-storage-adapter';
 import { CloudflareR2ArtifactStorage, R2Bucket } from '../../src/cloudflare/r2-artifact-storage';
@@ -22,6 +23,7 @@ import { isSideEffectCapability } from '../../src/local-agent/capabilities';
 // In-memory SQLite Mock for DO testing
 class MockSqlStorage implements SqlStorage {
   public tables: Map<string, Map<string, any>> = new Map();
+  public failTaskWrites = false;
 
   private mapTask(row: any[]) {
     return {
@@ -47,6 +49,7 @@ class MockSqlStorage implements SqlStorage {
       const match = query.match(/INTO\s+([a-zA-Z0-9_]+)/i);
       if (match) {
         const tableName = match[1];
+        if (tableName.toLowerCase() === 'tasks' && this.failTaskWrites) throw new Error('Injected SQLite task write failure');
         if (!this.tables.has(tableName)) this.tables.set(tableName, new Map());
         this.tables.get(tableName)!.set(String(params[0]), params);
       }
@@ -1019,6 +1022,90 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
     assert.strictEqual(store.ownsLocalAttempt(task.taskId, 'attempt-dev', 'session-b', task.activeAttemptId, true), true);
     passed++;
   } catch (err) { console.error('R04 FAILED:', err); failed++; }
+
+  // D01: actual DO message path must never emit an assignment after a failed durable claim.
+  try {
+    const { gateway, sql, webSockets } = setupTestDO();
+    const auth = (gateway as any).authManager as AuthManager;
+    const store = (gateway as any).taskStore as TaskStore;
+    const { deviceId, token } = auth.registerDevice('Durability test', 'windows', ['local:write_file']);
+    const ws = new MockDOWebSocket();
+    webSockets.push(ws);
+    await gateway.webSocketMessage(ws as any, JSON.stringify({ type: 'AGENT_REGISTER', deviceId, token, capabilities: ['local:write_file'], supportsAttemptFencing: true }));
+    const task = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: deviceId, payload: { path: 'never-executed.txt' } });
+    assert.strictEqual(sql.tables.get('tasks')?.get(task.taskId)?.[7], 'queued');
+    sql.failTaskWrites = true;
+    const poll = JSON.stringify({ type: 'TASK_CLAIM_POLL', deviceId, supportedCapabilities: ['local:write_file'] });
+    await gateway.webSocketMessage(ws as any, poll);
+    assert.ok(!ws.sentMessages.some(m => m.type === 'TASK_ASSIGNED'));
+    assert.ok(ws.sentMessages.some(m => m.type === 'ERROR' && m.error.includes('LOCAL_TASK_PERSISTENCE_UNAVAILABLE')));
+    assert.strictEqual(sql.tables.get('tasks')?.get(task.taskId)?.[7], 'queued');
+    assert.strictEqual(store.getTask(task.taskId)?.status, 'stale');
+    sql.failTaskWrites = false;
+    await gateway.webSocketMessage(ws as any, poll);
+    assert.ok(!ws.sentMessages.some(m => m.type === 'TASK_ASSIGNED'), 'A healthy subsequent write cannot bypass quarantine');
+    passed++;
+  } catch (err) { console.error('D01 FAILED:', err); failed++; }
+
+  // D02: a failed completion must retain the previously persisted claim and
+  // must not expose a successful result or replay a potentially applied mutation.
+  try {
+    const { gateway, sql, webSockets } = setupTestDO();
+    const auth = (gateway as any).authManager as AuthManager;
+    const store = (gateway as any).taskStore as TaskStore;
+    const { deviceId, token } = auth.registerDevice('Durability completion', 'windows', ['local:write_file']);
+    const ws = new MockDOWebSocket();
+    webSockets.push(ws);
+    await gateway.webSocketMessage(ws as any, JSON.stringify({ type: 'AGENT_REGISTER', deviceId, token, capabilities: ['local:write_file'], supportsAttemptFencing: true }));
+    const task = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: deviceId, payload: {} });
+    await gateway.webSocketMessage(ws as any, JSON.stringify({ type: 'TASK_CLAIM_POLL', deviceId, supportedCapabilities: ['local:write_file'] }));
+    const assigned = ws.sentMessages.find(m => m.type === 'TASK_ASSIGNED');
+    assert.ok(assigned);
+    const row = sql.tables.get('tasks')?.get(task.taskId);
+    assert.strictEqual(row?.[7], 'claimed');
+    assert.strictEqual(row?.[22], assigned.task.activeAttemptId);
+    assert.strictEqual(JSON.parse(row![11]).claimedSessionId, assigned.task.lease.claimedSessionId);
+    sql.failTaskWrites = true;
+    await gateway.webSocketMessage(ws as any, JSON.stringify({ type: 'TASK_COMPLETE', deviceId, taskId: task.taskId, attemptId: assigned.task.activeAttemptId, result: { changed: true } }));
+    assert.strictEqual(store.getTask(task.taskId)?.status, 'stale');
+    assert.strictEqual(store.getTask(task.taskId)?.result, undefined);
+    assert.strictEqual(sql.tables.get('tasks')?.get(task.taskId)?.[7], 'claimed');
+    sql.failTaskWrites = false;
+    const adapter = new CloudflareSqliteStorageAdapter(sql);
+    const persisted = (await adapter.listTasks()).find(t => t.taskId === task.taskId);
+    assert.ok(persisted?.lease);
+    const restarted = new TaskStore(undefined, 60000, adapter);
+    persisted!.lease!.leaseExpiresAt = Date.now() - 1;
+    restarted.hydrate([persisted!]);
+    restarted.recoverStaleTasks();
+    assert.strictEqual(restarted.getTask(task.taskId)?.status, 'stale');
+    assert.strictEqual(restarted.getTask(task.taskId)?.error?.code, 'MUTATION_UNCERTAIN_ON_STALE');
+    assert.strictEqual(restarted.claimTask(deviceId, ['local:write_file'], undefined, 'new-session'), undefined);
+    passed++;
+  } catch (err) { console.error('D02 FAILED:', err); failed++; }
+
+  // D03: file-backed claim survives restart; failure to write blocks dispatch.
+  try {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devspace-durable-dispatch-'));
+    try {
+      const store = new TaskStore(root);
+      const task = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: 'file-dev', payload: {} });
+      store.claimTask('file-dev', ['local:write_file'], undefined, 'file-session');
+      const persisted = new TaskStore(root).getTask(task.taskId);
+      assert.strictEqual(persisted?.status, 'claimed');
+      assert.strictEqual(persisted?.activeAttemptId, task.activeAttemptId);
+      const second = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: 'file-dev', payload: {} });
+      const taskDir = path.join(root, 'tasks');
+      fs.renameSync(taskDir, path.join(root, 'saved-tasks'));
+      fs.writeFileSync(taskDir, 'not a directory');
+      assert.throws(() => store.claimTask('file-dev', ['local:write_file'], undefined, 'file-session'), /LOCAL_TASK_PERSISTENCE_UNAVAILABLE/);
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, 'saved-tasks', second.taskId + '.json'), 'utf8')).status, 'queued');
+      fs.unlinkSync(taskDir);
+      fs.renameSync(path.join(root, 'saved-tasks'), taskDir);
+      assert.throws(() => store.claimTask('file-dev', ['local:write_file'], undefined, 'file-session'), /LOCAL_TASK_PERSISTENCE_UNAVAILABLE/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    passed++;
+  } catch (err) { console.error('D03 FAILED:', err); failed++; }
 
   console.log(`Connection Lifecycle & Session Fencing Tests: ${passed} passed, ${failed} failed\n`);
   return { passed, failed };
