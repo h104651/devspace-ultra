@@ -5,12 +5,16 @@
  * shared across Gateway Durable Object, ConnectionManager, TaskRouter, and MCP handlers.
  */
 
+import { createHash, timingSafeEqual } from 'crypto';
+
 export const HEARTBEAT_INTERVAL_MS = 15_000; // 15 seconds agent heartbeat frequency
 export const HEARTBEAT_TTL_MS = 45_000;      // 45 seconds timeout (3x interval, accommodates network jitter and 2 missed heartbeats)
 
 export interface AgentSessionAttachment {
   sessionId: string;
   supportsAttemptFencing?: boolean;
+  reconnectProofHash?: string;
+  reconnectSequence?: number;
   deviceId: string;
   name: string;
   platform: 'windows' | 'linux' | 'darwin';
@@ -22,6 +26,8 @@ export interface AgentSessionAttachment {
 export interface AgentSessionInfo {
   sessionId: string;
   supportsAttemptFencing?: boolean;
+  reconnectProofHash?: string;
+  reconnectSequence?: number;
   deviceId: string;
   name: string;
   platform: string;
@@ -68,4 +74,34 @@ export function getSessionLifecycleState(
   if (!session || !session.sessionId) return 'registered';
   if (isSessionHealthy(session, now, ttlMs)) return 'healthy';
   return 'stale';
+}
+
+/** Process-lifetime proof is a separate random 256-bit bearer credential, never the device token or IPC secret.
+ * Store only its digest; require a strictly newer registration to fence delayed/replayed registrations.
+ */
+export interface ReconnectIdentity {
+  reconnectProofHash: string;
+  reconnectSequence: number;
+}
+
+export function parseReconnectIdentity(message: { reconnectProof?: unknown; reconnectSequence?: unknown }): ReconnectIdentity | undefined {
+  if (message.reconnectProof === undefined && message.reconnectSequence === undefined) return undefined;
+  if (typeof message.reconnectProof !== 'string' || !/^[a-f0-9]{64}$/.test(message.reconnectProof) ||
+      typeof message.reconnectSequence !== 'number' || !Number.isSafeInteger(message.reconnectSequence) || message.reconnectSequence < 1) {
+    throw new Error('INVALID_RECONNECT_IDENTITY');
+  }
+  return {
+    reconnectProofHash: createHash('sha256').update(message.reconnectProof, 'ascii').digest('hex'),
+    reconnectSequence: message.reconnectSequence
+  };
+}
+
+export function isSameReconnectIdentity(previous: Partial<ReconnectIdentity> | undefined, next: ReconnectIdentity | undefined): boolean {
+  if (!previous?.reconnectProofHash || !next || !/^[a-f0-9]{64}$/.test(previous.reconnectProofHash)) return false;
+  return timingSafeEqual(Buffer.from(previous.reconnectProofHash, 'hex'), Buffer.from(next.reconnectProofHash, 'hex'));
+}
+
+export function canResumeSession(previous: Partial<ReconnectIdentity> | undefined, next: ReconnectIdentity | undefined): boolean {
+  return isSameReconnectIdentity(previous, next) && Number.isSafeInteger(previous?.reconnectSequence) &&
+    next!.reconnectSequence > previous!.reconnectSequence!;
 }

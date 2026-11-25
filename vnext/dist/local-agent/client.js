@@ -54,6 +54,9 @@ class LocalAgentClient {
     pollTimer;
     activeTasks = new Map();
     reconnectAttempts = 0;
+    reconnectProof = crypto.randomBytes(32).toString('hex');
+    reconnectSequence = 0;
+    legacyRetryAvailable = false;
     registeredSocket;
     taskSockets = new Map();
     lastPolicyError;
@@ -216,7 +219,6 @@ class LocalAgentClient {
                 socket.close();
                 return;
             }
-            this.reconnectAttempts = 0;
             this.lastPolicyError = undefined;
             this.refreshExecutorConfigIfIdle();
             this.registerWithGateway(probe);
@@ -237,6 +239,7 @@ class LocalAgentClient {
         socket.on('close', (code, reason) => {
             if (this.ws !== socket)
                 return;
+            const wasRegistered = this.registeredSocket === socket;
             this.ws = undefined;
             this.registeredSocket = undefined;
             if (this.heartbeatTimer)
@@ -244,7 +247,15 @@ class LocalAgentClient {
             if (this.pollTimer)
                 clearInterval(this.pollTimer);
             const closeReason = reason?.toString() || '';
-            const policyReason = (code === 1008 && /duplicate|superseded|fenced|already registered|revoked/i.test(closeReason))
+            if (wasRegistered && code === 1006)
+                this.legacyRetryAvailable = true;
+            // Compatibility with an old gateway only: wait out its heartbeat TTL once.
+            if (this.isRunning && !this.lastPolicyError && code === 1008 && closeReason === 'Duplicate active device session' && this.legacyRetryAvailable) {
+                this.legacyRetryAvailable = false;
+                this.scheduleReconnect(46_000);
+                return;
+            }
+            const policyReason = (code === 1008 && /duplicate|superseded|fenced|already registered|revoked|invalid reconnect identity|stale reconnect sequence|authentication failed/i.test(closeReason))
                 ? closeReason
                 : this.lastPolicyError;
             // Policy rejection is not a transient transport failure. Require operator
@@ -262,9 +273,9 @@ class LocalAgentClient {
             // Handled by close event
         });
     }
-    scheduleReconnect() {
+    scheduleReconnect(minDelayMs = 0) {
         this.reconnectAttempts++;
-        const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 30000);
+        const delay = Math.max(minDelayMs, Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 30000));
         this.reconnectTimeout = setTimeout(() => {
             if (this.activeTasks.size > 0) {
                 // Old executors must finish before this process can obtain new work.
@@ -290,13 +301,17 @@ class LocalAgentClient {
             platform: probe.platform,
             capabilities: probe.capabilities,
             token: this.config.token,
-            supportsAttemptFencing: true
+            supportsAttemptFencing: true,
+            reconnectProof: this.reconnectProof,
+            reconnectSequence: ++this.reconnectSequence
         });
     }
     startHeartbeat() {
         if (this.heartbeatTimer)
             clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = setInterval(() => {
+            if (this.registeredSocket !== this.ws)
+                return;
             this.send({
                 type: 'AGENT_HEARTBEAT',
                 messageId: crypto.randomUUID(),
@@ -337,8 +352,11 @@ class LocalAgentClient {
             return;
         }
         if (msg.type === 'AGENT_REGISTERED') {
-            if (msg.deviceId === this.config.deviceId)
+            if (msg.deviceId === this.config.deviceId) {
                 this.registeredSocket = socket;
+                this.reconnectAttempts = 0;
+                this.legacyRetryAvailable = false;
+            }
             return;
         }
         if (msg.type === 'TASK_ASSIGNED') {

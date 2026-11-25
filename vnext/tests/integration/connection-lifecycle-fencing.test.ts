@@ -1133,6 +1133,50 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
     passed++;
   } catch (err) { console.error('D09 FAILED:', err); failed++; }
 
+  // R01: same process can reconnect while Edge still holds the healthy socket.
+  try {
+    const { gateway, webSockets, ctx } = setupTestDO();
+    const auth = (gateway as any).authManager as AuthManager;
+    const { deviceId, token } = auth.registerDevice('Reconnect', 'windows', ['local:read_file']);
+    const proof = 'a'.repeat(64);
+    const register = async (sequence: number, reconnectProof = proof, target = gateway) => {
+      const ws = new MockDOWebSocket();
+      webSockets.push(ws);
+      await target.webSocketMessage(ws as any, JSON.stringify({
+        type: 'AGENT_REGISTER', deviceId, token, capabilities: ['local:read_file'],
+        supportsAttemptFencing: true, reconnectProof, reconnectSequence: sequence
+      }));
+      return ws;
+    };
+    let current = await register(1);
+    assert.strictEqual(current.sentMessages[0].type, 'AGENT_REGISTERED');
+    assert.ok(current.deserializeAttachment().reconnectProofHash);
+    assert.ok(!JSON.stringify(current.deserializeAttachment()).includes(proof));
+    for (let i = 2; i <= 11; i++) {
+      const old = current;
+      current = await register(i);
+      assert.strictEqual(current.sentMessages[0].type, 'AGENT_REGISTERED');
+      assert.strictEqual(old.closed, true);
+      assert.strictEqual((gateway as any).getActiveSession(deviceId).sessionId, current.deserializeAttachment().sessionId);
+      await gateway.webSocketClose(old as any, 1006, 'Delayed close');
+      await gateway.webSocketError(old as any, new Error('Delayed error'));
+      assert.strictEqual(auth.getDevice(deviceId)?.status, 'online');
+      assert.strictEqual((gateway as any).getActiveSession(deviceId).sessionId, current.deserializeAttachment().sessionId);
+    }
+    const impostor = await register(12, 'b'.repeat(64));
+    assert.strictEqual(impostor.closeCode, 1008);
+    const replay = await register(11);
+    assert.strictEqual(replay.closeReason, 'Stale reconnect sequence');
+    const malformed = await register(12, 'invalid');
+    assert.strictEqual(malformed.closeReason, 'Invalid reconnect identity');
+    assert.strictEqual(current.closed, false);
+    const restored = new GatewayDurableObject(ctx, { MASTER_SECRET: testMasterSecret } as any);
+    const afterWake = await register(12, proof, restored);
+    assert.strictEqual(afterWake.sentMessages[0].type, 'AGENT_REGISTERED');
+    assert.strictEqual(current.closed, true);
+    passed++;
+  } catch (err) { console.error('R01 FAILED:', err); failed++; }
+
   console.log(`Connection Lifecycle & Session Fencing Tests: ${passed} passed, ${failed} failed\n`);
   return { passed, failed };
 }

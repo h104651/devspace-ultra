@@ -7,11 +7,13 @@ import { ScopeChecker } from '../security/scope-checker';
 import { isLocalExecutableCapability, LOCAL_EXECUTABLE_CAPABILITIES } from '../local-agent/capabilities';
 import { TaskStore } from '../storage/task-store';
 import { GatewayMessage } from '../types/gateway';
-import { isSessionHealthy } from './connection-health-policy';
+import { isSessionHealthy, parseReconnectIdentity, isSameReconnectIdentity, canResumeSession } from './connection-health-policy';
 
 export interface ConnectedAgent {
   sessionId: string;
   supportsAttemptFencing?: boolean;
+  reconnectProofHash?: string;
+  reconnectSequence?: number;
   deviceId: string;
   name: string;
   platform: string;
@@ -150,17 +152,26 @@ export class ConnectionManager {
       });
 
       // Evict any prior connection for this device ID to maintain single active session
+      let reconnectIdentity: ReturnType<typeof parseReconnectIdentity>;
+      try { reconnectIdentity = parseReconnectIdentity(msg); }
+      catch { socket.close(1008, 'Invalid reconnect identity'); return; }
       const oldAgent = this.agents.get(authoritativeDeviceId);
-      if (oldAgent && oldAgent.socket !== socket && isSessionHealthy(oldAgent) && oldAgent.socket.readyState === WebSocket.OPEN) {
-        socket.close(1008, 'Duplicate active device session');
+      const resume = canResumeSession(oldAgent, reconnectIdentity);
+      if (isSameReconnectIdentity(oldAgent, reconnectIdentity) && !resume) {
+        socket.close(1008, 'Stale reconnect sequence');
+        return;
+      }
+      if (oldAgent && oldAgent.socket !== socket && isSessionHealthy(oldAgent) && oldAgent.socket.readyState === WebSocket.OPEN && !resume) {
+        socket.close(1008, reconnectIdentity ? 'Duplicate active device instance' : 'Duplicate active device session');
         return;
       }
       if (oldAgent && oldAgent.socket !== socket) {
+        this.agents.delete(authoritativeDeviceId);
+        this.sockets.delete(oldAgent.socket);
+        this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, oldAgent.sessionId, 'New registration superseded session');
         try {
           oldAgent.socket.close(1008, 'Superseded by new registration');
         } catch {}
-        this.sockets.delete(oldAgent.socket);
-        this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, oldAgent.sessionId, 'New registration superseded session');
         this.auditLogger.log({
           actor: authoritativeDeviceId,
           actorType: 'device',
@@ -176,6 +187,7 @@ export class ConnectionManager {
       const agent: ConnectedAgent = {
         sessionId,
         supportsAttemptFencing: msg.supportsAttemptFencing === true,
+        ...reconnectIdentity,
         deviceId: authoritativeDeviceId,
         name: msg.name || authoritativeDeviceId,
         platform: msg.platform || 'windows',
