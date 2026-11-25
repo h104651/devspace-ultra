@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const net = require('net');
 const crypto = require('crypto');
+const { resolveConfiguration, resolveIdentity } = require('./service-config');
 
 function parseArgs(argv) {
   const command = argv[0];
@@ -37,7 +38,7 @@ function resolveControlFile(opts) {
     deviceId = readDeviceIdFromEnv(path.join(path.resolve(opts.configDir), '.env'));
   }
   if (!deviceId) {
-    deviceId = readDeviceIdFromEnv(path.resolve(__dirname, '..', '..', '.env'));
+    deviceId = resolveIdentity(resolveConfiguration([]));
   }
 
   if (deviceId) {
@@ -46,23 +47,12 @@ function resolveControlFile(opts) {
     if (!fs.existsSync(controlPath)) {
       return { error: `CONTROL_NOT_FOUND: No active control record for device '${deviceId}' at '${controlPath}'.` };
     }
-    return { controlPath, control: JSON.parse(fs.readFileSync(controlPath, 'utf8')) };
+    const control = JSON.parse(fs.readFileSync(controlPath, 'utf8'));
+    if (!control.deviceId || control.deviceId.toLowerCase() !== deviceId.toLowerCase()) return { error: 'DEVICE_MISMATCH: control record belongs to another device.' };
+    return { controlPath, control };
   }
 
-  if (!fs.existsSync(controlDir)) {
-    return { error: `CONTROL_NOT_FOUND: Control directory does not exist: '${controlDir}'.` };
-  }
-
-  const files = fs.readdirSync(controlDir).filter(f => f.endsWith('.control.json'));
-  if (files.length === 0) {
-    return { error: 'CONTROL_NOT_FOUND: No active DevSpace Ultra agent control files found.' };
-  }
-  if (files.length > 1) {
-    return { error: 'AMBIGUOUS_DEVICE: Multiple control files found; specify --device-id or --config-dir.' };
-  }
-
-  const controlPath = path.join(controlDir, files[0]);
-  return { controlPath, control: JSON.parse(fs.readFileSync(controlPath, 'utf8')) };
+  return { error: 'IDENTITY_REQUIRED: specify --device-id or configure an explicit service identity.' };
 }
 
 function sendIpcRequest(endpoint, payload, timeoutMs = 15000) {

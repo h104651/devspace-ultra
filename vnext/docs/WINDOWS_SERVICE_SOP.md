@@ -65,7 +65,7 @@ Windows Task Scheduler (DevSpaceUltra_LocalAgent, LogonTrigger +10s, Interactive
 1. Deploy clean release directory at target `main` SHA (`npm ci --ignore-scripts --no-audit --no-fund`).
 2. Place `win11-arm64-workstation` `.env` (without `ADMIN_SECRET` / `MASTER_SECRET` / `CLIENT_TOKEN`, `ALLOW_RAW_SHELL=false`) and 6-project `projects.json` in Config Directory.
 3. Configure `service-config.json` in `vnext\scripts\windows\`.
-4. Register scheduled task:
+4. Register scheduled task (if replacing the old task, first verify it is stopped, exported and owned by the current user; use explicit `-ReplaceExisting` only for that audited migration):
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File "<ReleaseDir>\vnext\scripts\windows\register-agent-task.ps1"
    ```
@@ -89,6 +89,8 @@ Windows Task Scheduler (DevSpaceUltra_LocalAgent, LogonTrigger +10s, Interactive
 ---
 
 ## 4. Operations, Graceful Stop & Safe Rollback
+
+All management scripts resolve the same `service-config.json` relative to the launcher. Explicit DeviceId/ConfigDir/ReleaseDir arguments are consistency checks, not alternate launch paths. A task pointing to another launcher is refused. Do not use the old wildcard force-stop scripts.
 
 ### Graceful Stop
 ```powershell

@@ -7,23 +7,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$scriptDir = $PSScriptRoot
-$ipcScript = Join-Path $scriptDir 'ipc-control.js'
-
-function Resolve-NodeExe {
-    $candidates = @(
-        (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\nodejs\node.exe')
-    )
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path $c)) { return $c }
-    }
-    $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    throw 'node.exe not found.'
-}
-
-$nodeExe = Resolve-NodeExe
+. (Join-Path $PSScriptRoot 'service-common.ps1')
+$ctx = Get-ServiceContext $PSScriptRoot $DeviceId $ConfigDir
+$DeviceId = $ctx.deviceId
+$ConfigDir = $ctx.configDir
+$nodeExe = $ctx.nodeExe
+$ipcScript = $ctx.ipcScript
 
 Write-Host '====================================================' -ForegroundColor Yellow
 Write-Host '    Stopping DevSpace Ultra Local Agent Gracefully  ' -ForegroundColor Yellow
@@ -40,6 +29,7 @@ if ($LASTEXITCODE -ne 0 -or -not $beforeJson) {
     exit 1
 }
 $before = $beforeJson | ConvertFrom-Json
+Assert-ServiceStatus $before $ctx
 if (-not $before.ok -or -not $before.deviceId -or -not $before.daemonPid) { exit 1 }
 if ($DeviceId -and $before.deviceId -ine $DeviceId) { exit 1 }
 if ($ConfigDir -and [IO.Path]::GetFullPath($ConfigDir) -ine [IO.Path]::GetFullPath($before.configDir)) { exit 1 }

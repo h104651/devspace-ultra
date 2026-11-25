@@ -120,6 +120,8 @@ export async function runWindowsServiceStandardizationUnitTests(): Promise<{ pas
       'ipc-control.js',
       'launch-daemon.vbs',
       'service-config.json.example',
+      'service-config.js',
+      'service-common.ps1',
       'start-agent.ps1',
       'stop-agent.ps1',
       'restart-agent.ps1',

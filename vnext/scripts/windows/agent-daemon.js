@@ -5,39 +5,7 @@ const os = require('os');
 const net = require('net');
 const crypto = require('crypto');
 
-function parseArgs(argv) {
-  const parsed = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    const next = argv[i + 1];
-    if (a === '--release-dir' && next) { parsed.releaseDir = next; i++; }
-    else if (a === '--config-dir' && next) { parsed.configDir = next; i++; }
-    else if (a === '--log-dir' && next) { parsed.logDir = next; i++; }
-    else if (a === '--env-file' && next) { parsed.envFile = next; i++; }
-    else if (a === '--service-config' && next) { parsed.serviceConfig = next; i++; }
-    else if (a === '--shutdown-timeout-ms' && next) { parsed.shutdownTimeoutMs = Number(next); i++; }
-  }
-  return parsed;
-}
-
-function loadDotEnvFile(envPath) {
-  const result = {};
-  if (!fs.existsSync(envPath)) return result;
-  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let val = trimmed.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    result[key] = val;
-  }
-  return result;
-}
+const { resolveConfiguration, loadDotEnvFile } = require('./service-config');
 
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -54,48 +22,6 @@ function constantTimeTokenMatch(provided, expected) {
   const a = crypto.createHash('sha256').update(provided).digest();
   const b = crypto.createHash('sha256').update(expected).digest();
   return crypto.timingSafeEqual(a, b);
-}
-
-function resolveConfiguration() {
-  const cli = parseArgs(process.argv.slice(2));
-  const defaultReleaseDir = path.resolve(__dirname, '..', '..');
-
-  const serviceConfigPath = path.resolve(
-    cli.serviceConfig || process.env.DEVSPACE_SERVICE_CONFIG || path.join(__dirname, 'service-config.json')
-  );
-  let serviceCfg = {};
-  if (fs.existsSync(serviceConfigPath)) {
-    serviceCfg = JSON.parse(fs.readFileSync(serviceConfigPath, 'utf8'));
-  }
-
-  const releaseDir = path.resolve(
-    cli.releaseDir || process.env.DEVSPACE_RELEASE_DIR || serviceCfg.releaseDir || defaultReleaseDir
-  );
-  const configDir = path.resolve(
-    cli.configDir || process.env.DEVSPACE_CONFIG_DIR || serviceCfg.configDir || releaseDir
-  );
-  const logDir = path.resolve(
-    cli.logDir || process.env.DEVSPACE_LOG_DIR || serviceCfg.logDir || path.join(configDir, 'logs')
-  );
-  const envPath = path.resolve(
-    cli.envFile || process.env.DEVSPACE_ENV_FILE || serviceCfg.envFile || path.join(configDir, '.env')
-  );
-
-  const maxLogBytes = Math.max(1024, Number(process.env.DEVSPACE_LOG_MAX_BYTES || serviceCfg.maxLogBytes) || 10 * 1024 * 1024);
-  const maxLogFiles = Math.max(1, Number(process.env.DEVSPACE_LOG_MAX_FILES || serviceCfg.maxLogFiles) || 5);
-  const maxRapidRestarts = Math.max(1, Number(process.env.DEVSPACE_MAX_RAPID_RESTARTS || serviceCfg.maxRapidRestarts) || 5);
-  const shutdownTimeoutMs = Math.min(30000, Math.max(500, Number(cli.shutdownTimeoutMs || process.env.DEVSPACE_SHUTDOWN_TIMEOUT_MS || serviceCfg.shutdownTimeoutMs) || 10000));
-
-  return {
-    releaseDir,
-    configDir,
-    logDir,
-    envPath,
-    maxLogBytes,
-    maxLogFiles,
-    maxRapidRestarts,
-    shutdownTimeoutMs
-  };
 }
 
 function loadSharedExitHelpers(releaseDir) {
@@ -506,6 +432,7 @@ function main() {
         reply({
           ok: true,
           daemonPid: process.pid,
+          startedAt: daemonStartedAt,
           agentPid: activeAgentPid,
           deviceId,
           agentName: agentName || `Local-Agent-${os.hostname()}`,
@@ -525,7 +452,10 @@ function main() {
 
       if (req.action === 'SHUTDOWN') {
         const result = await initiateGracefulShutdown('IPC SHUTDOWN', req.timeoutMs);
-        socket.end(JSON.stringify({ ...result, deviceId, daemonPid: process.pid }) + '\n', () => cleanupAndExit(0));
+        const finish = () => cleanupAndExit(0);
+        socket.once('close', finish);
+        socket.end(JSON.stringify({ ...result, deviceId, daemonPid: process.pid }) + '\n', finish);
+        setTimeout(finish, 1000).unref();
         return;
       }
 
@@ -538,7 +468,7 @@ function main() {
 
   ipcServer.on('error', (err) => {
     logger.log(`[DAEMON][FAIL_CLOSED] IPC server error (${err.code || err.message}). Exiting cleanly.`);
-    cleanupAndExit(0);
+    void initiateGracefulShutdown('IPC_SERVER_FAILURE').then(() => cleanupAndExit(0));
   });
 
   ipcServer.listen(ipcEndpoint, () => {
@@ -560,4 +490,8 @@ function main() {
   });
 }
 
-main();
+try { main(); } catch {
+  // Configuration and initialization errors require operator correction, not scheduler retries.
+  console.error('[DAEMON][FAIL_CLOSED] Unable to initialize service configuration or supervisor.');
+  process.exitCode = 0;
+}
