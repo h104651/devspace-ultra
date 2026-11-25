@@ -32,7 +32,7 @@ function createIsolatedDirs(prefix: string) {
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(logDir, { recursive: true });
   fs.mkdirSync(lockDir, { recursive: true });
-  fs.mkdirSync(controlDir, { recursive: true });
+  // The daemon creates and verifies the private control directory itself.
   fs.mkdirSync(workspaceDir, { recursive: true });
   return { root, releaseDir, configDir, logDir, homeDir, lockDir, controlDir, workspaceDir };
 }
@@ -73,6 +73,10 @@ async function stopDaemonGracefully(dirs: ReturnType<typeof createIsolatedDirs>,
 }
 
 function sendRawIpc(endpoint: string, payload: string): Promise<any> {
+  if (process.platform === 'win32') {
+    const { sendMailboxRequest } = require(path.join(VNEXT_ROOT, 'scripts', 'windows', 'ipc-security.js'));
+    return sendMailboxRequest(endpoint, JSON.parse(payload), 5000);
+  }
   return new Promise((resolve, reject) => {
     const sock = net.createConnection(endpoint);
     let buf = '';
@@ -161,6 +165,9 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       const badActionResp = await sendRawIpc(ctrlJson.ipcEndpoint, JSON.stringify({ action: 'EXEC_SHELL', token: ctrlJson.ipcSecret, deviceId: reg1.deviceId }) + '\n');
       assert.strictEqual(badActionResp.ok, false);
       assert.strictEqual(badActionResp.error, 'FORBIDDEN_ACTION');
+      const wrongDevice = await sendRawIpc(ctrlJson.ipcEndpoint, JSON.stringify({ action: 'SHUTDOWN', token: ctrlJson.ipcSecret, deviceId: 'wrong-device' }) + '\n');
+      assert.strictEqual(wrongDevice.error, 'DEVICE_MISMATCH');
+      assert.strictEqual(server.connectionManager.getConnectedAgents().length, 1);
 
       // Duplicate daemon start must fail-closed cleanly without disturbing live agent
       const dupDaemon = spawn(process.execPath, [DAEMON_SCRIPT], {

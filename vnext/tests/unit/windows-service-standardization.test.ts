@@ -118,6 +118,8 @@ export async function runWindowsServiceStandardizationUnitTests(): Promise<{ pas
     const requiredFiles = [
       'agent-daemon.js',
       'ipc-control.js',
+      'ipc-security.js',
+      'ipc-private-acl.ps1',
       'launch-daemon.vbs',
       'service-config.json.example',
       'service-config.js',

@@ -6,6 +6,7 @@ const net = require('net');
 const crypto = require('crypto');
 
 const { resolveConfiguration, loadDotEnvFile } = require('./service-config');
+const { assertPrivateDirectory, assertPrivateFile, atomicJson, readBoundedJson, mailboxPath } = require('./ipc-security');
 
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -122,7 +123,7 @@ function main() {
     ? path.resolve(process.env.DEVSPACE_AGENT_CONTROL_DIR)
     : path.join(os.homedir(), '.devspace-ultra', 'agent-control');
 
-  fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 });
+  assertPrivateDirectory(controlDir, true);
 
   logger.log('=== DevSpace Ultra Local Agent Daemon Starting ===');
   logger.log(`Release Directory  : ${cfg.releaseDir}`);
@@ -145,25 +146,28 @@ function main() {
     process.exit(0);
   }
 
-  const { deviceHash, endpoint: ipcEndpoint } = buildIpcEndpoint(controlDir, deviceId);
+  const { deviceHash, endpoint: socketEndpoint } = buildIpcEndpoint(controlDir, deviceId);
+  const instanceId = crypto.randomBytes(16).toString('hex');
+  const ipcTransport = process.platform === 'win32' ? 'mailbox' : 'socket';
+  const ipcEndpoint = ipcTransport === 'mailbox' ? mailboxPath(controlDir, deviceHash, instanceId) : socketEndpoint;
   const lockPath = path.join(lockDir, `${deviceHash}.lock`);
   const controlPath = path.join(controlDir, `${deviceHash}.control.json`);
+  const ownerPath = path.join(controlDir, `${deviceHash}.daemon.lock`);
+  const ownerRecord = JSON.stringify({ daemonPid: process.pid, deviceId, instanceId, startedAt: Date.now() });
 
-  // Check if another daemon is already alive for this device
-  if (fs.existsSync(controlPath)) {
-    try {
-      const existing = JSON.parse(fs.readFileSync(controlPath, 'utf8'));
-      if (existing && existing.daemonPid && existing.daemonPid !== process.pid && isProcessAlive(existing.daemonPid)) {
-        logger.log(`[DAEMON][FAIL_CLOSED] Duplicate daemon detected (PID: ${existing.daemonPid}) for device '${deviceId}'. Exiting cleanly.`);
-        process.exit(0);
-      }
-    } catch {
-      // Unparseable stale control file; will verify lock state on child start
-    }
+  // Exclusive publication ownership. Never take over unverifiable stale records.
+  try {
+    fs.writeFileSync(ownerPath, ownerRecord, { flag: 'wx', mode: 0o600 });
+  } catch {
+    logger.log('[DAEMON][FAIL_CLOSED] Duplicate or unreconciled daemon owner record. Operator audit required.');
+    process.exit(0);
   }
-
-  // Never unlink another daemon's live or unverified endpoint.
-  // A stale socket requires operator reconciliation before restart.
+  if (fs.existsSync(controlPath)) {
+    logger.log('[DAEMON][FAIL_CLOSED] Unreconciled control record. Operator audit required.');
+    // Retain new owner record so repeated attempts cannot bypass the audit.
+    process.exit(0);
+  }
+  if (ipcTransport === 'mailbox') assertPrivateDirectory(ipcEndpoint, true);
 
   const ipcSecret = crypto.randomBytes(32).toString('hex');
   const daemonStartedAt = Date.now();
@@ -176,6 +180,8 @@ function main() {
   let ipcServer = null;
   let ownsIpcEndpoint = false;
   let shutdownPromise = null;
+  let mailboxTimer = null;
+  let mailboxBusy = false;
 
   function writeControlFile() {
     const payload = {
@@ -184,32 +190,34 @@ function main() {
       deviceId,
       user: process.env.USERNAME || process.env.USER || os.userInfo().username,
       ipcEndpoint,
+      ipcTransport,
+      instanceId,
       ipcSecret,
       releaseDir: cfg.releaseDir,
       configDir: cfg.configDir,
       lockPath,
       startedAt: daemonStartedAt
     };
-    const temp = controlPath + '.' + process.pid + '.' + crypto.randomBytes(8).toString('hex') + '.tmp';
-    try {
-      fs.writeFileSync(temp, JSON.stringify(payload, null, 2), { mode: 0o600, flag: 'wx' });
-      fs.renameSync(temp, controlPath);
-    } finally {
-      try { fs.unlinkSync(temp); } catch {}
-    }
+    if (fs.readFileSync(ownerPath, 'utf8') !== ownerRecord) throw new Error('IPC owner record changed');
+    atomicJson(controlPath, payload);
   }
 
   function removeOwnControlFile() {
+    // A second daemon cannot publish or remove another instance's control record.
     try {
-      if (!fs.existsSync(controlPath)) return;
-      const cur = JSON.parse(fs.readFileSync(controlPath, 'utf8'));
-      if (cur && cur.daemonPid === process.pid && cur.ipcSecret === ipcSecret) {
+      if (fs.readFileSync(ownerPath, 'utf8') !== ownerRecord) return;
+      if (fs.existsSync(controlPath)) {
+        const cur = readBoundedJson(controlPath, 65536);
+        if (cur.daemonPid !== process.pid || cur.instanceId !== instanceId || cur.ipcSecret !== ipcSecret) return;
         fs.unlinkSync(controlPath);
       }
-    } catch {}
-    if (ownsIpcEndpoint && process.platform !== 'win32' && fs.existsSync(ipcEndpoint)) {
-      try { fs.unlinkSync(ipcEndpoint); } catch {}
-    }
+      if (ownsIpcEndpoint && ipcTransport === 'socket' && fs.existsSync(ipcEndpoint)) {
+        try { fs.unlinkSync(ipcEndpoint); } catch {}
+      }
+      fs.unlinkSync(ownerPath);
+      // Mailbox responses must remain readable after exit. The shutdown client removes
+      // its own response and may remove the empty per-launch directory.
+    } catch { /* Preserve unreconciled owner/control state for operator audit. */ }
   }
 
   function cleanupAndExit(exitCode = 0) {
@@ -217,6 +225,7 @@ function main() {
       clearTimeout(restartTimer);
       restartTimer = null;
     }
+    if (mailboxTimer) { clearInterval(mailboxTimer); mailboxTimer = null; }
     removeOwnControlFile();
     if (ipcServer) {
       try { ipcServer.close(); } catch {}
@@ -366,120 +375,111 @@ function main() {
     });
   }
 
-  ipcServer = net.createServer((socket) => {
-    let buffer = '';
-    socket.setEncoding('utf8');
-    socket.setTimeout(5000, () => socket.destroy());
-    let requestHandled = false;
-
-    const reply = (obj, closeAfter = true) => {
-      try {
-        socket.write(JSON.stringify(obj) + '\n');
-      } catch {}
-      if (closeAfter) {
-        try { socket.end(); } catch {}
-      }
-    };
-
-    socket.on('data', async (chunk) => {
-      if (requestHandled) return;
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, 'utf8') > 4096) {
-        logger.log('[DAEMON][IPC_REJECT] Oversized IPC payload rejected.');
-        reply({ ok: false, error: 'PAYLOAD_TOO_LARGE' });
-        return;
-      }
-      const nl = buffer.indexOf('\n');
-      if (nl === -1) return;
-      requestHandled = true;
-      socket.setTimeout(0);
-      const rawLine = buffer.slice(0, nl).trim();
-      buffer = '';
-
-      let req;
-      try {
-        req = JSON.parse(rawLine);
-      } catch {
-        logger.log('[DAEMON][IPC_REJECT] Malformed JSON on IPC channel.');
-        reply({ ok: false, error: 'INVALID_JSON' });
-        return;
-      }
-
-      if (!req || typeof req !== 'object' || Array.isArray(req)) {
-        reply({ ok: false, error: 'INVALID_REQUEST' });
-        return;
-      }
-
-      if (!constantTimeTokenMatch(req.token, ipcSecret)) {
-        logger.log('[DAEMON][IPC_REJECT] Unauthorized IPC token rejected.');
-        reply({ ok: false, error: 'UNAUTHORIZED' });
-        return;
-      }
-
-      if (typeof req.deviceId !== 'string' || req.deviceId.toLowerCase() !== deviceId.toLowerCase()) {
-        logger.log(`[DAEMON][IPC_REJECT] Device mismatch on IPC channel (${req.deviceId}).`);
-        reply({ ok: false, error: 'DEVICE_MISMATCH' });
-        return;
-      }
-
-      if (req.action === 'STATUS') {
-        let lockOwnerPid = null;
-        try {
-          if (fs.existsSync(lockPath)) {
-            lockOwnerPid = JSON.parse(fs.readFileSync(lockPath, 'utf8')).pid ?? null;
-          }
-        } catch {}
-        reply({
-          ok: true,
-          daemonPid: process.pid,
-          startedAt: daemonStartedAt,
-          agentPid: activeAgentPid,
-          deviceId,
-          agentName: agentName || `Local-Agent-${os.hostname()}`,
-          releaseDir: cfg.releaseDir,
-          configDir: cfg.configDir,
-          logFile: logger.logFile,
-          lockPath,
-          lockExists: fs.existsSync(lockPath),
-          lockOwnerPid,
-          isTerminating,
-          consecutiveRapidExits,
-          lastExitClassification,
-          uptimeMs: Date.now() - daemonStartedAt
-        });
-        return;
-      }
-
-      if (req.action === 'SHUTDOWN') {
-        const result = await initiateGracefulShutdown('IPC SHUTDOWN', req.timeoutMs);
-        const finish = () => cleanupAndExit(0);
-        socket.once('close', finish);
-        socket.end(JSON.stringify({ ...result, deviceId, daemonPid: process.pid }) + '\n', finish);
-        setTimeout(finish, 1000).unref();
-        return;
-      }
-
-      logger.log(`[DAEMON][IPC_REJECT] Unsupported IPC action '${String(req.action)}' rejected.`);
-      reply({ ok: false, error: 'FORBIDDEN_ACTION' });
-    });
-
-    socket.on('error', () => {});
-  });
-
-  ipcServer.on('error', (err) => {
-    logger.log(`[DAEMON][FAIL_CLOSED] IPC server error (${err.code || err.message}). Exiting cleanly.`);
-    void initiateGracefulShutdown('IPC_SERVER_FAILURE').then(() => cleanupAndExit(0));
-  });
-
-  ipcServer.listen(ipcEndpoint, () => {
-    ownsIpcEndpoint = true;
-    if (process.platform !== 'win32') {
-      try { fs.chmodSync(ipcEndpoint, 0o600); } catch {}
+  async function handleIpcRequest(req) {
+    if (!req || typeof req !== 'object' || Array.isArray(req)) return { response: { ok: false, error: 'INVALID_REQUEST' } };
+    if (!constantTimeTokenMatch(req.token, ipcSecret)) return { response: { ok: false, error: 'UNAUTHORIZED' } };
+    if (typeof req.deviceId !== 'string' || req.deviceId.toLowerCase() !== deviceId.toLowerCase()) {
+      return { response: { ok: false, error: 'DEVICE_MISMATCH' } };
     }
+    if (req.action === 'STATUS') {
+      let lockOwnerPid = null;
+      try { if (fs.existsSync(lockPath)) lockOwnerPid = JSON.parse(fs.readFileSync(lockPath, 'utf8')).pid ?? null; } catch {}
+      return { response: {
+        ok: true, daemonPid: process.pid, startedAt: daemonStartedAt, agentPid: activeAgentPid,
+        deviceId, instanceId, agentName: agentName || `Local-Agent-${os.hostname()}`,
+        releaseDir: cfg.releaseDir, configDir: cfg.configDir, logFile: logger.logFile,
+        lockPath, lockExists: fs.existsSync(lockPath), lockOwnerPid, isTerminating,
+        consecutiveRapidExits, lastExitClassification, uptimeMs: Date.now() - daemonStartedAt
+      }};
+    }
+    if (req.action === 'SHUTDOWN') {
+      const result = await initiateGracefulShutdown('IPC SHUTDOWN', req.timeoutMs);
+      return { response: { ...result, deviceId, daemonPid: process.pid, instanceId }, shutdown: true };
+    }
+    return { response: { ok: false, error: 'FORBIDDEN_ACTION' } };
+  }
+
+  function failClosed(reason) {
+    logger.log(`[DAEMON][FAIL_CLOSED] ${reason}; stopping target worker.`);
+    void initiateGracefulShutdown(reason).then(() => cleanupAndExit(0));
+  }
+
+  if (ipcTransport === 'mailbox') {
+    // Windows Node net.createServer cannot specify a per-user named-pipe DACL.
+    // The local IPC endpoint is instead an exclusively owned, SID-restricted mailbox.
+    // No TCP or named-pipe listener is created on Windows.
+    mailboxTimer = setInterval(async () => {
+      if (mailboxBusy) return;
+      mailboxBusy = true;
+      try {
+        const requests = fs.readdirSync(ipcEndpoint).filter(name => /^req-[a-f0-9]{32}\.json$/.test(name)).slice(0, 16);
+        for (const name of requests) {
+          const requestPath = path.join(ipcEndpoint, name);
+          const responsePath = path.join(ipcEndpoint, name.replace(/^req-/, 'resp-'));
+          let req;
+          try { req = readBoundedJson(requestPath, 4096); } catch {
+            try { fs.unlinkSync(requestPath); } catch {}
+            continue;
+          }
+          // Consume once; never repeat a request after handling it.
+          try { fs.unlinkSync(requestPath); } catch { continue; }
+          const result = await handleIpcRequest(req);
+          atomicJson(responsePath, result.response);
+          if (result.shutdown) { cleanupAndExit(0); return; }
+        }
+      } catch {
+        failClosed('IPC_MAILBOX_FAILURE');
+      } finally { mailboxBusy = false; }
+    }, 100);
     writeControlFile();
-    logger.log(`[DAEMON] Authenticated IPC control ready (${ipcEndpoint}).`);
+    logger.log('[DAEMON] Private Windows IPC mailbox ready.');
     startAgent();
-  });
+  } else {
+    ipcServer = net.createServer((socket) => {
+      let buffer = '';
+      let handled = false;
+      socket.setEncoding('utf8');
+      socket.setTimeout(5000, () => socket.destroy());
+      socket.on('error', () => {});
+      socket.on('data', async (chunk) => {
+        if (handled) return;
+        buffer += chunk;
+        if (Buffer.byteLength(buffer, 'utf8') > 4096) {
+          handled = true;
+          socket.end(JSON.stringify({ ok: false, error: 'PAYLOAD_TOO_LARGE' }) + '\n');
+          return;
+        }
+        const nl = buffer.indexOf('\n');
+        if (nl < 0) return;
+        handled = true;
+        socket.setTimeout(0);
+        let req;
+        try { req = JSON.parse(buffer.slice(0, nl)); } catch {
+          socket.end(JSON.stringify({ ok: false, error: 'INVALID_JSON' }) + '\n');
+          return;
+        }
+        try {
+          const result = await handleIpcRequest(req);
+          if (result.shutdown) {
+            const finish = () => cleanupAndExit(0);
+            socket.once('close', finish);
+            socket.end(JSON.stringify(result.response) + '\n', finish);
+            setTimeout(finish, 1000).unref();
+          } else socket.end(JSON.stringify(result.response) + '\n');
+        } catch { failClosed('IPC_REQUEST_FAILURE'); }
+      });
+    });
+    ipcServer.on('error', () => failClosed('IPC_SERVER_FAILURE'));
+    ipcServer.listen(ipcEndpoint, () => {
+      ownsIpcEndpoint = true;
+      try {
+        fs.chmodSync(ipcEndpoint, 0o600);
+        writeControlFile();
+        logger.log('[DAEMON] Private local IPC socket ready.');
+        startAgent();
+      } catch { failClosed('IPC_INITIALIZATION_FAILURE'); }
+    });
+  }
 
   process.on('SIGINT', () => {
     void initiateGracefulShutdown('SIGINT').then(() => cleanupAndExit(0));

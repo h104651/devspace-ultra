@@ -14,8 +14,9 @@ Windows Task Scheduler (DevSpaceUltra_LocalAgent, LogonTrigger +10s, Interactive
 ### Key Guarantees
 1. **Release & Config Directory Separation**: Code lives in an immutable release directory (`DEVSPACE_RELEASE_DIR`); `.env`, `projects.json`, and `logs\` can live in an independent configuration directory (`DEVSPACE_CONFIG_DIR`).
 2. **Least-Privilege Child Environment**: `agent-daemon.js` constructs a strict allowlist environment for `agent-cli.js` (essential Windows runtime vars + Agent config keys). Administrative and cloud credentials (`ADMIN_SECRET`, `MASTER_SECRET`, `CLIENT_TOKEN`, `CLOUDFLARE_API_TOKEN`, `KAGGLE_KEY`, etc.) are stripped from both daemon child env and worker `process.env`.
-3. **Authenticated Local IPC Shutdown (Windows ACL verification pending)**:
-   - Each daemon generates a per-launch random `ipcSecret` stored with requested POSIX `0o600` permissions (not a Windows DACL guarantee) in `%USERPROFILE%\.devspace-ultra\agent-control\<sha256(deviceId)>.control.json`.
+3. **Authenticated Local IPC Shutdown**:
+   - Each daemon generates a per-launch random `ipcSecret` stored in a protected control directory in `%USERPROFILE%\.devspace-ultra\agent-control\<sha256(deviceId)>.control.json`.
+   - On Windows, the supervisor uses a local filesystem mailbox instead of a named pipe; an explicit protected Windows DACL permits the current user SID, SYSTEM and Administrators only. Unsafe existing ACLs, reparse points and unreconciled owner records fail closed; no automatic permission repair or owner takeover. On Unix, a private Unix socket is retained.
    - `ipc-control.js` / `stop-agent.ps1` only accepts `STATUS` and `SHUTDOWN` actions authenticated with `crypto.timingSafeEqual` and matching `deviceId`. Arbitrary command execution is rejected (`FORBIDDEN_ACTION`).
    - On `SHUTDOWN`, the daemon immediately disables auto-restart, instructs `agent-cli.js` over private parent-child Node IPC to stop polling, drain active tasks within `timeoutMs`, close WebSocket (`1000`), and release `.lock` only when idle.
 4. **Fail-Closed Exit Codes & Task Scheduler Coordination**:
@@ -101,6 +102,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<ReleaseDir>\vnext\scripts\
 - If `stop-agent.ps1` reports exit code `13` (`AUDIT_REQUIRED`) or timeout with retained `.lock`:
   1. Verify via `check-status.ps1` / `Get-CimInstance Win32_Process` that `agent-cli.js` and child processes have fully exited.
   2. Reconcile any uncertain tasks on the Gateway before manually removing `%USERPROFILE%\.devspace-ultra\agent-locks\<hash>.lock`.
+
+If the supervisor is force-killed, both the worker lock and daemon owner/control records may remain. Reconcile the exact instance, child processes and uncertain tasks before moving only its records to a private audit backup. Never copy a control credential into a report. Existing unsafe control directories must be reviewed and moved aside by the operator; do not loosen the ACL.
 
 ### Safe Rollback
 1. Run `stop-agent.ps1` and verify zero residual processes and released lock.

@@ -4,6 +4,7 @@ const os = require('os');
 const net = require('net');
 const crypto = require('crypto');
 const { resolveConfiguration, resolveIdentity } = require('./service-config');
+const { assertPrivateDirectory, assertPrivateFile, readBoundedJson, mailboxPath, sendMailboxRequest } = require('./ipc-security');
 
 function parseArgs(argv) {
   const command = argv[0];
@@ -47,8 +48,28 @@ function resolveControlFile(opts) {
     if (!fs.existsSync(controlPath)) {
       return { error: `CONTROL_NOT_FOUND: No active control record for device '${deviceId}' at '${controlPath}'.` };
     }
-    const control = JSON.parse(fs.readFileSync(controlPath, 'utf8'));
+    assertPrivateDirectory(controlDir);
+    assertPrivateFile(controlPath);
+    const control = readBoundedJson(controlPath, 65536);
     if (!control.deviceId || control.deviceId.toLowerCase() !== deviceId.toLowerCase()) return { error: 'DEVICE_MISMATCH: control record belongs to another device.' };
+    const ownerPath = path.join(controlDir, `${hash}.daemon.lock`);
+    assertPrivateFile(ownerPath);
+    const owner = readBoundedJson(ownerPath, 4096);
+    if (owner.daemonPid !== control.daemonPid || owner.deviceId !== control.deviceId || owner.instanceId !== control.instanceId ||
+        !Number.isInteger(control.daemonPid) || control.daemonPid <= 0 || !/^[a-f0-9]{64}$/.test(control.ipcSecret || '')) {
+      return { error: 'IPC_IDENTITY_INVALID: control ownership not verified.' };
+    }
+    try { process.kill(control.daemonPid, 0); } catch { return { error: 'IPC_OWNER_NOT_LIVE: operator reconciliation required.' }; }
+    if (process.platform === 'win32') {
+      if (control.ipcTransport !== 'mailbox' || path.resolve(control.ipcEndpoint) !== mailboxPath(controlDir, hash, control.instanceId)) return { error: 'IPC_ENDPOINT_INVALID' };
+      assertPrivateDirectory(control.ipcEndpoint);
+    } else {
+      const userName = (process.env.USERNAME || process.env.USER || os.userInfo().username || 'user').toLowerCase();
+      const userHash = crypto.createHash('sha256').update(userName).digest('hex').slice(0, 12);
+      const expected = path.join(controlDir, `${userHash}-${hash.slice(0, 16)}.sock`);
+      const stat = fs.lstatSync(expected);
+      if (control.ipcTransport !== 'socket' || control.ipcEndpoint !== expected || !stat.isSocket() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) return { error: 'IPC_ENDPOINT_INVALID' };
+    }
     return { controlPath, control };
   }
 
@@ -96,7 +117,10 @@ async function main() {
     process.exit(2);
   }
 
-  const resolved = resolveControlFile(opts);
+  let resolved;
+  try { resolved = resolveControlFile(opts); } catch {
+    resolved = { error: 'IPC_CONTROL_UNVERIFIED: private path, identity, or ownership validation failed.' };
+  }
   if (resolved.error) {
     if (opts.json) console.log(JSON.stringify({ ok: false, error: resolved.error }));
     else console.error(resolved.error);
@@ -109,7 +133,8 @@ async function main() {
   const ipcWaitMs = action === 'SHUTDOWN' ? reqTimeoutMs + 6000 : 5000;
 
   try {
-    const resp = await sendIpcRequest(
+    const send = ctrl.ipcTransport === 'mailbox' ? sendMailboxRequest : sendIpcRequest;
+    const resp = await send(
       ctrl.ipcEndpoint,
       {
         action,
@@ -119,6 +144,10 @@ async function main() {
       },
       ipcWaitMs
     );
+    if (resp && resp.ok && (resp.deviceId !== ctrl.deviceId || resp.daemonPid !== ctrl.daemonPid || resp.instanceId !== ctrl.instanceId)) throw new Error('IPC_RESPONSE_IDENTITY_MISMATCH');
+    if (ctrl.ipcTransport === 'mailbox' && action === 'SHUTDOWN' && resp && resp.ok) {
+      try { fs.rmdirSync(ctrl.ipcEndpoint); } catch {}
+    }
     if (opts.json) {
       console.log(JSON.stringify(resp));
     } else {
