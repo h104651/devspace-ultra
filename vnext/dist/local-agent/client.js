@@ -108,10 +108,6 @@ class LocalAgentClient {
             clearTimeout(this.reconnectTimeout);
             this.reconnectTimeout = undefined;
         }
-        if (this.heartbeatTimer) {
-            clearInterval(this.heartbeatTimer);
-            this.heartbeatTimer = undefined;
-        }
         if (this.pollTimer) {
             clearInterval(this.pollTimer);
             this.pollTimer = undefined;
@@ -122,6 +118,12 @@ class LocalAgentClient {
         while (this.activeTasks.size > 0 && Date.now() - start < timeout) {
             await new Promise(res => setTimeout(res, 50));
         }
+        // Keep leases alive while existing tasks drain; stop heartbeats only before closing.
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = undefined;
+        }
+
         // Orderly WebSocket close handshake
         if (this.ws) {
             const socket = this.ws;

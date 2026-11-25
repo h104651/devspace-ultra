@@ -2,7 +2,7 @@ import { LocalAgentClient } from '../local-agent/client';
 import {
   AGENT_EXIT_CODES,
   redactSensitiveLogLine,
-  stripSensitiveEnvInPlace
+  buildSanitizedAgentEnv
 } from '../local-agent/service-exit-codes';
 import dotenv from 'dotenv';
 import * as path from 'path';
@@ -67,20 +67,22 @@ async function main() {
       console.error(`[AGENT][CONFIG_ERROR] Specified env file does not exist: ${envPath}`);
       process.exit(AGENT_EXIT_CODES.CONFIG_ERROR);
     }
-    dotenv.config({ path: envPath });
-  } else {
-    dotenv.config();
   }
 
-  // Defense-in-depth: never retain unnecessary administrative or cloud secrets in worker process.env
-  const stripped = stripSensitiveEnvInPlace(process.env);
-  if (stripped.length > 0) {
-    console.warn(`[AGENT][SECURITY] Stripped unnecessary sensitive env vars from worker environment: ${stripped.join(', ')}`);
+  // Parse without populating process.env; apply the same allowlist to direct and supervised startup.
+  const filePath = envPath || path.resolve('.env');
+  const fileEnv = fs.existsSync(filePath) ? dotenv.parse(fs.readFileSync(filePath)) : {};
+  const sanitized = buildSanitizedAgentEnv(process.env, fileEnv);
+  for (const key of Object.keys(process.env)) delete process.env[key];
+  Object.assign(process.env, sanitized.env);
+  if (sanitized.strippedSensitiveKeys.length > 0) {
+    console.warn(`[AGENT][SECURITY] Stripped unnecessary sensitive env vars from worker environment: ${sanitized.strippedSensitiveKeys.join(', ')}`);
   }
 
   const gatewayUrl = process.env.GATEWAY_URL || 'ws://localhost:4000/ws/agent';
   const deviceId = process.env.AGENT_ID?.trim();
   const token = process.env.AGENT_TOKEN?.trim();
+  delete process.env.AGENT_TOKEN; // Keep the device credential in client memory, not inherited subprocess env.
   const agentName = (nameArg || process.env.AGENT_NAME)?.trim() || undefined;
   const allowRawShell = process.env.ALLOW_RAW_SHELL === 'true';
 
@@ -109,6 +111,7 @@ async function main() {
   let agent!: LocalAgentClient;
   let lockPath = '';
   let lockOwner = '';
+  let retainLock = false;
 
   const defaultShutdownTimeoutMs = Math.min(
     30000,
@@ -127,11 +130,13 @@ async function main() {
     try {
       await agent.stop({ timeoutMs });
     } catch (err: any) {
+      retainLock = true;
       console.error('[AGENT] Error during shutdown:', redactSensitiveLogLine(err?.message || String(err)));
     }
 
     const remaining = agent.getInFlightTasks();
-    if (remaining.length > 0) {
+    if (retainLock || remaining.length > 0) {
+      retainLock = true;
       const mutationCount = remaining.filter(t => t.isMutation).length;
       const taskSummary = remaining.map(t => `${t.taskId}(${t.capability}${t.isMutation ? ':mutation' : ''})`).join(', ');
       console.error(
@@ -207,7 +212,7 @@ async function main() {
   }
 
   process.once('exit', () => {
-    if (agent.hasInFlightTasks()) return;
+    if (retainLock || agent.hasInFlightTasks()) return;
     try {
       if (fs.readFileSync(lockPath, 'utf8') === lockOwner) fs.unlinkSync(lockPath);
     } catch { /* Leave an unverifiable lock intact. */ }
@@ -225,6 +230,10 @@ async function main() {
 
   process.on('SIGINT', () => { void performShutdown('SIGINT'); });
   process.on('SIGTERM', () => { void performShutdown('SIGTERM'); });
+  if (typeof process.send === 'function') {
+    process.on('disconnect', () => { void performShutdown('SUPERVISOR_DISCONNECTED'); });
+    if (!process.connected) void performShutdown('SUPERVISOR_DISCONNECTED');
+  }
   process.on('message', (msg: any) => {
     if (msg && typeof msg === 'object' && msg.type === 'SHUTDOWN') {
       const requestedTimeout = typeof msg.timeoutMs === 'number' ? msg.timeoutMs : undefined;

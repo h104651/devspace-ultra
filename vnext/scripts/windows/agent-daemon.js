@@ -236,9 +236,8 @@ function main() {
     }
   }
 
-  if (process.platform !== 'win32' && fs.existsSync(ipcEndpoint)) {
-    try { fs.unlinkSync(ipcEndpoint); } catch {}
-  }
+  // Never unlink another daemon's live or unverified endpoint.
+  // A stale socket requires operator reconciliation before restart.
 
   const ipcSecret = crypto.randomBytes(32).toString('hex');
   const daemonStartedAt = Date.now();
@@ -249,6 +248,8 @@ function main() {
   let restartTimer = null;
   let lastExitClassification = null;
   let ipcServer = null;
+  let ownsIpcEndpoint = false;
+  let shutdownPromise = null;
 
   function writeControlFile() {
     const payload = {
@@ -263,7 +264,13 @@ function main() {
       lockPath,
       startedAt: daemonStartedAt
     };
-    fs.writeFileSync(controlPath, JSON.stringify(payload, null, 2), { mode: 0o600 });
+    const temp = controlPath + '.' + process.pid + '.' + crypto.randomBytes(8).toString('hex') + '.tmp';
+    try {
+      fs.writeFileSync(temp, JSON.stringify(payload, null, 2), { mode: 0o600, flag: 'wx' });
+      fs.renameSync(temp, controlPath);
+    } finally {
+      try { fs.unlinkSync(temp); } catch {}
+    }
   }
 
   function removeOwnControlFile() {
@@ -274,7 +281,7 @@ function main() {
         fs.unlinkSync(controlPath);
       }
     } catch {}
-    if (process.platform !== 'win32' && fs.existsSync(ipcEndpoint)) {
+    if (ownsIpcEndpoint && process.platform !== 'win32' && fs.existsSync(ipcEndpoint)) {
       try { fs.unlinkSync(ipcEndpoint); } catch {}
     }
   }
@@ -293,7 +300,8 @@ function main() {
   }
 
   function initiateGracefulShutdown(reason, requestedTimeoutMs) {
-    return new Promise((resolve) => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = new Promise((resolve) => {
       if (isTerminating && !activeChild) {
         resolve({ ok: true, clean: true, exitCode: AGENT_EXIT_CODES.CLEAN, exitReason: 'ALREADY_STOPPING', lockRetained: fs.existsSync(lockPath) });
         return;
@@ -322,7 +330,7 @@ function main() {
         try { child.kill('SIGKILL'); } catch {}
       }, timeoutMs + 3000);
 
-      child.once('exit', (code, signal) => {
+      child.once('close', (code, signal) => {
         if (finished) return;
         finished = true;
         clearTimeout(forceTimer);
@@ -350,6 +358,7 @@ function main() {
         try { child.kill('SIGTERM'); } catch {}
       }
     });
+    return shutdownPromise;
   }
 
   function startAgent() {
@@ -389,7 +398,7 @@ function main() {
       }
     });
 
-    child.on('exit', (code, signal) => {
+    child.on('close', (code, signal) => {
       const lifespan = Date.now() - launchTime;
       const reason = classifyAgentExitCode(code);
       lastExitClassification = reason;
@@ -409,14 +418,11 @@ function main() {
         return;
       }
 
-      if (lifespan < 15000) {
-        consecutiveRapidExits++;
-      } else {
-        consecutiveRapidExits = 0;
-      }
+      // Bounded supervisor lifetime budget: slow recurring failures must not evade the breaker.
+      consecutiveRapidExits++;
 
       if (consecutiveRapidExits >= cfg.maxRapidRestarts) {
-        logger.log(`[DAEMON][CIRCUIT_BREAKER] Detected ${consecutiveRapidExits} rapid exits under 15s (limit=${cfg.maxRapidRestarts}). Halting auto-restart fail-closed; exiting daemon with 0.`);
+        logger.log(`[DAEMON][CIRCUIT_BREAKER] Detected ${consecutiveRapidExits} unexpected worker exits (limit=${cfg.maxRapidRestarts}). Halting auto-restart fail-closed; exiting daemon with 0.`);
         cleanupAndExit(0);
         return;
       }
@@ -437,6 +443,8 @@ function main() {
   ipcServer = net.createServer((socket) => {
     let buffer = '';
     socket.setEncoding('utf8');
+    socket.setTimeout(5000, () => socket.destroy());
+    let requestHandled = false;
 
     const reply = (obj, closeAfter = true) => {
       try {
@@ -448,6 +456,7 @@ function main() {
     };
 
     socket.on('data', async (chunk) => {
+      if (requestHandled) return;
       buffer += chunk;
       if (Buffer.byteLength(buffer, 'utf8') > 4096) {
         logger.log('[DAEMON][IPC_REJECT] Oversized IPC payload rejected.');
@@ -456,6 +465,8 @@ function main() {
       }
       const nl = buffer.indexOf('\n');
       if (nl === -1) return;
+      requestHandled = true;
+      socket.setTimeout(0);
       const rawLine = buffer.slice(0, nl).trim();
       buffer = '';
 
@@ -479,7 +490,7 @@ function main() {
         return;
       }
 
-      if (req.deviceId && String(req.deviceId).toLowerCase() !== deviceId.toLowerCase()) {
+      if (typeof req.deviceId !== 'string' || req.deviceId.toLowerCase() !== deviceId.toLowerCase()) {
         logger.log(`[DAEMON][IPC_REJECT] Device mismatch on IPC channel (${req.deviceId}).`);
         reply({ ok: false, error: 'DEVICE_MISMATCH' });
         return;
@@ -514,8 +525,7 @@ function main() {
 
       if (req.action === 'SHUTDOWN') {
         const result = await initiateGracefulShutdown('IPC SHUTDOWN', req.timeoutMs);
-        reply(result);
-        setImmediate(() => cleanupAndExit(0));
+        socket.end(JSON.stringify({ ...result, deviceId, daemonPid: process.pid }) + '\n', () => cleanupAndExit(0));
         return;
       }
 
@@ -532,6 +542,7 @@ function main() {
   });
 
   ipcServer.listen(ipcEndpoint, () => {
+    ownsIpcEndpoint = true;
     if (process.platform !== 'win32') {
       try { fs.chmodSync(ipcEndpoint, 0o600); } catch {}
     }

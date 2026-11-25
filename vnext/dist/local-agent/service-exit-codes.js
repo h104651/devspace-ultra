@@ -115,7 +115,7 @@ function buildSanitizedAgentEnv(parentEnv, fileEnv = {}) {
             continue;
         }
         if (exports.ALLOWED_SYSTEM_ENV_VARS.has(upper) || exports.ALLOWED_AGENT_ENV_VARS.has(upper)) {
-            sanitized[rawKey] = rawVal;
+            sanitized[upper] = rawVal;
         }
         else {
             dropped.add(rawKey);
@@ -130,7 +130,7 @@ function buildSanitizedAgentEnv(parentEnv, fileEnv = {}) {
             continue;
         }
         if (exports.ALLOWED_AGENT_ENV_VARS.has(upper)) {
-            sanitized[rawKey] = rawVal;
+            sanitized[upper] = rawVal;
         }
         else {
             dropped.add(rawKey);

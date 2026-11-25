@@ -94,19 +94,21 @@ async function main() {
             console.error(`[AGENT][CONFIG_ERROR] Specified env file does not exist: ${envPath}`);
             process.exit(service_exit_codes_1.AGENT_EXIT_CODES.CONFIG_ERROR);
         }
-        dotenv_1.default.config({ path: envPath });
     }
-    else {
-        dotenv_1.default.config();
-    }
-    // Defense-in-depth: never retain unnecessary administrative or cloud secrets in worker process.env
-    const stripped = (0, service_exit_codes_1.stripSensitiveEnvInPlace)(process.env);
-    if (stripped.length > 0) {
-        console.warn(`[AGENT][SECURITY] Stripped unnecessary sensitive env vars from worker environment: ${stripped.join(', ')}`);
+    // Parse without populating process.env; apply the same allowlist to direct and supervised startup.
+    const filePath = envPath || path.resolve('.env');
+    const fileEnv = fs.existsSync(filePath) ? dotenv_1.default.parse(fs.readFileSync(filePath)) : {};
+    const sanitized = (0, service_exit_codes_1.buildSanitizedAgentEnv)(process.env, fileEnv);
+    for (const key of Object.keys(process.env))
+        delete process.env[key];
+    Object.assign(process.env, sanitized.env);
+    if (sanitized.strippedSensitiveKeys.length > 0) {
+        console.warn(`[AGENT][SECURITY] Stripped unnecessary sensitive env vars from worker environment: ${sanitized.strippedSensitiveKeys.join(', ')}`);
     }
     const gatewayUrl = process.env.GATEWAY_URL || 'ws://localhost:4000/ws/agent';
     const deviceId = process.env.AGENT_ID?.trim();
     const token = process.env.AGENT_TOKEN?.trim();
+    delete process.env.AGENT_TOKEN; // Keep the device credential in client memory, not inherited subprocess env.
     const agentName = (nameArg || process.env.AGENT_NAME)?.trim() || undefined;
     const allowRawShell = process.env.ALLOW_RAW_SHELL === 'true';
     let projectsConfigFile = projectsConfigArg || process.env.LOCAL_PROJECTS_CONFIG || process.env.PROJECTS_CONFIG;
@@ -133,6 +135,7 @@ async function main() {
     let agent;
     let lockPath = '';
     let lockOwner = '';
+    let retainLock = false;
     const defaultShutdownTimeoutMs = Math.min(30000, Math.max(500, Number(process.env.DEVSPACE_SHUTDOWN_TIMEOUT_MS) || 10000));
     const performShutdown = async (reason, options) => {
         if (isTerminating)
@@ -144,10 +147,12 @@ async function main() {
             await agent.stop({ timeoutMs });
         }
         catch (err) {
+            retainLock = true;
             console.error('[AGENT] Error during shutdown:', (0, service_exit_codes_1.redactSensitiveLogLine)(err?.message || String(err)));
         }
         const remaining = agent.getInFlightTasks();
-        if (remaining.length > 0) {
+        if (retainLock || remaining.length > 0) {
+            retainLock = true;
             const mutationCount = remaining.filter(t => t.isMutation).length;
             const taskSummary = remaining.map(t => `${t.taskId}(${t.capability}${t.isMutation ? ':mutation' : ''})`).join(', ');
             console.error(`[AGENT][SHUTDOWN_TIMEOUT] Timed out waiting for ${remaining.length} in-flight task(s) (mutations=${mutationCount}): ${taskSummary}. Preserving lock for manual audit: ${lockPath}`);
@@ -220,7 +225,7 @@ async function main() {
         throw err;
     }
     process.once('exit', () => {
-        if (agent.hasInFlightTasks())
+        if (retainLock || agent.hasInFlightTasks())
             return;
         try {
             if (fs.readFileSync(lockPath, 'utf8') === lockOwner)
@@ -239,6 +244,11 @@ async function main() {
     catch { }
     process.on('SIGINT', () => { void performShutdown('SIGINT'); });
     process.on('SIGTERM', () => { void performShutdown('SIGTERM'); });
+    if (typeof process.send === 'function') {
+        process.on('disconnect', () => { void performShutdown('SUPERVISOR_DISCONNECTED'); });
+        if (!process.connected)
+            void performShutdown('SUPERVISOR_DISCONNECTED');
+    }
     process.on('message', (msg) => {
         if (msg && typeof msg === 'object' && msg.type === 'SHUTDOWN') {
             const requestedTimeout = typeof msg.timeoutMs === 'number' ? msg.timeoutMs : undefined;

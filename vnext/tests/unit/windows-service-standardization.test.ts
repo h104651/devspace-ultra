@@ -76,6 +76,11 @@ export async function runWindowsServiceStandardizationUnitTests(): Promise<{ pas
     assert.ok(res.strippedSensitiveKeys.includes('MASTER_SECRET'));
     assert.ok(res.strippedSensitiveKeys.includes('CLIENT_TOKEN'));
     assert.ok(res.droppedUnlistedKeys.includes('ARBITRARY_CUSTOM_ENV'));
+    const mixed = buildSanitizedAgentEnv({ Path: 'system-path', agent_id: 'old' }, { AGENT_ID: 'new', unknown_secret: 'must-not-pass' });
+    assert.strictEqual(mixed.env.PATH, 'system-path');
+    assert.strictEqual(mixed.env.AGENT_ID, 'new');
+    assert.strictEqual(mixed.env.agent_id, undefined);
+    assert.strictEqual(mixed.env.unknown_secret, undefined);
 
     const mutableEnv: Record<string, string | undefined> = {
       AGENT_ID: 'dev-1',

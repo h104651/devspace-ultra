@@ -14,13 +14,13 @@ Windows Task Scheduler (DevSpaceUltra_LocalAgent, LogonTrigger +10s, Interactive
 ### Key Guarantees
 1. **Release & Config Directory Separation**: Code lives in an immutable release directory (`DEVSPACE_RELEASE_DIR`); `.env`, `projects.json`, and `logs\` can live in an independent configuration directory (`DEVSPACE_CONFIG_DIR`).
 2. **Least-Privilege Child Environment**: `agent-daemon.js` constructs a strict allowlist environment for `agent-cli.js` (essential Windows runtime vars + Agent config keys). Administrative and cloud credentials (`ADMIN_SECRET`, `MASTER_SECRET`, `CLIENT_TOKEN`, `CLOUDFLARE_API_TOKEN`, `KAGGLE_KEY`, etc.) are stripped from both daemon child env and worker `process.env`.
-3. **Authenticated Same-User Local IPC Shutdown**:
-   - Each daemon generates a per-launch random `ipcSecret` stored with `0o600` permissions in `%USERPROFILE%\.devspace-ultra\agent-control\<sha256(deviceId)>.control.json`.
+3. **Authenticated Local IPC Shutdown (Windows ACL verification pending)**:
+   - Each daemon generates a per-launch random `ipcSecret` stored with requested POSIX `0o600` permissions (not a Windows DACL guarantee) in `%USERPROFILE%\.devspace-ultra\agent-control\<sha256(deviceId)>.control.json`.
    - `ipc-control.js` / `stop-agent.ps1` only accepts `STATUS` and `SHUTDOWN` actions authenticated with `crypto.timingSafeEqual` and matching `deviceId`. Arbitrary command execution is rejected (`FORBIDDEN_ACTION`).
    - On `SHUTDOWN`, the daemon immediately disables auto-restart, instructs `agent-cli.js` over private parent-child Node IPC to stop polling, drain active tasks within `timeoutMs`, close WebSocket (`1000`), and release `.lock` only when idle.
 4. **Fail-Closed Exit Codes & Task Scheduler Coordination**:
    - `0` (`CLEAN_STOP`), `10` (`CONFIG_ERROR`), `11` (`LOCK_CONFLICT`), `12` (`POLICY_REJECTED`), `13` (`SHUTDOWN_TIMEOUT_LOCK_RETAINED`) are non-retryable.
-   - `agent-daemon.js` halts auto-restart on non-retryable exit codes or after rapid-crash circuit-breaking (`maxRapidRestarts = 5`) and exits `0`, preventing Windows Task Scheduler `RestartOnFailure` from looping past fail-closed guards.
+   - `agent-daemon.js` halts auto-restart on non-retryable exit codes or after a bounded lifetime restart budget (`maxRapidRestarts = 5`) and exits `0`, preventing Windows Task Scheduler `RestartOnFailure` from looping past fail-closed guards.
    - Residual `.lock` files are **never** automatically deleted.
 5. **Log Rotation & Redaction**:
    - Writes to `<logDir>\agent-daemon.log`, rotating at `10 MB` (`maxLogFiles = 5`, keeping `.1`..`.5`), with automatic secret/token redaction.
@@ -95,6 +95,7 @@ Windows Task Scheduler (DevSpaceUltra_LocalAgent, LogonTrigger +10s, Interactive
 powershell -NoProfile -ExecutionPolicy Bypass -File "<ReleaseDir>\vnext\scripts\windows\stop-agent.ps1"
 ```
 - Uses authenticated IPC (`ipc-control.js shutdown`) to drain tasks, close WebSocket (`1000`), release `.lock`, and stop the daemon cleanly.
+- The stop script refuses wildcard process termination, and does not stop an unverified scheduled task. ForceOnTimeout is intentionally fail-closed pending independently verified target-specific recovery.
 - If `stop-agent.ps1` reports exit code `13` (`AUDIT_REQUIRED`) or timeout with retained `.lock`:
   1. Verify via `check-status.ps1` / `Get-CimInstance Win32_Process` that `agent-cli.js` and child processes have fully exited.
   2. Reconcile any uncertain tasks on the Gateway before manually removing `%USERPROFILE%\.devspace-ultra\agent-locks\<hash>.lock`.
