@@ -41,7 +41,6 @@ function getSessionLifecycleState(session, isRevoked, now = Date.now(), ttlMs = 
         return 'healthy';
     return 'stale';
 }
-
 /** Validate the process-lifetime proof and retain only its digest. */
 function parseReconnectIdentity(message) {
     if (message.reconnectProof === undefined && message.reconnectSequence === undefined)

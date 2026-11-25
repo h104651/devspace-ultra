@@ -124,6 +124,7 @@ export class LocalAgentClient {
     if (this.ws) {
       const socket = this.ws;
       this.ws = undefined;
+      this.registeredSocket = undefined;
       if (socket.readyState === WebSocket.OPEN) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
