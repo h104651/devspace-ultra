@@ -304,6 +304,11 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 1 (startup/IPC/duplicate/AGENT_NAME) failed:', err);
       failed++;
     } finally {
+      // Terminate only sockets from this test's private gateway before closing HTTP.
+      // Otherwise a timed-out startup can leave an upgraded WebSocket holding shutdown.
+      for (const conn of server.connectionManager.getConnectedAgents()) {
+        try { conn.socket.terminate(); } catch {}
+      }
       await server.stop().catch(() => {});
       if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
@@ -379,6 +384,11 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 3 (policy rejection fail-closed) failed:', err);
       failed++;
     } finally {
+      // Terminate only sockets from this test's private gateway before closing HTTP.
+      // Otherwise a timed-out startup can leave an upgraded WebSocket holding shutdown.
+      for (const conn of server.connectionManager.getConnectedAgents()) {
+        try { conn.socket.terminate(); } catch {}
+      }
       await server.stop().catch(() => {});
       if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
@@ -432,6 +442,8 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 4 (network disconnect & reconnect) failed:', err);
       failed++;
     } finally {
+      // Terminate only sockets from this test's private gateway before closing HTTP.
+      // Otherwise a timed-out startup can leave an upgraded WebSocket holding shutdown.
       for (const conn of server.connectionManager.getConnectedAgents()) {
         try { conn.socket.terminate(); } catch {}
       }
@@ -579,6 +591,11 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 6 (shutdown timeout with in-flight mutation) failed:', err);
       failed++;
     } finally {
+      // Terminate only sockets from this test's private gateway before closing HTTP.
+      // Otherwise a timed-out startup can leave an upgraded WebSocket holding shutdown.
+      for (const conn of server.connectionManager.getConnectedAgents()) {
+        try { conn.socket.terminate(); } catch {}
+      }
       await server.stop().catch(() => {});
       if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
