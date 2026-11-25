@@ -48,6 +48,25 @@ export async function runAgentLifecycleDurabilityTests(): Promise<{ passed: numb
     assert.strictEqual(server.connectionManager.getConnectedAgents().length, 1);
     passed++;
 
+    // Force a real abnormal transport close; the same agent object must reconnect
+    // without policy rejection, changing the authoritative session and retaining its process proof.
+    const priorSession = server.connectionManager.getAgent(deviceId)!;
+    const priorProof = priorSession.reconnectProofHash;
+    assert.ok(priorProof);
+    (agent as any).ws.terminate();
+    for (let i = 0; i < 100; i++) {
+      await new Promise(r => setTimeout(r, 50));
+      const next = server.connectionManager.getAgent(deviceId);
+      if (next && next.sessionId !== priorSession.sessionId && (agent as any).registeredSocket) break;
+    }
+    const reconnected = server.connectionManager.getAgent(deviceId)!;
+    assert.ok(reconnected && reconnected.sessionId !== priorSession.sessionId);
+    assert.strictEqual(reconnected.reconnectProofHash, priorProof);
+    assert.ok(reconnected.reconnectSequence! > priorSession.reconnectSequence!);
+    assert.strictEqual(server.connectionManager.getConnectedAgents().length, 1);
+    assert.strictEqual((agent as any).policyRejectedNotified, false);
+    passed++;
+
     // 2. Submit Task 1 -> Agent executes
     const task1Res = await server.taskRouter.routeTaskSubmit(
       {

@@ -1170,8 +1170,22 @@ export async function runConnectionLifecycleFencingTests(): Promise<{ passed: nu
     const malformed = await register(12, 'invalid');
     assert.strictEqual(malformed.closeReason, 'Invalid reconnect identity');
     assert.strictEqual(current.closed, false);
+    // A takeover must preserve the existing task-attempt safety policy.
+    const store = (gateway as any).taskStore as TaskStore;
+    const session = current.deserializeAttachment().sessionId;
+    const read = store.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: deviceId, payload: {} });
+    const write = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: deviceId, payload: {} });
+    store.claimTaskById(read.taskId, deviceId, undefined, session);
+    store.claimTaskById(write.taskId, deviceId, undefined, session);
+    store.startTask(write.taskId, deviceId, session);
+    const beforeWake = await register(12);
+    assert.strictEqual(beforeWake.sentMessages[0].type, 'AGENT_REGISTERED');
+    assert.strictEqual(store.getTask(read.taskId)?.status, 'queued');
+    assert.strictEqual(store.getTask(write.taskId)?.status, 'stale');
+    assert.strictEqual(store.getTask(write.taskId)?.error?.code, 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN');
+    current = beforeWake;
     const restored = new GatewayDurableObject(ctx, { MASTER_SECRET: testMasterSecret } as any);
-    const afterWake = await register(12, proof, restored);
+    const afterWake = await register(13, proof, restored);
     assert.strictEqual(afterWake.sentMessages[0].type, 'AGENT_REGISTERED');
     assert.strictEqual(current.closed, true);
     passed++;

@@ -76,17 +76,15 @@ export function getSessionLifecycleState(
   return 'stale';
 }
 
-/** Process-lifetime proof is a separate random 256-bit bearer credential, never the device token or IPC secret.
- * Store only its digest; require a strictly newer registration to fence delayed/replayed registrations.
- */
 export interface ReconnectIdentity {
   reconnectProofHash: string;
   reconnectSequence: number;
 }
 
+/** Validate the process-lifetime proof and retain only its digest. */
 export function parseReconnectIdentity(message: { reconnectProof?: unknown; reconnectSequence?: unknown }): ReconnectIdentity | undefined {
   if (message.reconnectProof === undefined && message.reconnectSequence === undefined) return undefined;
-  if (typeof message.reconnectProof !== 'string' || !/^[a-f0-9]{64}$/.test(message.reconnectProof) ||
+  if (typeof message.reconnectProof !== 'string' || message.reconnectProof.length !== 64 || !/^[a-f0-9]{64}$/.test(message.reconnectProof) ||
       typeof message.reconnectSequence !== 'number' || !Number.isSafeInteger(message.reconnectSequence) || message.reconnectSequence < 1) {
     throw new Error('INVALID_RECONNECT_IDENTITY');
   }

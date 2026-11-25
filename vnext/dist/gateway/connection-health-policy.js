@@ -42,13 +42,11 @@ function getSessionLifecycleState(session, isRevoked, now = Date.now(), ttlMs = 
     return 'stale';
 }
 
-/**
- * Store only a digest of the process-lifetime credential, never the credential itself.
- */
+/** Validate the process-lifetime proof and retain only its digest. */
 function parseReconnectIdentity(message) {
     if (message.reconnectProof === undefined && message.reconnectSequence === undefined)
         return undefined;
-    if (typeof message.reconnectProof !== 'string' || !/^[a-f0-9]{64}$/.test(message.reconnectProof) ||
+    if (typeof message.reconnectProof !== 'string' || message.reconnectProof.length !== 64 || !/^[a-f0-9]{64}$/.test(message.reconnectProof) ||
         typeof message.reconnectSequence !== 'number' || !Number.isSafeInteger(message.reconnectSequence) || message.reconnectSequence < 1) {
         throw new Error('INVALID_RECONNECT_IDENTITY');
     }

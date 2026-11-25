@@ -34,6 +34,7 @@ export class LocalAgentClient {
   private isStopping = false;
   private reconnectTimeout?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
+  private registrationTimer?: NodeJS.Timeout;
   private pollTimer?: NodeJS.Timeout;
   private activeTasks: Map<string, DurableTask> = new Map();
   private reconnectAttempts = 0;
@@ -96,6 +97,10 @@ export class LocalAgentClient {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = undefined;
+    }
+    if (this.registrationTimer) {
+      clearTimeout(this.registrationTimer);
+      this.registrationTimer = undefined;
     }
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
@@ -211,6 +216,9 @@ export class LocalAgentClient {
       this.lastPolicyError = undefined;
       this.refreshExecutorConfigIfIdle();
       this.registerWithGateway(probe);
+      this.registrationTimer = setTimeout(() => {
+        if (this.ws === socket && this.registeredSocket !== socket && this.isRunning) socket.terminate();
+      }, 15_000);
       this.startHeartbeat();
       this.startPollLoop(probe.capabilities);
     });
@@ -230,6 +238,8 @@ export class LocalAgentClient {
       const wasRegistered = this.registeredSocket === socket;
       this.ws = undefined;
       this.registeredSocket = undefined;
+      if (this.registrationTimer) clearTimeout(this.registrationTimer);
+      this.registrationTimer = undefined;
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       if (this.pollTimer) clearInterval(this.pollTimer);
 
@@ -344,6 +354,8 @@ export class LocalAgentClient {
     if (msg.type === 'AGENT_REGISTERED') {
       if (msg.deviceId === this.config.deviceId) {
         this.registeredSocket = socket;
+        if (this.registrationTimer) clearTimeout(this.registrationTimer);
+        this.registrationTimer = undefined;
         this.reconnectAttempts = 0;
         this.legacyRetryAvailable = false;
       }
