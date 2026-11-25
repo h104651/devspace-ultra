@@ -1,0 +1,9 @@
+{
+  "releaseDir": "..\\..",
+  "configDir": "..\\..",
+  "logDir": "..\\..\\logs",
+  "maxLogBytes": 10485760,
+  "maxLogFiles": 5,
+  "maxRapidRestarts": 5,
+  "shutdownTimeoutMs": 10000
+}

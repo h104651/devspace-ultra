@@ -39,6 +39,7 @@ const crypto = __importStar(require("crypto"));
 const fs = __importStar(require("fs"));
 const task_executor_1 = require("./task-executor");
 const environment_probe_1 = require("./environment-probe");
+const capabilities_1 = require("./capabilities");
 class LocalAgentClient {
     config;
     executor;
@@ -55,6 +56,8 @@ class LocalAgentClient {
     reconnectAttempts = 0;
     registeredSocket;
     taskSockets = new Map();
+    lastPolicyError;
+    policyRejectedNotified = false;
     constructor(config) {
         this.config = {
             ...config,
@@ -73,6 +76,22 @@ class LocalAgentClient {
     }
     hasInFlightTasks() {
         return this.activeTasks.size > 0;
+    }
+    getInFlightTasks() {
+        return Array.from(this.activeTasks.values()).map((task) => ({
+            taskId: task.taskId,
+            capability: task.capability,
+            isMutation: (0, capabilities_1.isSideEffectCapability)(task.capability)
+        }));
+    }
+    notifyPolicyRejected(reason) {
+        if (this.policyRejectedNotified)
+            return;
+        this.policyRejectedNotified = true;
+        try {
+            this.config.onPolicyRejected?.(reason);
+        }
+        catch { }
     }
     start() {
         if (this.isRunning || this.isStopping || this.activeTasks.size > 0)
@@ -197,6 +216,7 @@ class LocalAgentClient {
                 return;
             }
             this.reconnectAttempts = 0;
+            this.lastPolicyError = undefined;
             this.refreshExecutorConfigIfIdle();
             this.registerWithGateway(probe);
             this.startHeartbeat();
@@ -222,11 +242,16 @@ class LocalAgentClient {
                 clearInterval(this.heartbeatTimer);
             if (this.pollTimer)
                 clearInterval(this.pollTimer);
+            const closeReason = reason?.toString() || '';
+            const policyReason = (code === 1008 && /duplicate|superseded|fenced|already registered|revoked/i.test(closeReason))
+                ? closeReason
+                : this.lastPolicyError;
             // Policy rejection is not a transient transport failure. Require operator
             // action rather than allowing two processes to continuously evict each other.
-            if (code === 1008 && /duplicate|superseded|fenced|already registered|revoked/i.test(reason.toString())) {
+            if (policyReason) {
                 this.isRunning = false;
-                console.warn('[AGENT] Session rejected by gateway; restart manually after resolving duplicate or revoked identity.');
+                console.warn(`[AGENT] Session rejected by gateway (${policyReason}); restart manually after resolving duplicate or revoked identity.`);
+                this.notifyPolicyRejected(policyReason);
                 return;
             }
             if (this.isRunning)
@@ -302,6 +327,14 @@ class LocalAgentClient {
     handleGatewayMessage(msg, socket = this.ws) {
         if (!socket || socket !== this.ws)
             return;
+        if (msg.type === 'ERROR') {
+            const errText = typeof msg.error === 'string' ? msg.error : '';
+            if (/^(AUTH_FAILED|DEVICE_REVOKED|TOKEN_SUPERSEDED|SESSION_FENCED)\b/i.test(errText)) {
+                this.lastPolicyError = errText;
+                this.isRunning = false;
+            }
+            return;
+        }
         if (msg.type === 'AGENT_REGISTERED') {
             if (msg.deviceId === this.config.deviceId)
                 this.registeredSocket = socket;

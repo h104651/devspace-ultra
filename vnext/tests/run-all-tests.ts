@@ -25,6 +25,8 @@ import { runBootstrapTokenSecurityTests } from './security/bootstrap-token-secur
 import { runMultiDeviceRoutingTests } from './integration/multi-device-routing.test';
 import { runInventoryTasksUnitTests } from './unit/inventory-tasks.test';
 import { runWorkflowDeploymentGateTests } from './unit/workflow-deployment-gate.test';
+import { runWindowsServiceStandardizationUnitTests } from './unit/windows-service-standardization.test';
+import { runWindowsServiceDaemonIntegrationTests } from './integration/windows-service-daemon.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
 import { runWorkerRoutingRecoveryTests } from './cloudflare/worker-routing-recovery.test';
 import { runRemoteTaskWaitProductionTests } from './cloudflare/remote-task-wait-production.test';
@@ -92,7 +94,9 @@ async function main() {
     { name: 'Security: Bootstrap Token Security & Redaction', runner: runBootstrapTokenSecurityTests },
     { name: 'Unit: Read-Only Task Inventory & Preflight Verification', runner: runInventoryTasksUnitTests },
     { name: 'Unit: GitHub Actions Deployment Gate & Authorization', runner: runWorkflowDeploymentGateTests },
-    { name: 'Integration: Connection Lifecycle & Fencing (T01-T24)', runner: runConnectionLifecycleFencingTests }
+    { name: 'Unit: Windows Agent Service Standardization & Security', runner: runWindowsServiceStandardizationUnitTests },
+    { name: 'Integration: Connection Lifecycle & Fencing (T01-T24)', runner: runConnectionLifecycleFencingTests },
+    { name: 'Integration: Windows Service Daemon & IPC Lifecycle', runner: runWindowsServiceDaemonIntegrationTests }
   ];
 
   for (const suite of suites) {
