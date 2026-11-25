@@ -12,6 +12,7 @@ import { runDeviceStatusLiveCapabilitiesUnitTests } from './unit/device-status-l
 import { runLocalFastToolsBoundedResultTests } from './unit/local-fast-tools-bounded-result.test';
 import { runInventoryTasksUnitTests } from './unit/inventory-tasks.test';
 import { runWorkflowDeploymentGateTests } from './unit/workflow-deployment-gate.test';
+import { runWindowsServiceStandardizationUnitTests } from './unit/windows-service-standardization.test';
 import { runMcp2026Tests } from './mcp/mcp-2026.test';
 
 async function main() {
@@ -36,6 +37,7 @@ async function main() {
     { name: 'Unit: Local Fast Tools Bounded Direct Results', runner: runLocalFastToolsBoundedResultTests },
     { name: 'Unit: Read-Only Task Inventory & Preflight Verification', runner: runInventoryTasksUnitTests },
     { name: 'Unit: GitHub Actions Deployment Gate & Authorization', runner: runWorkflowDeploymentGateTests },
+    { name: 'Unit: Windows Agent Service Standardization & Security', runner: runWindowsServiceStandardizationUnitTests },
     { name: 'Protocol: MCP 2026-07-28 Wire Validation', runner: runMcp2026Tests }
   ];
 

@@ -16,6 +16,10 @@ dist/*.map
 # Local DevSpace / Chat Swarm state and sensitive runtime data
 .local/
 .devspace/
+logs/
+projects.json
+service-config.json
+vnext/scripts/windows/service-config.json
 chat-swarm-state.json
 browser-control-state.json
 controller-state.json

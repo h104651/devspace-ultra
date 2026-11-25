@@ -14,6 +14,7 @@ import { runKaggleWorkspaceTests } from './integration/kaggle-workspace.test';
 import { runKaggleDatasetFileTests } from './integration/kaggle-dataset-file.test';
 import { runKaggleDurableReconciliationTests } from './integration/kaggle-durable-reconciliation.test';
 import { runConnectionLifecycleFencingTests } from './integration/connection-lifecycle-fencing.test';
+import { runWindowsServiceDaemonIntegrationTests } from './integration/windows-service-daemon.test';
 import { runWorkersRuntimeTests } from './cloudflare/workers-runtime.test';
 import { runWorkerRoutingRecoveryTests } from './cloudflare/worker-routing-recovery.test';
 import { runRemoteTaskWaitProductionTests } from './cloudflare/remote-task-wait-production.test';
@@ -47,6 +48,7 @@ async function main() {
     { name: 'Integration: Stale Task Recovery', runner: runStaleRecoveryIntegrationTests },
     { name: 'Integration: Idempotency & Replays', runner: runIdempotencyIntegrationTests },
     { name: 'Integration: Connection Lifecycle & Fencing (T01-T24)', runner: runConnectionLifecycleFencingTests },
+    { name: 'Integration: Windows Service Daemon & IPC Lifecycle', runner: runWindowsServiceDaemonIntegrationTests },
     { name: 'Cloudflare: Workers Runtime & SQLite DO & R2 Adapter', runner: runWorkersRuntimeTests },
     { name: 'Cloudflare: Non-destructive Recovery Singleton Routing', runner: runWorkerRoutingRecoveryTests },
     { name: 'Cloudflare: Production remote_task_wait MCP Surface', runner: runRemoteTaskWaitProductionTests },
