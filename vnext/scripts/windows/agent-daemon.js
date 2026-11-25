@@ -123,7 +123,10 @@ function main() {
     ? path.resolve(process.env.DEVSPACE_AGENT_CONTROL_DIR)
     : path.join(os.homedir(), '.devspace-ultra', 'agent-control');
 
-  assertPrivateDirectory(controlDir, true);
+  try { assertPrivateDirectory(controlDir, true); } catch {
+    logger.log('[DAEMON][FAIL_CLOSED] IPC_ACL_INVALID: private control directory not verified.');
+    process.exit(0);
+  }
 
   logger.log('=== DevSpace Ultra Local Agent Daemon Starting ===');
   logger.log(`Release Directory  : ${cfg.releaseDir}`);
@@ -167,7 +170,12 @@ function main() {
     // Retain new owner record so repeated attempts cannot bypass the audit.
     process.exit(0);
   }
-  if (ipcTransport === 'mailbox') assertPrivateDirectory(ipcEndpoint, true);
+  if (ipcTransport === 'mailbox') {
+    try { assertPrivateDirectory(ipcEndpoint, true); } catch {
+      logger.log('[DAEMON][FAIL_CLOSED] IPC_ACL_INVALID: private mailbox not verified; owner retained for audit.');
+      process.exit(0);
+    }
+  }
 
   const ipcSecret = crypto.randomBytes(32).toString('hex');
   const daemonStartedAt = Date.now();
@@ -310,7 +318,6 @@ function main() {
 
     activeChild = child;
     activeAgentPid = child.pid;
-    writeControlFile();
     logger.log(`[DAEMON] Agent worker started with PID: ${child.pid}`);
 
     child.stdout.on('data', (d) => {
@@ -327,8 +334,12 @@ function main() {
 
     child.on('message', (msg) => {
       if (msg && msg.type === 'AGENT_STARTED') {
-        activeAgentPid = msg.pid || child.pid;
-        writeControlFile();
+        if (msg.pid !== child.pid || msg.deviceId !== deviceId || msg.lockPath !== lockPath) {
+          failClosed('WORKER_IDENTITY_MISMATCH');
+          return;
+        }
+        activeAgentPid = child.pid;
+        try { writeControlFile(); } catch { failClosed('IPC_CONTROL_PUBLISH_FAILURE'); return; }
         logger.log(`[DAEMON] Lock ownership confirmed for PID ${activeAgentPid} (${msg.lockPath || lockPath}).`);
       }
     });
@@ -340,7 +351,7 @@ function main() {
       if (activeChild === child) {
         activeChild = null;
         activeAgentPid = null;
-        writeControlFile();
+        try { writeControlFile(); } catch { failClosed('IPC_CONTROL_PUBLISH_FAILURE'); return; }
       }
 
       logger.log(`[DAEMON] Agent worker PID ${child.pid} exited (code=${code}, signal=${signal}, reason=${reason}, lived=${Math.round(lifespan / 1000)}s).`);
@@ -373,6 +384,7 @@ function main() {
     child.on('error', (err) => {
       logger.log(`[DAEMON] Child spawn error: ${redactSensitiveLogLine(err.message)}`);
     });
+    try { writeControlFile(); } catch { failClosed('IPC_CONTROL_PUBLISH_FAILURE'); }
   }
 
   async function handleIpcRequest(req) {
@@ -431,9 +443,11 @@ function main() {
         failClosed('IPC_MAILBOX_FAILURE');
       } finally { mailboxBusy = false; }
     }, 100);
-    writeControlFile();
-    logger.log('[DAEMON] Private Windows IPC mailbox ready.');
-    startAgent();
+    try {
+      writeControlFile();
+      logger.log('[DAEMON] Private Windows IPC mailbox ready.');
+      startAgent();
+    } catch { failClosed('IPC_INITIALIZATION_FAILURE'); }
   } else {
     ipcServer = net.createServer((socket) => {
       let buffer = '';

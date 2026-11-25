@@ -527,5 +527,35 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
     }
   }
 
+  // Test 7: An existing unverified control directory must fail closed before worker launch.
+  {
+    const dirs = createIsolatedDirs('dsu-svc-unsafe-acl-');
+    let daemon: ChildProcess | undefined;
+    try {
+      // On Windows this deliberately has an inherited, unprotected DACL.
+      // On POSIX use an explicitly group/world-accessible directory.
+      fs.mkdirSync(dirs.controlDir, { recursive: true });
+      if (process.platform !== 'win32') fs.chmodSync(dirs.controlDir, 0o777);
+      const deviceId = 'unsafe-acl-test-device';
+      fs.writeFileSync(path.join(dirs.configDir, '.env'),
+        'GATEWAY_URL=ws://127.0.0.1:1/ws/agent\nAGENT_ID=' + deviceId + '\nAGENT_TOKEN=dsu_device_placeholder.sig\n');
+      daemon = spawn(process.execPath, [DAEMON_SCRIPT], { env: buildTestEnv(dirs), stdio: 'ignore', windowsHide: true });
+      await waitFor(() => daemon!.exitCode !== null, 20000);
+      assert.strictEqual(daemon.exitCode, 0);
+      const log = fs.readFileSync(path.join(dirs.logDir, 'agent-daemon.log'), 'utf8');
+      assert.ok(log.includes('IPC_ACL_INVALID'));
+      assert.ok(!log.includes('Agent worker started'));
+      assert.strictEqual(fs.existsSync(controlPathFor(dirs.controlDir, deviceId)), false);
+      assert.strictEqual(fs.existsSync(lockPathFor(dirs.lockDir, deviceId)), false);
+      passed++;
+    } catch (err) {
+      console.error('Integration Test 7 (unsafe IPC control directory) failed:', err);
+      failed++;
+    } finally {
+      if (daemon && daemon.exitCode === null) try { daemon.kill('SIGKILL'); } catch {}
+      fs.rmSync(dirs.root, { recursive: true, force: true });
+    }
+  }
+
   return { passed, failed };
 }

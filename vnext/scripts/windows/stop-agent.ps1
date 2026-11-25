@@ -43,6 +43,7 @@ $result = $null
 try { $result = $ipcOutput | ConvertFrom-Json } catch {}
 if ($ipcExit -ne 0 -or -not $result -or -not $result.ok -or
     $result.deviceId -ine $before.deviceId -or $result.daemonPid -ne $before.daemonPid -or
+    -not $before.instanceId -or $result.instanceId -cne $before.instanceId -or
     -not $result.clean -or $result.exitCode -ne 0 -or $result.lockRetained) {
     Write-Host '[AUDIT_REQUIRED] Stop was not confirmed clean. No fallback kill or lock deletion performed.' -ForegroundColor Red
     if ($ForceOnTimeout) { Write-Host 'ForceOnTimeout is intentionally disabled until exact process-tree recovery is independently verified.' }

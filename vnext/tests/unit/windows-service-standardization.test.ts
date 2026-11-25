@@ -157,7 +157,12 @@ export async function runWindowsServiceStandardizationUnitTests(): Promise<{ pas
     assert.ok(registerPs1.includes('-ExecutionTimeLimit (New-TimeSpan -Days 0)'));
 
     const stopPs1 = fs.readFileSync(path.join(winDir, 'stop-agent.ps1'), 'utf8');
-    assert.ok(stopPs1.includes('ipc-control.js'));
+    const commonPs1 = fs.readFileSync(path.join(winDir, 'service-common.ps1'), 'utf8');
+    assert.ok(commonPs1.includes('ipc-control.js'));
+    assert.ok(stopPs1.includes('service-common.ps1') && stopPs1.includes('Assert-ServiceStatus'));
+    assert.ok(stopPs1.includes('shutdown --device-id') && stopPs1.includes('AUDIT_REQUIRED'));
+    assert.ok(!/\bStop-Process\s+-/i.test(stopPs1), 'Wildcard or unverified force-kill must not be restored');
+    assert.ok(!/\bStop-ScheduledTask\s+-/i.test(stopPs1), 'Stop must not blindly stop a scheduled task');
     assert.ok(!stopPs1.includes('Remove-Item') || !stopPs1.includes('.lock'));
     passed++;
   } catch (err) {
