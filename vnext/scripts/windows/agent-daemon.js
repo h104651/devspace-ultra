@@ -103,7 +103,7 @@ function main() {
   } = helpers;
 
   const logger = createLogWriter(cfg.logDir, cfg.maxLogBytes, cfg.maxLogFiles, redactSensitiveLogLine);
-  const fileEnv = loadDotEnvFile(cfg.envPath);
+  const fileEnv = loadDotEnvFile(cfg.envPath, cfg.releaseDir);
   const sanitized = buildSanitizedAgentEnv(process.env, fileEnv);
   const childEnv = {
     ...sanitized.env,

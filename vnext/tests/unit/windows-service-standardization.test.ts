@@ -1,6 +1,8 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import { spawnSync } from 'child_process';
 import {
   AGENT_EXIT_CODES,
   NON_RETRYABLE_EXIT_CODES,
@@ -153,6 +155,9 @@ export async function runWindowsServiceStandardizationUnitTests(): Promise<{ pas
 
     const registerPs1 = fs.readFileSync(path.join(winDir, 'register-agent-task.ps1'), 'utf8');
     assert.ok(registerPs1.includes('-RunLevel Limited'));
+    assert.ok(registerPs1.includes("-TaskPath '\\'"));
+    assert.ok(!registerPs1.includes("-TaskPath ''"));
+    assert.ok(registerPs1.includes('-Force:([bool]$existing)'));
     assert.ok(registerPs1.includes('-MultipleInstances IgnoreNew'));
     assert.ok(registerPs1.includes('-ExecutionTimeLimit (New-TimeSpan -Days 0)'));
 
@@ -168,6 +173,35 @@ export async function runWindowsServiceStandardizationUnitTests(): Promise<{ pas
   } catch (err) {
     console.error('Windows script static contract test failed:', err);
     failed++;
+  }
+
+  // 5. Standalone launcher resolves the configured release's dotenv dependency.
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-launcher-config-'));
+  try {
+    const release = path.resolve(__dirname, '../..');
+    const launcher = path.join(fixture, 'launcher');
+    const config = path.join(fixture, 'config');
+    fs.mkdirSync(launcher);
+    fs.mkdirSync(config);
+    fs.copyFileSync(path.join(release, 'scripts', 'windows', 'service-config.js'), path.join(launcher, 'service-config.js'));
+    fs.writeFileSync(path.join(launcher, 'service-config.json'), JSON.stringify({ releaseDir: release, configDir: '../config' }));
+    fs.writeFileSync(path.join(config, '.env'), 'AGENT_ID=standalone-launcher-test\nAGENT_TOKEN=fixture-token-must-not-print\n');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(DEVSPACE_|AGENT_|NODE_PATH$)/i.test(key)));
+    const result = spawnSync(process.execPath, [path.join(launcher, 'service-config.js')], {
+      cwd: config, env, encoding: 'utf8', timeout: 30000, windowsHide: true
+    });
+    assert.strictEqual(result.status, 0, result.stderr);
+    const identity = JSON.parse(result.stdout);
+    assert.strictEqual(identity.deviceId, 'standalone-launcher-test');
+    assert.strictEqual(identity.configDir, config);
+    assert.strictEqual(identity.releaseDir, release);
+    assert.ok(!result.stdout.includes('fixture-token-must-not-print'));
+    passed++;
+  } catch (err) {
+    console.error('Standalone launcher configuration test failed:', err);
+    failed++;
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
   }
 
   return { passed, failed };

@@ -14,9 +14,9 @@ $resolvedLauncherDir = $ctx.launcherDir
 $vbsPath = $ctx.vbsPath
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ((Get-PrincipalSid $UserId) -ne $currentSid) { throw 'Only current user may register this service.' }
-$existing = Get-ScheduledTask -TaskName $TaskName -TaskPath '' -ErrorAction SilentlyContinue
+$existing = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
 if ($existing) {
-    if (-not $ReplaceExisting -or $existing.State -eq 'Running' -or (Get-PrincipalSid $existing.Principal.UserId) -ne $currentSid) {
+    if (-not $ReplaceExisting -or $existing.State -notin @('Ready', 'Disabled') -or (Get-PrincipalSid $existing.Principal.UserId) -ne $currentSid) {
         throw 'Existing task requires explicit migration, same user, and confirmed stopped state.'
     }
 }
@@ -58,7 +58,7 @@ Register-ScheduledTask `
     -Settings $settings `
     -Principal $principal `
     -Description 'DevSpace Ultra Local Outbound Agent Background Daemon (Least-Privilege)' `
-    -Force:$ReplaceExisting | Out-Null
+    -Force:([bool]$existing) | Out-Null
 
 Write-Host "[SUCCESS] Scheduled Task registered: $TaskName" -ForegroundColor Green
 Write-Host "  User      : $UserId (Interactive, Limited)" -ForegroundColor Gray

@@ -1,6 +1,5 @@
 const path = require('path');
 const fs = require('fs');
-const dotenv = require('dotenv');
 
 function parseArgs(argv) {
   const parsed = {};
@@ -17,8 +16,13 @@ function parseArgs(argv) {
   return parsed;
 }
 
-function loadDotEnvFile(envPath) {
-  return fs.existsSync(envPath) ? dotenv.parse(fs.readFileSync(envPath)) : {};
+function loadDotEnvFile(envPath, releaseDir) {
+  if (!fs.existsSync(envPath)) return {};
+  // An independently installed launcher has no node_modules of its own.
+  // Prefer the configured release's parser; an in-repository launcher can also
+  // resolve its existing dependency (including isolated test release fixtures).
+  const dotenv = require(require.resolve('dotenv', { paths: [releaseDir, __dirname] }));
+  return dotenv.parse(fs.readFileSync(envPath));
 }
 
 function resolveConfiguration(argv = process.argv.slice(2)) {
@@ -63,7 +67,7 @@ function resolveConfiguration(argv = process.argv.slice(2)) {
 }
 
 function resolveIdentity(cfg) {
-  const fileEnv = loadDotEnvFile(cfg.envPath);
+  const fileEnv = loadDotEnvFile(cfg.envPath, cfg.releaseDir);
   const normalized = {};
   for (const [k,v] of Object.entries(process.env)) normalized[k.toUpperCase()] = v;
   for (const [k,v] of Object.entries(fileEnv)) normalized[k.toUpperCase()] = v;

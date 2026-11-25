@@ -123,7 +123,6 @@ class LocalAgentClient {
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = undefined;
         }
-
         // Orderly WebSocket close handshake
         if (this.ws) {
             const socket = this.ws;

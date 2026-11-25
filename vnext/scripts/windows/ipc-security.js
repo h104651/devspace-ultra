@@ -9,7 +9,11 @@ function validateWindowsAcl(target, kind, create = false) {
   const powershell = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'ipc-private-acl.ps1'), '-LiteralPath', target, '-Kind', kind];
   if (create) args.push('-Create');
-  const result = spawnSync(powershell, args, { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+  // Windows PowerShell 5.1 must never inherit PowerShell 7 module search paths.
+  // Normalize the key case too: Windows environment variable names are case-insensitive.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
+  env.PSModulePath = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+  const result = spawnSync(powershell, args, { env, windowsHide: true, encoding: 'utf8', timeout: 15000 });
   if (result.error || result.status !== 0) throw new Error('IPC_ACL_INVALID: protected local control path not verified');
 }
 

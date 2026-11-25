@@ -91,6 +91,8 @@ Windows Task Scheduler (DevSpaceUltra_LocalAgent, LogonTrigger +10s, Interactive
 
 ## 4. Operations, Graceful Stop & Safe Rollback
 
+Windows ACL validation explicitly uses the Windows PowerShell 5.1 system module directory even when launched from PowerShell 7. The ACL policy is unchanged: an unsafe parent or inherited control directory is rejected. Windows service integration fixtures use a newly protected directory under the user profile rather than weakening the production rule for AppContainer-enabled Temp directories. An independently installed launcher resolves its dotenv parser from the selected release.
+
 All management scripts resolve the same `service-config.json` relative to the launcher. Explicit DeviceId/ConfigDir/ReleaseDir arguments are consistency checks, not alternate launch paths. A task pointing to another launcher is refused. Do not use the old wildcard force-stop scripts.
 
 ### Graceful Stop

@@ -4,12 +4,35 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { spawn, spawnSync, ChildProcess } from 'child_process';
+import { spawn, execFile, ChildProcess } from 'child_process';
 import { GatewayServer } from '../../src/gateway/server';
 
 const VNEXT_ROOT = path.resolve(__dirname, '../..');
 const DAEMON_SCRIPT = path.join(VNEXT_ROOT, 'scripts', 'windows', 'agent-daemon.js');
 const IPC_CONTROL_SCRIPT = path.join(VNEXT_ROOT, 'scripts', 'windows', 'ipc-control.js');
+const IS_WINDOWS = process.platform === 'win32';
+const STARTUP_TIMEOUT = IS_WINDOWS ? 60000 : 12000;
+const IPC_PROCESS_TIMEOUT = IS_WINDOWS ? 60000 : 12000;
+const CLEANUP_TIMEOUT = IS_WINDOWS ? 45000 : 20000;
+function childExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function invokeIpc(dirs: ReturnType<typeof createIsolatedDirs>, deviceId: string, timeoutMs: number): Promise<any> {
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath,
+      [IPC_CONTROL_SCRIPT, 'shutdown', '--device-id', deviceId, '--timeout-ms', String(timeoutMs), '--json'],
+      { env: buildTestEnv(dirs), encoding: 'utf8', timeout: IPC_PROCESS_TIMEOUT, windowsHide: true },
+      (err, stdout) => {
+        // Unclean shutdown may have a non-zero status. Preserve the structured result.
+        try {
+          if (!stdout.trim()) throw err || new Error('Missing IPC response');
+          resolve(JSON.parse(stdout.trim()));
+        } catch (parseError) { reject(parseError); }
+      }
+    );
+  });
+}
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 10000, intervalMs = 50): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -21,7 +44,16 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
 }
 
 function createIsolatedDirs(prefix: string) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  // Standard Windows Temp can inherit AppContainer FullControl ACEs. Do not
+  // weaken production parent checks to make fixtures pass. Create a new
+  // protected, randomly named test root under the real user profile instead.
+  const root = IS_WINDOWS
+    ? path.join(os.homedir(), prefix + crypto.randomBytes(12).toString('hex'))
+    : fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  if (IS_WINDOWS) {
+    const { assertPrivateDirectory } = require(path.join(VNEXT_ROOT, 'scripts', 'windows', 'ipc-security.js'));
+    assertPrivateDirectory(root, true);
+  }
   const releaseDir = VNEXT_ROOT;
   const configDir = path.join(root, 'config');
   const logDir = path.join(root, 'logs');
@@ -62,14 +94,59 @@ function controlPathFor(controlDir: string, deviceId: string): string {
 }
 
 async function stopDaemonGracefully(dirs: ReturnType<typeof createIsolatedDirs>, daemon: ChildProcess, deviceId: string): Promise<any> {
-  if (daemon.exitCode !== null) return { alreadyExited: true, code: daemon.exitCode };
-  const res = spawnSync(
-    process.execPath,
-    [IPC_CONTROL_SCRIPT, 'shutdown', '--device-id', deviceId, '--timeout-ms', '4000', '--json'],
-    { env: buildTestEnv(dirs), encoding: 'utf8', timeout: 12000 }
-  );
-  await waitFor(() => daemon.exitCode !== null, 5000);
-  return JSON.parse((res.stdout || '{}').trim() || '{}');
+  if (childExited(daemon)) return { alreadyExited: true, code: daemon.exitCode };
+  const result = await invokeIpc(dirs, deviceId, 4000);
+  await waitFor(() => childExited(daemon), IS_WINDOWS ? 20000 : 5000);
+  return result;
+}
+
+// Cleanup is limited to this test's own spawned handles and unique directories.
+// PID records are used only to wait, never to terminate an arbitrary process.
+function recordedWorkerPids(dirs: ReturnType<typeof createIsolatedDirs>): number[] {
+  const pids = new Set<number>();
+  function readPid(file: string, key: string) {
+    try {
+      const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (value.nonce === 'existing-sentinel') return;
+      const pid = value[key];
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) pids.add(pid);
+    } catch {}
+  }
+  for (const [dir, suffix, key] of [[dirs.lockDir, '.lock', 'pid'], [dirs.controlDir, '.control.json', 'agentPid']]) {
+    try {
+      for (const name of fs.readdirSync(dir)) if (name.endsWith(suffix)) readPid(path.join(dir, name), key);
+    } catch {}
+  }
+  readPid(path.join(dirs.workspaceDir, 'slow-child.json'), 'pid');
+  return [...pids];
+}
+function pidStillAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (err: any) { return err?.code !== 'ESRCH'; }
+}
+async function cleanupIsolatedDirs(dirs: ReturnType<typeof createIsolatedDirs>, spawned: ChildProcess[]): Promise<boolean> {
+  try {
+    const workers = new Set(recordedWorkerPids(dirs));
+    for (const daemon of spawned) {
+      if (childExited(daemon)) continue;
+      // Only the exact ChildProcess object created in this isolated test.
+      try { daemon.kill('SIGTERM'); } catch {}
+    }
+    for (const daemon of spawned) {
+      if (childExited(daemon)) continue;
+      try { await waitFor(() => childExited(daemon), IS_WINDOWS ? 15000 : 5000); }
+      catch {
+        if (!childExited(daemon)) { try { daemon.kill('SIGKILL'); } catch {} }
+        await waitFor(() => childExited(daemon), 10000);
+      }
+    }
+    for (const pid of recordedWorkerPids(dirs)) workers.add(pid);
+    await waitFor(() => [...workers].every(pid => !pidStillAlive(pid)), CLEANUP_TIMEOUT);
+    await fs.promises.rm(dirs.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    return true;
+  } catch (err) {
+    console.error('Isolated service fixture cleanup not verified; preserving remaining evidence:', dirs.root, err);
+    return false;
+  }
 }
 
 function sendRawIpc(endpoint: string, payload: string): Promise<any> {
@@ -144,7 +221,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       const lp1 = lockPathFor(dirs.lockDir, reg1.deviceId);
       const cp1 = controlPathFor(dirs.controlDir, reg1.deviceId);
 
-      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1 && fs.existsSync(lp1) && fs.existsSync(cp1), 12000);
+      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1 && fs.existsSync(lp1) && fs.existsSync(cp1), STARTUP_TIMEOUT);
 
       const connected1 = server.connectionManager.getConnectedAgents()[0];
       assert.strictEqual(connected1.deviceId, 'svc-dev-1');
@@ -176,7 +253,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
         windowsHide: true
       });
       spawned.push(dupDaemon);
-      await waitFor(() => dupDaemon.exitCode !== null, 6000);
+      await waitFor(() => childExited(dupDaemon), IS_WINDOWS ? 30000 : 6000);
       assert.strictEqual(dupDaemon.exitCode, 0);
       assert.strictEqual(server.connectionManager.getConnectedAgents().length, 1);
       assert.ok(fs.existsSync(lp1));
@@ -197,6 +274,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
 
       // Start second agent with another distinct AGENT_NAME in isolated configDir
       const dirs2 = createIsolatedDirs('dsu-svc-test1b-');
+      const spawned2: ChildProcess[] = [];
       try {
         fs.writeFileSync(
           path.join(dirs2.configDir, '.env'),
@@ -212,13 +290,13 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
           stdio: 'ignore',
           windowsHide: true
         });
-        spawned.push(daemon2);
-        await waitFor(() => server.connectionManager.getConnectedAgents().some(a => a.deviceId === 'svc-dev-2'), 10000);
+        spawned2.push(daemon2);
+        await waitFor(() => server.connectionManager.getConnectedAgents().some(a => a.deviceId === 'svc-dev-2'), STARTUP_TIMEOUT);
         const connected2 = server.connectionManager.getConnectedAgents().find(a => a.deviceId === 'svc-dev-2');
         assert.strictEqual(connected2?.name, 'Workstation-Custom-2');
         await stopDaemonGracefully(dirs2, daemon2, reg2.deviceId);
       } finally {
-        fs.rmSync(dirs2.root, { recursive: true, force: true });
+        if (!(await cleanupIsolatedDirs(dirs2, spawned2))) failed++;
       }
 
       passed++;
@@ -226,11 +304,8 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 1 (startup/IPC/duplicate/AGENT_NAME) failed:', err);
       failed++;
     } finally {
-      for (const p of spawned) {
-        if (p.exitCode === null) try { p.kill('SIGKILL'); } catch {}
-      }
       await server.stop().catch(() => {});
-      fs.rmSync(dirs.root, { recursive: true, force: true });
+      if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
   }
 
@@ -255,7 +330,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       });
       spawned.push(daemon);
 
-      await waitFor(() => daemon.exitCode !== null, 10000);
+      await waitFor(() => childExited(daemon), STARTUP_TIMEOUT);
       assert.strictEqual(daemon.exitCode, 0, 'Daemon must exit 0 so Task Scheduler does not restart on fail-closed lock conflict');
       assert.strictEqual(fs.readFileSync(lp, 'utf8'), sentinel, 'Existing lock must remain untouched');
       const logContent = fs.readFileSync(path.join(dirs.logDir, 'agent-daemon.log'), 'utf8');
@@ -265,10 +340,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 2 (lock conflict fail-closed) failed:', err);
       failed++;
     } finally {
-      for (const p of spawned) {
-        if (p.exitCode === null) try { p.kill('SIGKILL'); } catch {}
-      }
-      fs.rmSync(dirs.root, { recursive: true, force: true });
+      if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
   }
 
@@ -297,7 +369,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       });
       spawned.push(daemon);
 
-      await waitFor(() => daemon.exitCode !== null, 12000);
+      await waitFor(() => childExited(daemon), STARTUP_TIMEOUT);
       assert.strictEqual(daemon.exitCode, 0, 'Daemon must exit 0 on policy rejection so Task Scheduler does not loop');
       const logContent = fs.readFileSync(path.join(dirs.logDir, 'agent-daemon.log'), 'utf8');
       assert.ok(logContent.includes('POLICY_REJECTED') && logContent.includes('FAIL_CLOSED'));
@@ -307,11 +379,8 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 3 (policy rejection fail-closed) failed:', err);
       failed++;
     } finally {
-      for (const p of spawned) {
-        if (p.exitCode === null) try { p.kill('SIGKILL'); } catch {}
-      }
       await server.stop().catch(() => {});
-      fs.rmSync(dirs.root, { recursive: true, force: true });
+      if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
   }
 
@@ -339,7 +408,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       spawned.push(daemon);
 
       const cp = controlPathFor(dirs.controlDir, reg.deviceId);
-      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1 && fs.existsSync(cp), 10000);
+      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1 && fs.existsSync(cp), STARTUP_TIMEOUT);
       const originalAgentPid = JSON.parse(fs.readFileSync(cp, 'utf8')).agentPid;
 
       // Drop gateway -> wait -> bring gateway back on same port (simulate sudden network drop)
@@ -352,7 +421,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       server = new GatewayServer({ port, host: '127.0.0.1', storageDir, masterSecret: 'svc-test-master-secret-32-chars-min!' });
       await server.start();
 
-      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1, 12000);
+      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1, STARTUP_TIMEOUT);
       const afterAgentPid = JSON.parse(fs.readFileSync(cp, 'utf8')).agentPid;
       assert.strictEqual(afterAgentPid, originalAgentPid, 'Worker PID must remain identical across transient WS reconnect');
 
@@ -363,14 +432,11 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 4 (network disconnect & reconnect) failed:', err);
       failed++;
     } finally {
-      for (const p of spawned) {
-        if (p.exitCode === null) try { p.kill('SIGKILL'); } catch {}
-      }
       for (const conn of server.connectionManager.getConnectedAgents()) {
         try { conn.socket.terminate(); } catch {}
       }
       await server.stop().catch(() => {});
-      fs.rmSync(dirs.root, { recursive: true, force: true });
+      if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
   }
 
@@ -409,7 +475,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       });
       spawned.push(daemon);
 
-      await waitFor(() => daemon.exitCode !== null, 12000);
+      await waitFor(() => childExited(daemon), STARTUP_TIMEOUT);
       assert.strictEqual(daemon.exitCode, 0, 'Circuit breaker must stop daemon cleanly without infinite loop');
 
       const logFiles = fs.readdirSync(dirs.logDir).filter(f => f.startsWith('agent-daemon.log'));
@@ -425,10 +491,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 5 (log rotation & circuit breaker) failed:', err);
       failed++;
     } finally {
-      for (const p of spawned) {
-        if (p.exitCode === null) try { p.kill('SIGKILL'); } catch {}
-      }
-      fs.rmSync(dirs.root, { recursive: true, force: true });
+      if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
   }
 
@@ -455,7 +518,9 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
               permissions: { read: true, write: false, test: false, build: true, hostExecution: true },
               commands: {
                 build: {
-                  slow: { executable: process.execPath, args: ['-e', 'setTimeout(() => console.log("late"), 8000)'] }
+                  slow: { executable: process.execPath, args: ['-e',
+                    'require("fs").writeFileSync("slow-child.json", JSON.stringify({pid:process.pid})); setTimeout(() => console.log("late"), ' +
+                    (IS_WINDOWS ? 30000 : 8000) + ')'] }
                 }
               }
             }
@@ -481,7 +546,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
 
       const lp = lockPathFor(dirs.lockDir, reg.deviceId);
       const cp = controlPathFor(dirs.controlDir, reg.deviceId);
-      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1 && fs.existsSync(lp) && fs.existsSync(cp), 10000);
+      await waitFor(() => server.connectionManager.getConnectedAgents().length === 1 && fs.existsSync(lp) && fs.existsSync(cp), STARTUP_TIMEOUT);
 
       const submitRes = await server.taskRouter.routeTaskSubmit(
         {
@@ -496,16 +561,11 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
 
       await waitFor(() => {
         const t = server.taskStore.getTask(submitRes.taskId);
-        return t?.status === 'running';
-      }, 10000);
+        return t?.status === 'running' && fs.existsSync(path.join(dirs.workspaceDir, 'slow-child.json'));
+      }, STARTUP_TIMEOUT);
 
-      const res = spawnSync(
-        process.execPath,
-        [IPC_CONTROL_SCRIPT, 'shutdown', '--device-id', reg.deviceId, '--timeout-ms', '600', '--json'],
-        { env: buildTestEnv(dirs), encoding: 'utf8', timeout: 12000 }
-      );
-      await waitFor(() => daemon.exitCode !== null, 6000);
-      const stopResult = JSON.parse((res.stdout || '{}').trim() || '{}');
+      const stopResult = await invokeIpc(dirs, reg.deviceId, 600);
+      await waitFor(() => childExited(daemon), IS_WINDOWS ? 20000 : 6000);
       assert.strictEqual(stopResult.ok, true);
       assert.strictEqual(stopResult.clean, false);
       assert.strictEqual(stopResult.exitCode, 13);
@@ -519,11 +579,8 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 6 (shutdown timeout with in-flight mutation) failed:', err);
       failed++;
     } finally {
-      for (const p of spawned) {
-        if (p.exitCode === null) try { p.kill('SIGKILL'); } catch {}
-      }
       await server.stop().catch(() => {});
-      fs.rmSync(dirs.root, { recursive: true, force: true });
+      if (!(await cleanupIsolatedDirs(dirs, spawned))) failed++;
     }
   }
 
@@ -540,7 +597,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       fs.writeFileSync(path.join(dirs.configDir, '.env'),
         'GATEWAY_URL=ws://127.0.0.1:1/ws/agent\nAGENT_ID=' + deviceId + '\nAGENT_TOKEN=dsu_device_placeholder.sig\n');
       daemon = spawn(process.execPath, [DAEMON_SCRIPT], { env: buildTestEnv(dirs), stdio: 'ignore', windowsHide: true });
-      await waitFor(() => daemon!.exitCode !== null, 20000);
+      await waitFor(() => childExited(daemon!), STARTUP_TIMEOUT);
       assert.strictEqual(daemon.exitCode, 0);
       const log = fs.readFileSync(path.join(dirs.logDir, 'agent-daemon.log'), 'utf8');
       assert.ok(log.includes('IPC_ACL_INVALID'));
@@ -552,8 +609,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       console.error('Integration Test 7 (unsafe IPC control directory) failed:', err);
       failed++;
     } finally {
-      if (daemon && daemon.exitCode === null) try { daemon.kill('SIGKILL'); } catch {}
-      fs.rmSync(dirs.root, { recursive: true, force: true });
+      if (!(await cleanupIsolatedDirs(dirs, daemon ? [daemon] : []))) failed++;
     }
   }
 
