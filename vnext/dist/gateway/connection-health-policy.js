@@ -9,6 +9,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.HEARTBEAT_TTL_MS = exports.HEARTBEAT_INTERVAL_MS = void 0;
 exports.isSessionHealthy = isSessionHealthy;
 exports.getSessionLifecycleState = getSessionLifecycleState;
+exports.parseReconnectIdentity = parseReconnectIdentity;
+exports.isSameReconnectIdentity = isSameReconnectIdentity;
+exports.canResumeSession = canResumeSession;
+const crypto_1 = require("crypto");
 exports.HEARTBEAT_INTERVAL_MS = 15_000; // 15 seconds agent heartbeat frequency
 exports.HEARTBEAT_TTL_MS = 45_000; // 45 seconds timeout (3x interval, accommodates network jitter and 2 missed heartbeats)
 /**
@@ -36,4 +40,26 @@ function getSessionLifecycleState(session, isRevoked, now = Date.now(), ttlMs = 
     if (isSessionHealthy(session, now, ttlMs))
         return 'healthy';
     return 'stale';
+}
+/** Validate the process-lifetime proof and retain only its digest. */
+function parseReconnectIdentity(message) {
+    if (message.reconnectProof === undefined && message.reconnectSequence === undefined)
+        return undefined;
+    if (typeof message.reconnectProof !== 'string' || message.reconnectProof.length !== 64 || !/^[a-f0-9]{64}$/.test(message.reconnectProof) ||
+        typeof message.reconnectSequence !== 'number' || !Number.isSafeInteger(message.reconnectSequence) || message.reconnectSequence < 1) {
+        throw new Error('INVALID_RECONNECT_IDENTITY');
+    }
+    return {
+        reconnectProofHash: (0, crypto_1.createHash)('sha256').update(message.reconnectProof, 'ascii').digest('hex'),
+        reconnectSequence: message.reconnectSequence
+    };
+}
+function isSameReconnectIdentity(previous, next) {
+    if (!previous?.reconnectProofHash || !next || !/^[a-f0-9]{64}$/.test(previous.reconnectProofHash))
+        return false;
+    return (0, crypto_1.timingSafeEqual)(Buffer.from(previous.reconnectProofHash, 'hex'), Buffer.from(next.reconnectProofHash, 'hex'));
+}
+function canResumeSession(previous, next) {
+    return isSameReconnectIdentity(previous, next) && Number.isSafeInteger(previous?.reconnectSequence) &&
+        next.reconnectSequence > previous.reconnectSequence;
 }

@@ -148,18 +148,32 @@ class ConnectionManager {
                 return scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, requiredScope);
             });
             // Evict any prior connection for this device ID to maintain single active session
+            let reconnectIdentity;
+            try {
+                reconnectIdentity = (0, connection_health_policy_1.parseReconnectIdentity)(msg);
+            }
+            catch {
+                socket.close(1008, 'Invalid reconnect identity');
+                return;
+            }
             const oldAgent = this.agents.get(authoritativeDeviceId);
-            if (oldAgent && oldAgent.socket !== socket && (0, connection_health_policy_1.isSessionHealthy)(oldAgent) && oldAgent.socket.readyState === ws_1.WebSocket.OPEN) {
-                socket.close(1008, 'Duplicate active device session');
+            const resume = (0, connection_health_policy_1.canResumeSession)(oldAgent, reconnectIdentity);
+            if ((0, connection_health_policy_1.isSameReconnectIdentity)(oldAgent, reconnectIdentity) && !resume) {
+                socket.close(1008, 'Stale reconnect sequence');
+                return;
+            }
+            if (oldAgent && oldAgent.socket !== socket && (0, connection_health_policy_1.isSessionHealthy)(oldAgent) && oldAgent.socket.readyState === ws_1.WebSocket.OPEN && !resume) {
+                socket.close(1008, reconnectIdentity ? 'Duplicate active device instance' : 'Duplicate active device session');
                 return;
             }
             if (oldAgent && oldAgent.socket !== socket) {
+                this.agents.delete(authoritativeDeviceId);
+                this.sockets.delete(oldAgent.socket);
+                this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, oldAgent.sessionId, 'New registration superseded session');
                 try {
                     oldAgent.socket.close(1008, 'Superseded by new registration');
                 }
                 catch { }
-                this.sockets.delete(oldAgent.socket);
-                this.taskStore.failTasksForSupersededSession(authoritativeDeviceId, oldAgent.sessionId, 'New registration superseded session');
                 this.auditLogger.log({
                     actor: authoritativeDeviceId,
                     actorType: 'device',
@@ -174,6 +188,7 @@ class ConnectionManager {
             const agent = {
                 sessionId,
                 supportsAttemptFencing: msg.supportsAttemptFencing === true,
+                ...reconnectIdentity,
                 deviceId: authoritativeDeviceId,
                 name: msg.name || authoritativeDeviceId,
                 platform: msg.platform || 'windows',

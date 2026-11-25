@@ -1182,15 +1182,28 @@ class GatewayDurableObject {
                     const requiredScope = scope_checker_1.ScopeChecker.getRequiredScopeForCapability(cap);
                     return scope_checker_1.ScopeChecker.hasScope(val.payload.scopes, requiredScope);
                 });
-                // Never displace a healthy incumbent; stale or legacy sockets cannot acquire authority again.
+                // A healthy incumbent can only be replaced by the same authenticated process with a newer sequence.
                 const priorAttachment = ws.deserializeAttachment?.();
                 if (priorAttachment?.sessionId) {
                     ws.close(1008, 'Already registered');
                     return;
                 }
+                let reconnectIdentity;
+                try {
+                    reconnectIdentity = (0, connection_health_policy_1.parseReconnectIdentity)(msg);
+                }
+                catch {
+                    ws.close(1008, 'Invalid reconnect identity');
+                    return;
+                }
                 const incumbent = this.getActiveSession(authoritativeDeviceId);
-                if (incumbent && (0, connection_health_policy_1.isSessionHealthy)(incumbent)) {
-                    ws.close(1008, 'Duplicate active device session');
+                const resume = (0, connection_health_policy_1.canResumeSession)(incumbent, reconnectIdentity);
+                if ((0, connection_health_policy_1.isSameReconnectIdentity)(incumbent, reconnectIdentity) && !resume) {
+                    ws.close(1008, 'Stale reconnect sequence');
+                    return;
+                }
+                if (incumbent && (0, connection_health_policy_1.isSessionHealthy)(incumbent) && !resume) {
+                    ws.close(1008, reconnectIdentity ? 'Duplicate active device instance' : 'Duplicate active device session');
                     return;
                 }
                 // Session Fencing & Eviction: close stale prior connections.
@@ -1225,6 +1238,7 @@ class GatewayDurableObject {
                 const attachmentData = {
                     sessionId: newSessionId,
                     supportsAttemptFencing: msg.supportsAttemptFencing === true,
+                    ...reconnectIdentity,
                     deviceId: authoritativeDeviceId,
                     name: msg.name || authoritativeDeviceId,
                     platform: msg.platform || 'windows',

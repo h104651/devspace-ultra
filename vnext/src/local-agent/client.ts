@@ -34,9 +34,13 @@ export class LocalAgentClient {
   private isStopping = false;
   private reconnectTimeout?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
+  private registrationTimer?: NodeJS.Timeout;
   private pollTimer?: NodeJS.Timeout;
   private activeTasks: Map<string, DurableTask> = new Map();
   private reconnectAttempts = 0;
+  private readonly reconnectProof = crypto.randomBytes(32).toString('hex');
+  private reconnectSequence = 0;
+  private legacyRetryAvailable = false;
   private registeredSocket?: WebSocket;
   private taskSockets = new Map<string, WebSocket>();
   private lastPolicyError?: string;
@@ -94,6 +98,10 @@ export class LocalAgentClient {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = undefined;
     }
+    if (this.registrationTimer) {
+      clearTimeout(this.registrationTimer);
+      this.registrationTimer = undefined;
+    }
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = undefined;
@@ -116,6 +124,7 @@ export class LocalAgentClient {
     if (this.ws) {
       const socket = this.ws;
       this.ws = undefined;
+      this.registeredSocket = undefined;
       if (socket.readyState === WebSocket.OPEN) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
@@ -205,10 +214,12 @@ export class LocalAgentClient {
 
     socket.on('open', () => {
       if (this.ws !== socket || !this.isRunning) { socket.close(); return; }
-      this.reconnectAttempts = 0;
       this.lastPolicyError = undefined;
       this.refreshExecutorConfigIfIdle();
       this.registerWithGateway(probe);
+      this.registrationTimer = setTimeout(() => {
+        if (this.ws === socket && this.registeredSocket !== socket && this.isRunning) socket.terminate();
+      }, 15_000);
       this.startHeartbeat();
       this.startPollLoop(probe.capabilities);
     });
@@ -225,14 +236,24 @@ export class LocalAgentClient {
 
     socket.on('close', (code: number, reason: Buffer) => {
       if (this.ws !== socket) return;
+      const wasRegistered = this.registeredSocket === socket;
       this.ws = undefined;
       this.registeredSocket = undefined;
+      if (this.registrationTimer) clearTimeout(this.registrationTimer);
+      this.registrationTimer = undefined;
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       if (this.pollTimer) clearInterval(this.pollTimer);
 
       const closeReason = reason?.toString() || '';
+      if (wasRegistered && code === 1006) this.legacyRetryAvailable = true;
+      // Compatibility with an old gateway only: wait out its heartbeat TTL once.
+      if (this.isRunning && !this.lastPolicyError && code === 1008 && closeReason === 'Duplicate active device session' && this.legacyRetryAvailable) {
+        this.legacyRetryAvailable = false;
+        this.scheduleReconnect(46_000);
+        return;
+      }
       const policyReason =
-        (code === 1008 && /duplicate|superseded|fenced|already registered|revoked/i.test(closeReason))
+        (code === 1008 && /duplicate|superseded|fenced|already registered|revoked|invalid reconnect identity|stale reconnect sequence|authentication failed/i.test(closeReason))
           ? closeReason
           : this.lastPolicyError;
 
@@ -252,9 +273,9 @@ export class LocalAgentClient {
     });
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(minDelayMs = 0): void {
     this.reconnectAttempts++;
-    const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 30000);
+    const delay = Math.max(minDelayMs, Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 30000));
     this.reconnectTimeout = setTimeout(() => {
       if (this.activeTasks.size > 0) {
         // Old executors must finish before this process can obtain new work.
@@ -281,7 +302,9 @@ export class LocalAgentClient {
       platform: probe.platform,
       capabilities: probe.capabilities,
       token: this.config.token,
-      supportsAttemptFencing: true
+      supportsAttemptFencing: true,
+      reconnectProof: this.reconnectProof,
+      reconnectSequence: ++this.reconnectSequence
     });
   }
 
@@ -289,6 +312,7 @@ export class LocalAgentClient {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
 
     this.heartbeatTimer = setInterval(() => {
+      if (this.registeredSocket !== this.ws) return;
       this.send({
         type: 'AGENT_HEARTBEAT',
         messageId: crypto.randomUUID(),
@@ -329,7 +353,13 @@ export class LocalAgentClient {
       return;
     }
     if (msg.type === 'AGENT_REGISTERED') {
-      if (msg.deviceId === this.config.deviceId) this.registeredSocket = socket;
+      if (msg.deviceId === this.config.deviceId) {
+        this.registeredSocket = socket;
+        if (this.registrationTimer) clearTimeout(this.registrationTimer);
+        this.registrationTimer = undefined;
+        this.reconnectAttempts = 0;
+        this.legacyRetryAvailable = false;
+      }
       return;
     }
     if (msg.type === 'TASK_ASSIGNED') {

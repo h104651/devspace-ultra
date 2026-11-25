@@ -10,6 +10,8 @@ export interface AgentRegisterMessage {
   capabilities: string[];
   token: string;
   supportsAttemptFencing?: boolean;
+  reconnectProof?: string;
+  reconnectSequence?: number;
 }
 
 export interface AgentRegisteredMessage {

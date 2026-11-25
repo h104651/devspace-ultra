@@ -22,7 +22,7 @@ import { OAuthManager } from '../oauth/oauth-manager';
 import { GatewayMessage } from '../types/gateway';
 import { TokenPayload } from '../types/auth';
 import { ACTIVE_TASK_STATUSES } from '../types/task';
-import { isSessionHealthy, HEARTBEAT_TTL_MS, AgentSessionAttachment, AgentSessionInfo } from '../gateway/connection-health-policy';
+import { isSessionHealthy, HEARTBEAT_TTL_MS, AgentSessionAttachment, AgentSessionInfo, parseReconnectIdentity, isSameReconnectIdentity, canResumeSession } from '../gateway/connection-health-policy';
 import {
   MCP_2026_VERSION,
   MCP_SUPPORTED_MODERN_VERSIONS,
@@ -1224,11 +1224,20 @@ export class GatewayDurableObject {
           return ScopeChecker.hasScope(val.payload!.scopes, requiredScope);
         });
 
-        // Never displace a healthy incumbent; stale or legacy sockets cannot acquire authority again.
+        // A healthy incumbent can only be replaced by the same authenticated process with a newer sequence.
         const priorAttachment = (ws as any).deserializeAttachment?.() as AgentSessionAttachment | null;
         if (priorAttachment?.sessionId) { ws.close(1008, 'Already registered'); return; }
+        let reconnectIdentity: ReturnType<typeof parseReconnectIdentity>;
+        try { reconnectIdentity = parseReconnectIdentity(msg); }
+        catch { ws.close(1008, 'Invalid reconnect identity'); return; }
         const incumbent = this.getActiveSession(authoritativeDeviceId);
-        if (incumbent && isSessionHealthy(incumbent)) { ws.close(1008, 'Duplicate active device session'); return; }
+        const resume = canResumeSession(incumbent, reconnectIdentity);
+        if (isSameReconnectIdentity(incumbent, reconnectIdentity) && !resume) {
+          ws.close(1008, 'Stale reconnect sequence'); return;
+        }
+        if (incumbent && isSessionHealthy(incumbent) && !resume) {
+          ws.close(1008, reconnectIdentity ? 'Duplicate active device instance' : 'Duplicate active device session'); return;
+        }
         // Session Fencing & Eviction: close stale prior connections.
         const existingSockets = (this.ctx.getWebSockets ? this.ctx.getWebSockets() : []).filter((s: any) => {
           if (s === ws) return false;
@@ -1260,6 +1269,7 @@ export class GatewayDurableObject {
         const attachmentData: AgentSessionAttachment = {
           sessionId: newSessionId,
           supportsAttemptFencing: msg.supportsAttemptFencing === true,
+          ...reconnectIdentity,
           deviceId: authoritativeDeviceId,
           name: msg.name || authoritativeDeviceId,
           platform: (msg.platform as any) || 'windows',
