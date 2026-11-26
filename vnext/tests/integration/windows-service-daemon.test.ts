@@ -185,14 +185,20 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
 
     try {
       await server.start();
-      const reg1 = server.authManager.registerDevice('Primary', 'windows', ['local:read', 'local:write'], 'svc-dev-1');
+      const reg1 = server.authManager.registerDevice('Primary', 'windows', ['local:read', 'local:write', 'local:exec'], 'svc-dev-1');
       const reg2 = server.authManager.registerDevice('Secondary', 'windows', ['local:read'], 'svc-dev-2');
 
       fs.writeFileSync(
         path.join(dirs.configDir, 'projects.json'),
         JSON.stringify({
           projects: [
-            { projectId: 'demo', displayName: 'Demo', root: dirs.workspaceDir, permissions: { read: true, write: false, test: false, build: false, hostExecution: false } }
+            { projectId: 'demo', displayName: 'Demo', root: dirs.workspaceDir,
+              permissions: { read: true, write: false, test: true, build: true, hostExecution: true },
+              commands: {
+                test: { fixture: { executable: process.execPath, args: ['--version'] } },
+                build: { fixture: { executable: process.execPath, args: ['--version'] } }
+              }
+            }
           ]
         })
       );
@@ -519,6 +525,22 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       await server.start();
       const reg = server.authManager.registerDevice('Slow Mutation Test', 'windows', ['local:read', 'local:exec'], 'slow-mut-dev');
 
+      // The shipped CLI deliberately blocks execution until the independent
+      // identity gate is satisfied. Exercise its existing shutdown path with
+      // a fixture-only copy, never an environment/CLI bypass in the release.
+      const fixtureRelease = path.join(dirs.root, 'fixture-release');
+      fs.mkdirSync(fixtureRelease, { recursive: true });
+      fs.cpSync(path.join(VNEXT_ROOT, 'dist'), path.join(fixtureRelease, 'dist'), { recursive: true });
+      const fixtureCli = path.join(fixtureRelease, 'dist', 'cli', 'agent-cli.js');
+      const originalCli = fs.readFileSync(fixtureCli, 'utf8');
+      assert.strictEqual(originalCli.split('hostExecutionBlocked: true,').length, 2, 'Fixture patch must match the exact production hold');
+      fs.writeFileSync(fixtureCli, originalCli.replace('hostExecutionBlocked: true,', 'hostExecutionBlocked: false,'));
+      const fixtureModules = path.join(fixtureRelease, 'node_modules');
+      fs.mkdirSync(fixtureModules, { recursive: true });
+      for (const pkg of ['ws', 'dotenv']) {
+        fs.cpSync(path.dirname(require.resolve(pkg + '/package.json')), path.join(fixtureModules, pkg), { recursive: true });
+      }
+
       fs.writeFileSync(
         path.join(dirs.configDir, 'projects.json'),
         JSON.stringify({
@@ -550,7 +572,7 @@ export async function runWindowsServiceDaemonIntegrationTests(): Promise<{ passe
       );
 
       const daemon = spawn(process.execPath, [DAEMON_SCRIPT], {
-        env: buildTestEnv(dirs),
+        env: buildTestEnv(dirs, { DEVSPACE_RELEASE_DIR: fixtureRelease }),
         stdio: 'ignore',
         windowsHide: true
       });
