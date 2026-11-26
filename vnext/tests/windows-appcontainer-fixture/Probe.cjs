@@ -40,4 +40,8 @@ async function loopbackDenied() {
   denied('sibling-write', () => fs.writeFileSync(sibling,'unexpected'));
   await loopbackDenied();
   fs.writeFileSync(path.join(own,'report.json'),JSON.stringify({checks,arch:process.arch}));
-})().catch(e=>{console.error(e.message);process.exitCode=1;});
+})().catch(e=>{
+  console.error('Synthetic probe failed after checks:',JSON.stringify(checks));
+  console.error(e && e.code ? e.code : 'ASSERTION', e.message);
+  process.exitCode=1;
+});

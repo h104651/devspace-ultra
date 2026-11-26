@@ -76,7 +76,7 @@ internal static class Program {
         return false;
     }
     static void Run(string root,string node,string script,IntPtr sid,int port,ref bool safeToRemove) {
-        IntPtr job=IntPtr.Zero,nul=IntPtr.Zero,attrs=IntPtr.Zero,jobList=IntPtr.Zero,
+        IntPtr job=IntPtr.Zero,nul=IntPtr.Zero,diagnostics=IntPtr.Zero,attrs=IntPtr.Zero,jobList=IntPtr.Zero,
             handles=IntPtr.Zero,caps=IntPtr.Zero,env=IntPtr.Zero;
         ProcessInfo pi=default;
         bool initialized=false, drained=false, created=false;
@@ -88,6 +88,11 @@ internal static class Program {
             var sa=new SecurityAttributes { nLength=(uint)Marshal.SizeOf<SecurityAttributes>(),bInheritHandle=true };
             nul=CreateFileW("NUL",0xc0000000,3,ref sa,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,IntPtr.Zero);
             Win(Valid(nul),"Open NUL");
+            // Only the fixed synthetic probe writes this inherited stderr handle.
+            // No control channel, credentials or arbitrary project output.
+            string diagnosticPath=Path.Combine(root,"fixture-stderr.txt");
+            diagnostics=CreateFileW(diagnosticPath,0x40000000,1,ref sa,1,FILE_ATTRIBUTE_NORMAL,IntPtr.Zero);
+            Win(Valid(diagnostics),"Create fixture diagnostics");
             UIntPtr size=UIntPtr.Zero;
             InitializeProcThreadAttributeList(IntPtr.Zero,3,0,ref size);
             Require(size!=UIntPtr.Zero,"Missing attribute size");
@@ -97,9 +102,10 @@ internal static class Program {
             jobList=Marshal.AllocHGlobal(IntPtr.Size);
             Marshal.WriteIntPtr(jobList,job);
             Win(UpdateProcThreadAttribute(attrs,0,JOB_LIST,jobList,(UIntPtr)IntPtr.Size,IntPtr.Zero,IntPtr.Zero),"Assign job at creation");
-            handles=Marshal.AllocHGlobal(IntPtr.Size);
-            Marshal.WriteIntPtr(handles,nul);
-            Win(UpdateProcThreadAttribute(attrs,0,HANDLE_LIST,handles,(UIntPtr)IntPtr.Size,IntPtr.Zero,IntPtr.Zero),"Allow only NUL handle");
+            handles=Marshal.AllocHGlobal(IntPtr.Size*2);
+            Marshal.WriteIntPtr(handles,0,nul);
+            Marshal.WriteIntPtr(handles,IntPtr.Size,diagnostics);
+            Win(UpdateProcThreadAttribute(attrs,0,HANDLE_LIST,handles,(UIntPtr)(IntPtr.Size*2),IntPtr.Zero,IntPtr.Zero),"Allow only NUL and fixture diagnostics handles");
             var security=new SecurityCapabilities { AppContainerSid=sid,Capabilities=IntPtr.Zero,CapabilityCount=0,Reserved=0 };
             caps=Marshal.AllocHGlobal(Marshal.SizeOf<SecurityCapabilities>());
             Marshal.StructureToPtr(security,caps,false);
@@ -112,7 +118,7 @@ internal static class Program {
             })+"\0\0";
             env=Marshal.StringToHGlobalUni(block);
             var startup=new StartupInfoEx {
-                StartupInfo=new StartupInfo {cb=(uint)Marshal.SizeOf<StartupInfoEx>(),lpDesktop="",dwFlags=STARTF_USESTDHANDLES,hStdInput=nul,hStdOutput=nul,hStdError=nul},
+                StartupInfo=new StartupInfo {cb=(uint)Marshal.SizeOf<StartupInfoEx>(),lpDesktop="",dwFlags=STARTF_USESTDHANDLES,hStdInput=nul,hStdOutput=nul,hStdError=diagnostics},
                 lpAttributeList=attrs
             };
             var command=new StringBuilder(Q(node)+" "+Q(script)+" "+Q(root)+" "+port);
@@ -127,7 +133,16 @@ internal static class Program {
             if (!Drain(job,pi.hProcess,30000)) throw new TimeoutException("Fixture job deadline");
             drained=true;safeToRemove=true;
             Win(GetExitCodeProcess(pi.hProcess,out var exit),"Get fixture exit");
-            Require(exit==0,"AppContainer probe exited with "+exit);
+            if(exit!=0) {
+                Win(CloseHandle(diagnostics),"Close fixture diagnostics");
+                diagnostics=IntPtr.Zero;
+                using var stream=File.OpenRead(diagnosticPath);
+                stream.Seek(Math.Max(0,stream.Length-4096),SeekOrigin.Begin);
+                var buffer=new byte[4096];
+                int n=stream.Read(buffer,0,buffer.Length);
+                Console.Error.WriteLine("APPCONTAINER_PROBE_DIAGNOSTIC "+Encoding.UTF8.GetString(buffer,0,n));
+                throw new InvalidOperationException("AppContainer probe exited with "+exit);
+            }
         } finally {
             if (created && !drained && Valid(job)) {
                 // Do not delete the profile or root while any process may live.
@@ -138,7 +153,7 @@ internal static class Program {
             if(Valid(job))CloseHandle(job);
             if(initialized)DeleteProcThreadAttributeList(attrs);
             foreach(var p in new[]{attrs,jobList,handles,caps,env})if(p!=IntPtr.Zero)Marshal.FreeHGlobal(p);
-            foreach(var h in new[]{nul,pi.hProcess,pi.hThread})if(Valid(h))CloseHandle(h);
+            foreach(var h in new[]{nul,diagnostics,pi.hProcess,pi.hThread})if(Valid(h))CloseHandle(h);
         }
     }
     static int Main(string[] args) {
