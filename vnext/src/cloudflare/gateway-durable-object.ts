@@ -159,6 +159,7 @@ export class GatewayDurableObject {
             name: att.name || deviceId,
             platform: att.platform || 'windows',
             capabilities: att.capabilities || [],
+            executionPolicyRevision: att.executionPolicyRevision,
             connectedAt: att.connectedAt || now,
             lastHeartbeatAt: lastHb,
             socket: ws
@@ -1218,8 +1219,11 @@ export class GatewayDurableObject {
           ? msg.capabilities
           : [...LOCAL_EXECUTABLE_CAPABILITIES];
 
+        const executionPolicyRevision = typeof msg.executionPolicyRevision === 'string' && /^[a-f0-9]{32}$/.test(msg.executionPolicyRevision)
+          ? msg.executionPolicyRevision : undefined;
         const authorizedCaps = requestedCaps.filter(cap => {
           if (!isLocalExecutableCapability(cap)) return false;
+          if ((cap === 'local:run_tests' || cap === 'local:build_project') && !executionPolicyRevision) return false;
           const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
           return ScopeChecker.hasScope(val.payload!.scopes, requiredScope);
         });
@@ -1269,6 +1273,7 @@ export class GatewayDurableObject {
         const attachmentData: AgentSessionAttachment = {
           sessionId: newSessionId,
           supportsAttemptFencing: msg.supportsAttemptFencing === true,
+          executionPolicyRevision,
           ...reconnectIdentity,
           deviceId: authoritativeDeviceId,
           name: msg.name || authoritativeDeviceId,
@@ -1380,11 +1385,15 @@ export class GatewayDurableObject {
         }
         this.taskStore.recoverStaleTasks();
         // Execution capabilities must be both session-authorized and currently requested by the agent.
+        if (attachment.executionPolicyRevision && msg.executionPolicyRevision !== attachment.executionPolicyRevision) {
+          attachment.executionPolicyRevision = undefined;
+          (ws as any).serializeAttachment(attachment);
+        }
         const claimCapabilities = authorizedCapabilities.filter(cap => {
           if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
-          return Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
+          return !!attachment.executionPolicyRevision && Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
         });
-        const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, currentSessionId, supportsAttemptFencing);
+        const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, currentSessionId, supportsAttemptFencing, attachment.executionPolicyRevision);
         if (task) {
           ws.send(JSON.stringify({
             type: 'TASK_ASSIGNED',

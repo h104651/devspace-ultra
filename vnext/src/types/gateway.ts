@@ -10,6 +10,7 @@ export interface AgentRegisterMessage {
   capabilities: string[];
   token: string;
   supportsAttemptFencing?: boolean;
+  executionPolicyRevision?: string;
   reconnectProof?: string;
   reconnectSequence?: number;
 }
@@ -43,6 +44,7 @@ export interface TaskClaimPollMessage {
   timestamp: number;
   deviceId: string;
   supportedCapabilities: string[];
+  executionPolicyRevision?: string;
   maxTasks?: number;
 }
 

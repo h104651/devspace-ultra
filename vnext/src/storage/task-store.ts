@@ -408,16 +408,29 @@ export class TaskStore {
     });
   }
 
+  private executionAdmissionMatches(task: DurableTask, sessionId?: string, policyRevision?: string): boolean {
+    if (task.backend !== 'local' || (task.capability !== 'local:run_tests' && task.capability !== 'local:build_project')) return true;
+    const admission = task.metadata?.executionAdmission;
+    return !!sessionId && !!policyRevision && admission?.sessionId === sessionId && admission?.policyRevision === policyRevision;
+  }
+
   public claimTask(
     deviceId: string,
     supportedCapabilities: string[],
     leaseDurationMs?: number,
     sessionId?: string,
-    supportsAttemptFencing = true
+    supportsAttemptFencing = true,
+    executionPolicyRevision?: string
   ): DurableTask | undefined {
     if (this.localPersistenceFailed) throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked until reconciliation.');
     this.recoverStaleTasks();
 
+    // Queued execution may never inherit a later session or more permissive policy.
+    for (const task of this.tasks.values()) {
+      if (task.status === 'queued' && task.targetDeviceId === deviceId && !this.executionAdmissionMatches(task, sessionId, executionPolicyRevision)) {
+        this.failTaskTerminal(task.taskId, { code: 'EXECUTION_ADMISSION_EXPIRED', message: 'Execution session or policy changed before dispatch; submit a new reviewed request.' });
+      }
+    }
     const eligibleTasks = Array.from(this.tasks.values())
       .filter(t => {
         if (t.status !== 'queued') return false;
@@ -432,17 +445,19 @@ export class TaskStore {
       .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
 
     if (eligibleTasks.length === 0) return undefined;
-    return this.claimTaskById(eligibleTasks[0].taskId, deviceId, leaseDurationMs, sessionId);
+    return this.claimTaskById(eligibleTasks[0].taskId, deviceId, leaseDurationMs, sessionId, executionPolicyRevision);
   }
 
   public claimTaskById(
     taskId: string,
     deviceId: string,
     leaseDurationMs?: number,
-    sessionId?: string
+    sessionId?: string,
+    executionPolicyRevision?: string
   ): DurableTask | undefined {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'queued') return undefined;
+    if (!this.executionAdmissionMatches(task, sessionId, executionPolicyRevision)) return undefined;
     if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId)) return undefined;
     if (task.backend === 'local' && this.localPersistenceFailed) throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked until reconciliation.');
 

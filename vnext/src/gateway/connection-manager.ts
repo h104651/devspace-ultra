@@ -12,6 +12,7 @@ import { isSessionHealthy, parseReconnectIdentity, isSameReconnectIdentity, canR
 export interface ConnectedAgent {
   sessionId: string;
   supportsAttemptFencing?: boolean;
+  executionPolicyRevision?: string;
   reconnectProofHash?: string;
   reconnectSequence?: number;
   deviceId: string;
@@ -145,8 +146,11 @@ export class ConnectionManager {
         ? msg.capabilities
         : [...LOCAL_EXECUTABLE_CAPABILITIES];
 
+      const executionPolicyRevision = typeof msg.executionPolicyRevision === 'string' && /^[a-f0-9]{32}$/.test(msg.executionPolicyRevision)
+        ? msg.executionPolicyRevision : undefined;
       const authorizedCaps = requestedCaps.filter(cap => {
         if (!isLocalExecutableCapability(cap)) return false;
+        if ((cap === 'local:run_tests' || cap === 'local:build_project') && !executionPolicyRevision) return false;
         const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
         return ScopeChecker.hasScope(auth.payload!.scopes, requiredScope);
       });
@@ -187,6 +191,7 @@ export class ConnectionManager {
       const agent: ConnectedAgent = {
         sessionId,
         supportsAttemptFencing: msg.supportsAttemptFencing === true,
+        executionPolicyRevision,
         ...reconnectIdentity,
         deviceId: authoritativeDeviceId,
         name: msg.name || authoritativeDeviceId,
@@ -284,11 +289,14 @@ export class ConnectionManager {
     if (msg.type === 'TASK_CLAIM_POLL') {
       // Use strictly the agent's authorized capabilities, ignoring unauthorized escalation
       // Execution capabilities must be both session-authorized and currently requested by the agent.
+      if (agent.executionPolicyRevision && msg.executionPolicyRevision !== agent.executionPolicyRevision) {
+        agent.executionPolicyRevision = undefined;
+      }
       const claimCapabilities = agent.capabilities.filter(cap => {
         if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
-        return Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
+        return !!agent.executionPolicyRevision && Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
       });
-      const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, sessionId, supportsAttemptFencing);
+      const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, sessionId, supportsAttemptFencing, agent.executionPolicyRevision);
       if (task) {
         socket.send(JSON.stringify({
           type: 'TASK_ASSIGNED',

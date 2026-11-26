@@ -44,6 +44,9 @@ export class LocalAgentClient {
   private reconnectSequence = 0;
   private legacyRetryAvailable = false;
   private registeredSocket?: WebSocket;
+  private registeredSessionId?: string;
+  private executionPolicyFingerprint?: string;
+  private executionPolicyRevision?: string;
   private taskSockets = new Map<string, WebSocket>();
   private lastPolicyError?: string;
   private policyRejectedNotified = false;
@@ -63,8 +66,10 @@ export class LocalAgentClient {
       hostExecutionBlocked: config.hostExecutionBlocked,
       windowsJobRunnerPath: config.windowsJobRunnerPath
     };
+    const revisionBeforeLoad = this.computeExecutorConfigRevision();
     this.executor = new TaskExecutor(this.executorConfig);
     this.executorConfigRevision = this.computeExecutorConfigRevision();
+    if (revisionBeforeLoad !== this.executorConfigRevision) this.executorConfigRevision = undefined;
   }
 
   public hasInFlightTasks(): boolean {
@@ -196,6 +201,7 @@ export class LocalAgentClient {
 
     try {
       const nextExecutor = new TaskExecutor(this.executorConfig);
+      if (this.computeExecutorConfigRevision() !== nextRevision) return false;
       this.executor = nextExecutor;
       this.executorConfigRevision = nextRevision;
       this.rejectedExecutorConfigRevision = undefined;
@@ -216,6 +222,30 @@ export class LocalAgentClient {
       if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
       return projects.some(project => project.availableCapabilities.includes(cap));
     });
+  }
+
+  // Keep the fingerprint local: configured arguments/env must never be exposed
+  // via the wire. A fresh opaque generation is advertised per registration.
+  private computeExecutionPolicyFingerprint(): string | undefined {
+    try {
+      if (this.executor.isHostExecutionBlocked()) return undefined;
+      if (!this.currentExecutionCapabilities(['local:run_tests', 'local:build_project']).length) return undefined;
+      const registry = this.executor.getRegistry();
+      const projects = registry.listProjects().filter(p => p.enabled)
+        .map(p => registry.getProject(p.projectId));
+      return crypto.createHash('sha256').update(JSON.stringify({
+        sourceRevision: this.executorConfigRevision,
+        projects
+      })).digest('hex');
+    } catch { return undefined; }
+  }
+
+  private currentExecutionPolicyRevision(): string | undefined {
+    if (this.executionPolicyRevision && this.computeExecutionPolicyFingerprint() !== this.executionPolicyFingerprint) {
+      // Revocation is sticky within a session, even if the old config is restored.
+      this.executionPolicyRevision = undefined;
+    }
+    return this.executionPolicyRevision;
   }
 
   private connect(): void {
@@ -307,6 +337,9 @@ export class LocalAgentClient {
   }
 
   private registerWithGateway(probe: ReturnType<typeof EnvironmentProbe.probe>): void {
+    this.registeredSessionId = undefined;
+    this.executionPolicyFingerprint = this.computeExecutionPolicyFingerprint();
+    this.executionPolicyRevision = this.executionPolicyFingerprint ? crypto.randomBytes(16).toString('hex') : undefined;
     this.send({
       type: 'AGENT_REGISTER',
       messageId: crypto.randomUUID(),
@@ -315,6 +348,7 @@ export class LocalAgentClient {
       name: this.config.name || `Local-Agent-${probe.hostname}`,
       platform: probe.platform,
       capabilities: this.currentExecutionCapabilities(probe.capabilities),
+      executionPolicyRevision: this.executionPolicyRevision,
       token: this.config.token,
       supportsAttemptFencing: true,
       reconnectProof: this.reconnectProof,
@@ -351,7 +385,8 @@ export class LocalAgentClient {
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
         deviceId: this.config.deviceId,
-        supportedCapabilities: this.currentExecutionCapabilities(capabilities)
+        supportedCapabilities: this.currentExecutionCapabilities(capabilities),
+        executionPolicyRevision: this.currentExecutionPolicyRevision()
       });
     }, this.config.pollIntervalMs);
   }
@@ -369,6 +404,7 @@ export class LocalAgentClient {
     if (msg.type === 'AGENT_REGISTERED') {
       if (msg.deviceId === this.config.deviceId) {
         this.registeredSocket = socket;
+        this.registeredSessionId = msg.sessionId;
         if (this.registrationTimer) clearTimeout(this.registrationTimer);
         this.registrationTimer = undefined;
         this.reconnectAttempts = 0;
@@ -434,7 +470,10 @@ export class LocalAgentClient {
 
       if (task.capability === 'local:run_tests' || task.capability === 'local:build_project') {
         // Policy may have changed since the claim poll. Never execute with stale config.
-        if (!this.currentExecutionCapabilities([task.capability]).includes(task.capability)) {
+        const admission = task.metadata?.executionAdmission;
+        const revision = this.currentExecutionPolicyRevision();
+        if (!revision || !this.registeredSessionId || admission?.sessionId !== this.registeredSessionId ||
+            admission?.policyRevision !== revision || !this.currentExecutionCapabilities([task.capability]).includes(task.capability)) {
           throw new Error('EXECUTION_POLICY_CHANGED: Local execution policy is unavailable or no longer permits this capability.');
         }
       }

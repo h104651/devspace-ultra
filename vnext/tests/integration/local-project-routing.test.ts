@@ -387,6 +387,10 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       const socket = { terminate: () => { terminated = true; } };
       internal.ws = socket;
       internal.registeredSocket = socket;
+      internal.registeredSessionId = 'fixture-session';
+      internal.executionPolicyFingerprint = internal.computeExecutionPolicyFingerprint();
+      internal.executionPolicyRevision = 'a'.repeat(32);
+      task.metadata = { executionAdmission: { sessionId: 'fixture-session', policyRevision: 'a'.repeat(32) } };
       internal.isRunning = true;
       internal.activeTasks.set(task.taskId, task);
       internal.taskSockets.set(task.taskId, socket);
@@ -400,6 +404,26 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       assert.ok(!messages.some(msg => msg.type === 'TASK_COMPLETE' || msg.type === 'TASK_FAIL'));
       local.start();
       assert.strictEqual(internal.isRunning, false, 'Uncertain attempt prevents reconnect');
+    });
+
+    await test('Execution policy generation is invalidated by a changed local runner and cannot revive in the same session', () => {
+      const local = new LocalAgentClient({
+        gatewayUrl: 'ws://127.0.0.1:1/ws/agent', deviceId: 'policy-fixture', token: 'fixture',
+        projects: [{
+          projectId: 'fixture', root: rootA,
+          permissions: { read: true, test: true, hostExecution: true },
+          commands: { test: { npm: { executable: process.execPath, args: ['--version'] } } }
+        }]
+      });
+      const internal = local as any;
+      const project = internal.executor.getRegistry().getProject('fixture');
+      internal.executionPolicyFingerprint = internal.computeExecutionPolicyFingerprint();
+      internal.executionPolicyRevision = 'b'.repeat(32);
+      assert.strictEqual(internal.currentExecutionPolicyRevision(), 'b'.repeat(32));
+      project.commands.test.npm.args = ['-e', 'console.log("changed")'];
+      assert.strictEqual(internal.currentExecutionPolicyRevision(), undefined);
+      project.commands.test.npm.args = ['--version'];
+      assert.strictEqual(internal.currentExecutionPolicyRevision(), undefined);
     });
 
     // PART 2: Full Gateway + LocalAgent Client E2E Flow & execution scope check

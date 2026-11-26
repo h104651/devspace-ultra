@@ -175,20 +175,24 @@ class TaskRouter {
                         throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' payload mismatch.`);
                     }
                 }
-                return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
+                const latest = this.taskStore.getTask(cached.taskId) || cached;
+                return { taskId: latest.taskId, status: latest.status, task: latest, isReplay: true };
             }
         }
         // Execution tasks must not become latent work on an ineligible or offline device.
         // Existing read-only bounded wait and legacy file-task routing remain unchanged.
         if (options.backend === 'local' && (options.capability === 'local:run_tests' || options.capability === 'local:build_project')) {
             const agents = this.connectionManager?.getConnectedAgents?.({ healthyOnly: true }) || [];
-            const eligible = agents.some((agent) => agent.deviceId === options.targetDeviceId && agent.capabilities?.includes(options.capability));
+            const eligible = agents.find((agent) => agent.deviceId === options.targetDeviceId && agent.capabilities?.includes(options.capability) &&
+                typeof agent.sessionId === 'string' && !!agent.sessionId && /^[a-f0-9]{32}$/.test(agent.executionPolicyRevision || ''));
             if (!eligible) {
                 this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { reason: 'EXECUTION_TARGET_NOT_ELIGIBLE', capability: options.capability, targetDeviceId: options.targetDeviceId } });
                 throw new Error('EXECUTION_TARGET_NOT_ELIGIBLE: Execution requires a healthy target advertising the requested capability.');
             }
+            // Server-owned binding: caller metadata cannot select a session or generation.
+            options.metadata = { ...options.metadata, executionAdmission: { sessionId: eligible.sessionId, policyRevision: eligible.executionPolicyRevision } };
         }
-        const task = this.taskStore.createTask(options);
+        const task = this.taskStore.createTask({ ...options, requiredScope });
         this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT', taskId: task.taskId, resource: options.capability, scopeUsed: hasCapabilityScope ? requiredScope : 'tasks:submit', result: 'SUCCESS' });
         if (task.backend === 'kaggle') {
             await this.kaggleBackend.submitKaggleTask(task);

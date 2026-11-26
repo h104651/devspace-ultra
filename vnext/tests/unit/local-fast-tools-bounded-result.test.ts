@@ -387,7 +387,7 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     );
     passed++;
 
-    mockConnectedAgents = [{ deviceId, capabilities: [...liveCapabilities, 'local:run_tests', 'local:build_project'], status: 'online' }];
+    mockConnectedAgents = [{ deviceId, sessionId: 'fixture-session', executionPolicyRevision: 'a'.repeat(32), capabilities: [...liveCapabilities, 'local:run_tests', 'local:build_project'], status: 'online' }];
 
     // 8. Async tools remain asynchronous without bounded wait:
     // a. local_run_tests
@@ -400,6 +400,17 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     const buildProjectRes = await handlers.handleLocalBuildProject({ projectId: 'astor-tuneup' }, callerAdmin);
     assert.strictEqual(buildProjectRes.status, 'queued');
     assert.strictEqual((buildProjectRes as any).directResult, undefined, 'local_build_project must remain async');
+    passed++;
+
+    // A new session cannot inherit an older queued execution. Idempotent replay
+    // returns the actual terminal task rather than submitting it again.
+    const old = await handlers.handleLocalRunTests({ projectId: 'astor-tuneup', clientRequestId: 'execution-old-policy' }, callerAdmin);
+    assert.strictEqual(old.task.metadata.executionAdmission.sessionId, 'fixture-session');
+    assert.strictEqual(taskStore.claimTask(deviceId, ['local:run_tests'], undefined, 'new-session', true, 'b'.repeat(32)), undefined);
+    assert.strictEqual(taskStore.getTask(old.taskId)?.error?.code, 'EXECUTION_ADMISSION_EXPIRED');
+    const replay = await handlers.handleLocalRunTests({ projectId: 'astor-tuneup', clientRequestId: 'execution-old-policy' }, callerAdmin);
+    assert.strictEqual(replay.taskId, old.taskId);
+    assert.strictEqual(replay.status, 'failed');
     passed++;
 
     // c. remote_task_submit

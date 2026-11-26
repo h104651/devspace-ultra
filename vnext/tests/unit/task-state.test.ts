@@ -203,11 +203,11 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
 
     // Queued execution is cancellable; a dispatched execution requires real drain acknowledgement.
     for (const capability of ['local:run_tests', 'local:build_project']) {
-      const options = { backend: 'local' as const, capability, payload: { projectId: 'fixture' }, targetDeviceId: 'device-exec-cancel' };
+      const options = { backend: 'local' as const, capability, payload: { projectId: 'fixture' }, targetDeviceId: 'device-exec-cancel', metadata: { executionAdmission: { sessionId: 'cancel-session', policyRevision: 'a'.repeat(32) } } };
       const queuedExecution = store.createTask(options);
       assert.strictEqual(store.cancelTask(queuedExecution.taskId, 'not dispatched'), true);
       const runningExecution = store.createTask(options);
-      assert.ok(store.claimTaskById(runningExecution.taskId, 'device-exec-cancel', 1000));
+      assert.ok(store.claimTaskById(runningExecution.taskId, 'device-exec-cancel', 1000, 'cancel-session', 'a'.repeat(32)));
       assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
       assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'claimed');
       assert.strictEqual(store.acknowledgeTask(runningExecution.taskId, 'device-exec-cancel'), true);
