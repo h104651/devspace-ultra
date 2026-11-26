@@ -13,13 +13,20 @@ if ($identity.User.Value -ne $ExpectedSid -or $isAdmin -or @($identity.Groups | 
     throw 'Probe did not run as intended standard identity.'
 }
 $checks = [Collections.Generic.List[string]]::new()
-function Expect-Denied([string]$Name, [scriptblock]$Operation) {
+function Expect-Denied([string]$Name, [scriptblock]$Operation, [switch]$AllowHiddenSource) {
     $denied = $false
     try { & $Operation | Out-Null }
     catch {
         $ex = $_.Exception
         while ($null -ne $ex) {
             if ($ex -is [UnauthorizedAccessException] -or ($ex -is [IO.IOException] -and ($ex.HResult -band 0xffff) -eq 5)) {
+                $denied = $true
+                break
+            }
+            # File.Move can report FILE_NOT_FOUND when its source is hidden by
+            # ACLs. Only the move check permits this, with independent supervisor
+            # verification of original sentinel and absent destination.
+            if ($AllowHiddenSource -and $ex -is [IO.FileNotFoundException]) {
                 $denied = $true
                 break
             }
@@ -35,7 +42,7 @@ function Check-Protected([string]$Name, [string]$Dir, [string]$Own) {
     Expect-Denied "$Name-read" { [IO.File]::ReadAllText($file) }
     Expect-Denied "$Name-write" { [IO.File]::WriteAllText($file, 'bad') }
     Expect-Denied "$Name-delete" { [IO.File]::Delete($file) }
-    Expect-Denied "$Name-move" { [IO.File]::Move($file, (Join-Path $Own "$Name-stolen.txt")) }
+    Expect-Denied "$Name-move" { [IO.File]::Move($file, (Join-Path $Own "$Name-stolen.txt")) } -AllowHiddenSource
     Expect-Denied "$Name-create" { [IO.File]::WriteAllText((Join-Path $Dir 'bad-new.txt'), 'bad') }
     Expect-Denied "$Name-acl" {
         $acl = [Security.AccessControl.DirectorySecurity]::new()

@@ -80,6 +80,9 @@ function Invoke-FixtureProbe($Account, [string]$Role, [string]$Work) {
     }
     $proc = Start-Process @startArgs
     $active.Add($proc)
+    # Cache the native process handle before waiting; Windows PowerShell can
+    # otherwise lose ExitCode when an alternate-credential process exits.
+    $null = $proc.Handle
     if (-not $proc.WaitForExit(45000)) {
         # Only the exact process this fixture created; the probe has no children.
         $proc.Kill()
@@ -135,7 +138,11 @@ try {
         [IO.File]::WriteAllText((Join-Path $dir 'sentinel.txt'), 'synthetic-only')
     }
     Invoke-FixtureProbe $execution 'execution' $workspace
+    foreach ($name in @('agent-stolen.txt','broker-stolen.txt')) {
+        if ([IO.File]::Exists((Join-Path $workspace $name))) { throw 'Protected move unexpectedly created a destination.' }
+    }
     Invoke-FixtureProbe $agent 'agent' $agentPrivate
+    if ([IO.File]::Exists((Join-Path $agentPrivate 'broker-stolen.txt'))) { throw 'Protected move unexpectedly created a destination.' }
     foreach ($dir in @($agentPrivate, $brokerPrivate, $workspace, $sibling, $code)) {
         if ([IO.File]::ReadAllText((Join-Path $dir 'sentinel.txt')) -ne 'synthetic-only') {
             throw 'Protected sentinel changed.'
