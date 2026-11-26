@@ -1,0 +1,36 @@
+# Windows execution identity — production activation contract (DRAFT)
+
+Baseline: PR #28 native Job Object runtime candidate. **Production execution remains blocked.** This document specifies the remaining security boundary; it is not an implemented or approved identity migration.
+
+## Threat model and non-goals
+
+A repo can contain arbitrary code in npm scripts, Flutter/Dart tooling, Gradle plugins, Python tests and Git hooks. An argv allowlist, child environment filter and Job Object constrain invocation/lifetime but not the code's file, process, credential or network access. A child running as the interactive Agent user can read same-user protected files or interfere with same-user processes. Even running the supervisor and child under the same new low-privilege account does not establish trustworthy containment proof against hostile child code. Keep the control-plane identity, execution supervisor identity and untrusted project execution identity distinct. Never elevate the existing Agent or turn on generic shell.
+
+## Recommended boundary
+
+- Existing Agent: current interactive account and protected config/IPC, no service credentials added, no arbitrary command broker. Sends exact device/project/runner/policy revision/attempt identifier, not executable/argv/env supplied by MCP.
+- Trusted supervisor: OS-provisioned local broker/service with an authenticated, tightly ACLed request/result channel. Admin-owned immutable executable and policy; dedicated service SID; only required privileges to launch the execution identity and own Job handles. Do not expose a privileged arbitrary process launcher. Agent and execution account cannot replace broker/policy; execution account cannot connect to control channel, access job handle, tamper result or terminate supervisor.
+- Execution identity: separate standard local account or equivalent enforceable OS token with independent SID and no administrative group membership. Explicitly approved narrow workspace/cache/tool paths, isolated profile/temp, no access to Agent token/config/release/control/logs, supervisor policy, other users' credentials or unrelated projects. Toolchains installed by operator or scoped bootstrap; no inherited signing or GitHub credentials. Git network access requires separate minimal credentials and policy, not Agent token or admin credential.
+- Use the existing Job Object launch, handle allowlist, timeout and drain proof as the inner runtime. Any cross-identity CreateProcess variant must demonstrate creation-time containment and identity verification; no uncontained fallback. Authenticate broker response using the actual OS identity/channel, not self-declared SID or output text. Bind results to current attempt and policy generation. A claimed cancellation is not a confirmed exit.
+- Production policy is fail closed: no profile, unknown/unavailable broker, identity/ACL mismatch, unsupported native runtime, stale policy revision, missing drain proof or unexpected exit -> deny/quarantine and preserve evidence. Do not auto-provision users/accounts, change local ACLs, or enable production grants from GitHub CI.
+
+## Required evidence before activation
+
+I01: Actual supervisor identity != Agent and execution identities; supervisor executable/policy owned by trusted administrators, execution account cannot modify them or their parents.
+I02: Execute as target SID (not administrator simulating effective rights). Real attempts to read/write/delete/replace protected synthetic Agent config/token/IPC/lock/log and supervisor policy are denied. No real secrets used in tests.
+I03: Approved disposable workspace read/write/build succeeds under the target SID. Unapproved sibling workspace, junction/reparse escape, writable executable/parent substitution, credential store and control channel access denied.
+I04: Child cannot impersonate supervisor, open or duplicate its job/control handles, forge drain result, or escape Job Object via breakaway or detached descendants.
+I05: Deadline, cancel, caller loss, broker crash and OS restart distinguish confirmed job drain from uncertain result. Uncertainty fences device and retains lock, no automatic retry. Operator reconciliation must use exact task/attempt and process evidence; no global taskkill.
+I06: Named pipe or equivalent authenticates both endpoint identities, rejects replay, malformed/oversized input, unknown profile, stale policy revision and wrong target. Channel and policy ACL must deny execution SID; no unauthenticated localhost service.
+I07: Native x64 and ARM64 binary builds, hashes, direct EXE and Flutter/npm/Gradle wrapper compatibility; paths with spaces, nested workdir, tool-cache location and environment. No release signing or publication.
+I08: Gateway and Agent jointly enforce capability/policy generation, execution scope and project runner policy. No queued mutation replay under a newly permissive policy. Both devices preserve current read/write boundaries.
+I09: Operational test: service account provisioning and removal are separately authorized, no password in logs/chat/source/config, rollback can stop broker and restore previous immutable release without changing current Agent token. Dist and native binary provenance verified.
+
+## Staged engineering and rollout
+
+1. Build synthetic cross-identity ACL/control fixture on disposable Windows CI, then prove actual broker transport and process creation path. Do not substitute same-user tests for I01–I06.
+2. Implement and independently review supervisor protocol, protected configuration format, explicit execution identity and durable quarantine. Existing same-user Job Runner remains test-only until this gate is met.
+3. ARM64 isolated test release using a separate config directory and local test Gateway; no production Scheduled Task/token/project changes. Run only changed-risk smoke/negative tests plus exact dist/native build verification.
+4. Operator approves any permanent account/service/ACL provisioning and limited first project grant. Then explicit OAuth client + device authorization and one-device rollout. WS2 remains read-only unless separately approved. No main merge or production deploy until the full acceptance matrix is satisfied.
+
+No credentials, permanent account setup or production service changes are authorized by this design. Native runtime passing x64 smoke is necessary, not sufficient. The next implementation should reuse PR #26 authenticated service/ACL patterns and current Job Runner rather than replace the Gateway or daemon.

@@ -86,3 +86,6 @@ The native runtime now requests PROC_THREAD_ATTRIBUTE_JOB_LIST together with HAN
 
 ### Regression: production CLI execution hold vs service timeout fixture
 Run 45871952736 passed native Windows integration but failed the legacy daemon in-flight Build shutdown test because the real CLI now refuses execution admission. Strengthened the real daemon fixture to prove even explicit execution scopes and profiles do not enable the shipped CLI. The long-running mutation test retains its original real process/IPC/exit-13/lock assertions using a disposable, separately copied dist and two dependency packages under its isolated test root; only that copy's literal hold is changed. No shipped configuration flag, environment escape, production bypass or weakened assertion. CI verification pending.
+
+### Release artifact consistency gate
+The Linux vNext CI now rejects any tracked dist difference after compilation and any untracked compiled runtime files. Manual dist synchronization is a candidate until this gate passes. This gate precedes dry-run/deploy eligibility. See `WINDOWS_EXECUTION_IDENTITY_CONTRACT.md` for the remaining three-identity boundary and explicit activation requirements; the same-user native runner is not a production permission grant.

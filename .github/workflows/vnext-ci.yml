@@ -56,6 +56,17 @@ jobs:
         run: npm run build
       - name: Unit, integration, protocol and security tests
         run: npm test
+      - name: Verify tracked dist equals compiled runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- dist
+          if [ -n "$(git ls-files --others --exclude-standard -- dist)" ]; then
+            echo "::error::Untracked compiled runtime files"
+            git ls-files --others --exclude-standard -- dist
+            exit 1
+          fi
+          echo "Tracked compiled runtime verified"
       - name: Cloudflare deploy dry-run
         run: npx --yes wrangler@4.129.0 deploy --dry-run
 
