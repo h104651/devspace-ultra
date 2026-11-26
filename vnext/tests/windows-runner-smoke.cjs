@@ -6,7 +6,7 @@ const path = require('node:path');
 const { TaskExecutor } = require('../dist/local-agent/task-executor');
 async function main() {
   assert.equal(process.platform, 'win32');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu runner smoke '));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu~runner smoke '));
   try {
     const root = path.join(tmp, 'project');
     fs.mkdirSync(root);
@@ -26,6 +26,12 @@ async function main() {
     const previous = process.env.AGENT_TOKEN;
     process.env.AGENT_TOKEN = 'synthetic-fixture-only';
     try {
+      // Diagnostics contain only synthetic fixture path information, never environment values.
+      const wrapperReal = fs.realpathSync(wrapper);
+      console.log('Wrapper path diagnostic:', JSON.stringify({
+        path: wrapperReal,
+        unsafeCharacters: [...new Set(wrapperReal.slice(3).replace(/[A-Za-z0-9_ .()~\\/-]/g, ''))]
+      }));
       assert.match((await executor.executeTask(make('wrapper'), () => {})).stdout, /wrapper-ok/);
       assert.match((await executor.executeTask(make('native'), () => {})).stdout, /native-ok/);
       await assert.rejects(() => executor.executeTask(make('unsafe'), () => {}), /LOCAL_RUNNER_WRAPPER_ARGUMENT_DENIED/);

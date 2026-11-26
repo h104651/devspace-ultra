@@ -779,7 +779,7 @@ export class TaskExecutor {
       if (/\.(cmd|bat)$/i.test(resolvedExecutable)) {
         // cmd /s /c strips the outer quotes. Restrict every token BEFORE quoting.
         // No caller-controlled text enters this command string.
-        if (!/^[A-Za-z]:[\\/][A-Za-z0-9_ .()\\/-]+$/.test(resolvedExecutable) ||
+        if (!/^[A-Za-z]:[\\/][A-Za-z0-9_ .()~\\/-]+$/.test(resolvedExecutable) ||
             args.some(arg => !/^[A-Za-z0-9_ .:\\/=-]+$/.test(arg))) {
           throw new Error('LOCAL_RUNNER_WRAPPER_ARGUMENT_DENIED: Unsupported Windows batch path or argument.');
         }

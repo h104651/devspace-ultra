@@ -142,10 +142,10 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
       permissions: { read: true, write: true, test: true, build: true, hostExecution: true },
       commands: {
         test: {
-          npm: { executable: process.execPath, args: ['-e', 'console.log("npm test passed in " + process.cwd())'] }
+          npm: { executable: process.execPath, args: ['-e', 'console.log("npm test passed in " + process.cwd())'], workingRelativePath: 'backend' }
         },
         build: {
-          npm: { executable: process.execPath, args: ['-e', 'console.log("npm build passed in " + process.cwd())'] }
+          npm: { executable: process.execPath, args: ['-e', 'console.log("npm build passed in " + process.cwd())'], workingRelativePath: 'backend' }
         }
       }
     });
@@ -427,6 +427,10 @@ export async function runLocalWorkspaceDiscoveryIntegrationTests(): Promise<{ pa
 
       assert.strictEqual(buildRes.exitCode, 0);
       assert.ok(buildRes.stdout.includes('backend'));
+      await assert.rejects(() => executor.executeTask({
+        capability: 'local:run_tests',
+        payload: { projectId: 'astor-workspace', runnerId: 'npm', workingRelativePath: 'mobile' }
+      } as any, () => {}), /LOCAL_RUNNER_WORKDIR_DENIED/);
     });
 
     // ----------------------------------------------------
