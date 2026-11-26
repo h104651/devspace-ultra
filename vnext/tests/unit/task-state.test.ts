@@ -201,6 +201,23 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     assert.strictEqual(store.getTask(mutation.taskId)?.error?.code, 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN');
     passed++;
 
+    // Queued execution is cancellable; a dispatched execution requires real drain acknowledgement.
+    for (const capability of ['local:run_tests', 'local:build_project']) {
+      const options = { backend: 'local' as const, capability, payload: { projectId: 'fixture' }, targetDeviceId: 'device-exec-cancel' };
+      const queuedExecution = store.createTask(options);
+      assert.strictEqual(store.cancelTask(queuedExecution.taskId, 'not dispatched'), true);
+      const runningExecution = store.createTask(options);
+      assert.ok(store.claimTaskById(runningExecution.taskId, 'device-exec-cancel', 1000));
+      assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'claimed');
+      assert.strictEqual(store.acknowledgeTask(runningExecution.taskId, 'device-exec-cancel'), true);
+      assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
+      assert.strictEqual(store.startTask(runningExecution.taskId, 'device-exec-cancel'), true);
+      assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'running');
+      passed++;
+    }
+
     // Test 13: Event-driven wait resolves on task change and reports bounded timeout without polling.
     const task8 = store.createTask({
       backend: 'local',

@@ -411,6 +411,7 @@ class LocalAgentClient {
         }
     }
     async runAssignedTask(task, socket = this.taskSockets.get(task.taskId)) {
+        let retainTaskForAudit = false;
         const sendForAttempt = (message) => {
             if (!socket || this.activeTasks.get(task.taskId) !== task || this.taskSockets.get(task.taskId) !== socket)
                 return;
@@ -463,6 +464,27 @@ class LocalAgentClient {
         }
         catch (err) {
             const errCode = err.code || (typeof err.message === 'string' && err.message.split(':')[0]) || 'LOCAL_TASK_EXECUTION_ERROR';
+            if (errCode === 'LOCAL_PROCESS_TREE_UNCERTAIN' && (0, capabilities_1.isSideEffectCapability)(task.capability)) {
+                // Leave the attempt in flight for lease-expiry recovery. Never advertise
+                // normal failure/completion or release the local agent lock.
+                retainTaskForAudit = true;
+                this.isRunning = false;
+                if (this.reconnectTimeout)
+                    clearTimeout(this.reconnectTimeout);
+                if (this.registrationTimer)
+                    clearTimeout(this.registrationTimer);
+                if (this.pollTimer)
+                    clearInterval(this.pollTimer);
+                if (this.heartbeatTimer)
+                    clearInterval(this.heartbeatTimer);
+                this.registeredSocket = undefined;
+                try {
+                    this.ws?.terminate();
+                }
+                catch { }
+                this.notifyPolicyRejected('LOCAL_PROCESS_TREE_UNCERTAIN: Manual task and process-tree reconciliation required.');
+                return;
+            }
             sendForAttempt({
                 type: 'TASK_FAIL',
                 messageId: crypto.randomUUID(),
@@ -477,7 +499,7 @@ class LocalAgentClient {
             });
         }
         finally {
-            if (this.activeTasks.get(task.taskId) === task) {
+            if (!retainTaskForAudit && this.activeTasks.get(task.taskId) === task) {
                 this.activeTasks.delete(task.taskId);
                 this.taskSockets.delete(task.taskId);
             }

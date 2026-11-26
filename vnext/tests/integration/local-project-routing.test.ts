@@ -369,6 +369,39 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       assert.ok(result.stdout.includes('fixture-ok'));
     });
 
+    await test('Agent: uncertain runner tree fences connection and retains in-flight task for audit', async () => {
+      let rejected = '';
+      let terminated = false;
+      const messages: any[] = [];
+      const local = new LocalAgentClient({
+        gatewayUrl: 'ws://127.0.0.1:1/ws/agent', deviceId: 'fixture-quarantine', token: 'fixture',
+        projects: [{
+          projectId: 'project-a', root: rootA,
+          permissions: { read: true, test: true, hostExecution: true },
+          commands: { test: { fixture: { executable: process.execPath, args: ['--version'] } } }
+        }],
+        onPolicyRejected: reason => { rejected = reason; }
+      });
+      const internal = local as any;
+      const task = makeTask('local:run_tests', { projectId: 'project-a', runnerId: 'fixture' });
+      const socket = { terminate: () => { terminated = true; } };
+      internal.ws = socket;
+      internal.registeredSocket = socket;
+      internal.isRunning = true;
+      internal.activeTasks.set(task.taskId, task);
+      internal.taskSockets.set(task.taskId, socket);
+      internal.send = (msg: any) => messages.push(msg);
+      internal.executor.executeTask = async () => { throw new Error('LOCAL_PROCESS_TREE_UNCERTAIN: fixture'); };
+      await internal.runAssignedTask(task, socket);
+      assert.ok(terminated && rejected.includes('LOCAL_PROCESS_TREE_UNCERTAIN'));
+      assert.strictEqual(internal.isRunning, false);
+      assert.strictEqual(local.hasInFlightTasks(), true);
+      assert.strictEqual(local.getInFlightTasks()[0].taskId, task.taskId);
+      assert.ok(!messages.some(msg => msg.type === 'TASK_COMPLETE' || msg.type === 'TASK_FAIL'));
+      local.start();
+      assert.strictEqual(internal.isRunning, false, 'Uncertain attempt prevents reconnect');
+    });
+
     // PART 2: Full Gateway + LocalAgent Client E2E Flow & execution scope check
     // ----------------------------------------------------
     const testStorageDir = path.join(tmpBase, '.devspace-storage-gateway');

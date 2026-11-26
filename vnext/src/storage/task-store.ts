@@ -782,6 +782,13 @@ export class TaskStore {
       return false;
     }
 
+    // Generic cancellation has no agent acknowledgement or process-tree drain proof.
+    // Queued execution can be cancelled; dispatched execution must remain auditable.
+    if (task.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project') &&
+      (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running')) {
+      return false;
+    }
+
     this.finishActiveAttempt(task, 'cancelled', { code: 'TASK_CANCELLED', message: reason });
     task.status = 'cancelled';
     task.error = { code: 'TASK_CANCELLED', message: reason };
