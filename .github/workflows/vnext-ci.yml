@@ -59,9 +59,26 @@ jobs:
       - name: Cloudflare deploy dry-run
         run: npx --yes wrangler@4.129.0 deploy --dry-run
 
+  verify-windows-runner:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: vnext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: TypeScript build
+        run: npm run build
+      - name: Compiled Windows runner smoke
+        run: node tests/windows-runner-smoke.cjs
+
   deploy-production:
     name: Deploy Cloudflare production
-    needs: verify-vnext
+    needs: [verify-vnext, verify-windows-runner]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.deploy_production == true && inputs.preflight_inventory_confirmed == true
     runs-on: ubuntu-latest
     concurrency:

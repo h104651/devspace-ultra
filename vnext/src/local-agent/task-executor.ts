@@ -761,12 +761,47 @@ export class TaskExecutor {
       }
       env[key] = value;
     }
+    // Resolve only locally configured absolute paths. Never search the project cwd or PATH.
+    if (!path.isAbsolute(executable)) {
+      throw new Error('LOCAL_RUNNER_INVALID: Absolute executable path required.');
+    }
+    const resolvedExecutable = fs.realpathSync(executable);
+    if (!fs.statSync(resolvedExecutable).isFile()) {
+      throw new Error('LOCAL_RUNNER_INVALID: Executable is not a regular file.');
+    }
+    let launchExecutable = resolvedExecutable;
+    let launchArgs = args;
+    let verbatim = false;
+    if (process.platform === 'win32') {
+      if (!/^[A-Za-z]:[\\/]/.test(resolvedExecutable)) {
+        throw new Error('LOCAL_RUNNER_INVALID: Windows runner requires a local drive path.');
+      }
+      if (/\.(cmd|bat)$/i.test(resolvedExecutable)) {
+        // cmd /s /c strips the outer quotes. Restrict every token BEFORE quoting.
+        // No caller-controlled text enters this command string.
+        if (!/^[A-Za-z]:[\\/][A-Za-z0-9_ .()\\/-]+$/.test(resolvedExecutable) ||
+            args.some(arg => !/^[A-Za-z0-9_ .:\\/=-]+$/.test(arg))) {
+          throw new Error('LOCAL_RUNNER_WRAPPER_ARGUMENT_DENIED: Unsupported Windows batch path or argument.');
+        }
+        const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT;
+        if (!systemRoot || !/^[A-Za-z]:[\\/]/.test(systemRoot)) {
+          throw new Error('LOCAL_RUNNER_INVALID: Windows SystemRoot is unavailable.');
+        }
+        launchExecutable = path.join(systemRoot, 'System32', 'cmd.exe');
+        const quoted = [resolvedExecutable, ...args].map(token => '"' + token + '"').join(' ');
+        launchArgs = ['/d', '/s', '/v:off', '/c', '"' + quoted + '"'];
+        verbatim = true;
+      } else if (!/\.exe$/i.test(resolvedExecutable)) {
+        throw new Error('LOCAL_RUNNER_INVALID: Unsupported Windows executable type.');
+      }
+    }
     return new Promise((resolve, reject) => {
-      const child = spawn(executable, args, {
+      const child = spawn(launchExecutable, launchArgs, {
         cwd,
         env,
         shell: false,
-        windowsHide: true
+        windowsHide: true,
+        windowsVerbatimArguments: verbatim
       });
 
       let stdoutAcc = '';
