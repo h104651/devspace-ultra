@@ -27,7 +27,11 @@ function New-FixtureAccount([string]$Name) {
     $created.Add($account)
     $members = @(Get-LocalGroupMember -SID $usersSid)
     if (-not ($members | Where-Object { $_.SID.Value -eq $account.SID.Value })) {
-        Add-LocalGroupMember -SID $usersSid -Member $account.SID
+        # -Member expects a LocalPrincipal, not a SecurityIdentifier instance.
+        Add-LocalGroupMember -SID $usersSid -Member $account
+        if (-not (Get-LocalGroupMember -SID $usersSid | Where-Object { $_.SID.Value -eq $account.SID.Value })) {
+            throw 'Fixture Users group membership not established.'
+        }
     }
     $credential = [Management.Automation.PSCredential]::new(".\$Name", $secret)
     return [pscustomobject]@{ Sid = $account.SID; Credential = $credential }
