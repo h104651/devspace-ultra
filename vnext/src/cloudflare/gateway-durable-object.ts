@@ -1752,6 +1752,7 @@ export class GatewayDurableObject {
           switch (toolName) {
             case 'remote_task_submit': result = await this.mcpHandlers.handleRemoteTaskSubmit(args, caller); break;
             case 'remote_task_status': result = await this.mcpHandlers.handleRemoteTaskStatus(args, caller); break;
+            case 'task_inventory': result = await this.mcpHandlers.handleTaskInventory(args, caller); break;
             case 'remote_task_wait': result = await handleRemoteTaskWait(this.taskStore, args, caller.scopes); break;
             case 'remote_task_logs': result = await this.mcpHandlers.handleRemoteTaskLogs(args, caller); break;
             case 'remote_task_artifacts': result = await this.mcpHandlers.handleRemoteTaskArtifacts(args, caller); break;

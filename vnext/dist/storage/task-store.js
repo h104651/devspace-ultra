@@ -52,6 +52,7 @@ class TaskStore {
     storageAdapter;
     // Never resume local dispatch in a process that has lost durable state.
     localPersistenceFailed = false;
+    inventoryPersistenceUnconfirmed = false;
     taskWaiters = new Map();
     constructor(storageDir, defaultLeaseDurationMs = 60000, storageAdapter) {
         this.defaultLeaseDurationMs = defaultLeaseDurationMs;
@@ -227,10 +228,13 @@ class TaskStore {
                 const taskPath = path.join(this.tasksDir, `${task.taskId}.json`);
                 fs.writeFileSync(taskPath, JSON.stringify(task, null, 2), 'utf-8');
             }
-            catch { }
+            catch {
+                this.inventoryPersistenceUnconfirmed = true;
+            }
         }
         if (this.storageAdapter) {
             void this.storageAdapter.saveTask(task).catch(err => {
+                this.inventoryPersistenceUnconfirmed = true;
                 console.error(`Failed to persist task ${task.taskId} through storage adapter:`, err);
             });
         }
@@ -871,6 +875,100 @@ class TaskStore {
             }
         }
         return { recoveredCount, failedCount };
+    }
+    /**
+     * Read-only, bounded, revision-checked observation. Not a maintenance lock.
+     * A filter never narrows the global counts used to evaluate gateway inventory.
+     */
+    taskInventory(args = {}) {
+        if (!args || typeof args !== 'object' || Array.isArray(args) ||
+            Object.keys(args).some(key => !['backend', 'status', 'targetDeviceId', 'offset', 'limit', 'snapshotRevision'].includes(key))) {
+            throw new Error('INVALID_ARGUMENT: Invalid task inventory filter.');
+        }
+        const backend = args.backend ?? 'all';
+        const status = args.status ?? 'all';
+        const targetDeviceId = args.targetDeviceId;
+        const offset = args.offset ?? 0;
+        const limit = args.limit ?? 50;
+        const validId = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
+        if (!['all', 'local', 'kaggle', 'browser', 'swarm'].includes(backend) ||
+            !['all', 'active', 'stale', 'quarantined'].includes(status) ||
+            (targetDeviceId !== undefined && (!validId(targetDeviceId) || (backend !== 'all' && backend !== 'local'))) ||
+            !Number.isInteger(offset) || offset < 0 || offset > 10000 ||
+            !Number.isInteger(limit) || limit < 1 || limit > 100 ||
+            (args.snapshotRevision !== undefined && (typeof args.snapshotRevision !== 'string' || !/^[a-f0-9]{64}$/.test(args.snapshotRevision))) ||
+            (offset > 0 && !args.snapshotRevision)) {
+            throw new Error('INVALID_ARGUMENT: Inventory requires bounded filters and a revision for subsequent pages.');
+        }
+        if (this.localPersistenceFailed || this.inventoryPersistenceUnconfirmed) {
+            throw new Error('INVENTORY_UNAVAILABLE: Durable task persistence is unconfirmed.');
+        }
+        const cap = 10000;
+        const included = (task) => task_1.ACTIVE_TASK_STATUSES.has(task.status) ||
+            (task.backend === 'local' && task.status === 'stale');
+        let source = [];
+        if (this.storageAdapter) {
+            if (!this.storageAdapter.readTaskInventorySync)
+                throw new Error('INVENTORY_UNAVAILABLE: Durable snapshot not supported.');
+            source = this.storageAdapter.readTaskInventorySync(cap + 1);
+        }
+        else {
+            for (const task of this.tasks.values()) {
+                if (included(task))
+                    source.push(task);
+                if (source.length > cap)
+                    break;
+            }
+        }
+        if (source.length > cap)
+            throw new Error('INVENTORY_LIMIT_EXCEEDED: No complete observation is available; use operator inventory.');
+        if (this.storageAdapter) {
+            // Refuse false emptiness if an in-memory active task has not reached durable storage.
+            const persisted = new Map(source.map(task => [task.taskId, task]));
+            for (const task of this.tasks.values()) {
+                if (included(task) && persisted.get(task.taskId)?.status !== task.status) {
+                    throw new Error('INVENTORY_UNAVAILABLE: In-memory and durable task states differ.');
+                }
+            }
+        }
+        const rows = source.map(task => {
+            if (!validId(task.taskId) || !['local', 'kaggle', 'browser', 'swarm'].includes(task.backend) ||
+                !included(task) || (task.targetDeviceId !== undefined && !validId(task.targetDeviceId))) {
+                throw new Error('INVENTORY_UNAVAILABLE: Unexpected stored task metadata.');
+            }
+            const priorClaimant = task.lease?.claimedBy || [...(task.attempts || [])].reverse().find(attempt => attempt.claimedBy)?.claimedBy;
+            return {
+                taskId: task.taskId, backend: task.backend, capability: validId(task.capability) ? task.capability : 'unknown',
+                status: task.status, targetDeviceId: task.targetDeviceId || null, priorClaimant: validId(priorClaimant) ? priorClaimant : null,
+                isQuarantined: task.backend === 'local' && !task.targetDeviceId && task_1.ACTIVE_TASK_STATUSES.has(task.status),
+                attemptCount: (task.attempts || []).length, leaseExpiresAt: task.lease?.leaseExpiresAt ?? null,
+                createdAt: task.createdAt, updatedAt: task.updatedAt, startedAt: task.startedAt ?? null, completedAt: task.completedAt ?? null
+            };
+        }).sort((a, b) => a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0);
+        const summary = {
+            allActiveCount: rows.filter(task => task_1.ACTIVE_TASK_STATUSES.has(task.status)).length,
+            activeLocalCount: rows.filter(task => task.backend === 'local' && task_1.ACTIVE_TASK_STATUSES.has(task.status)).length,
+            quarantinedLocalCount: rows.filter(task => task.isQuarantined).length,
+            staleLocalCount: rows.filter(task => task.backend === 'local' && task.status === 'stale').length
+        };
+        const snapshotRevision = crypto.createHash('sha256').update(JSON.stringify({ backend, status, targetDeviceId, rows })).digest('hex');
+        if (args.snapshotRevision && args.snapshotRevision !== snapshotRevision) {
+            throw new Error('INVENTORY_SNAPSHOT_CHANGED: Restart pagination at offset zero.');
+        }
+        const selected = rows.filter(task => (backend === 'all' || task.backend === backend) &&
+            (targetDeviceId === undefined || task.targetDeviceId === targetDeviceId) &&
+            (status === 'all' || (status === 'active' && task_1.ACTIVE_TASK_STATUSES.has(task.status)) ||
+                (status === 'stale' && task.status === 'stale') || (status === 'quarantined' && task.isQuarantined)));
+        if (offset > selected.length)
+            throw new Error('INVALID_ARGUMENT: Inventory offset exceeds snapshot.');
+        const hasMore = offset + limit < selected.length;
+        return {
+            ok: true, checkedAt: Date.now(), snapshotRevision, total: selected.length, offset, limit, hasMore,
+            snapshotComplete: true, pageComplete: offset === 0 && !hasMore,
+            coverage: 'ALL_ACTIVE_BACKENDS_AND_LOCAL_STALE', summary,
+            observedEmpty: summary.allActiveCount === 0 && summary.staleLocalCount === 0,
+            maintenanceAuthorized: false, tasks: selected.slice(offset, offset + limit)
+        };
     }
     listTasks(filter) {
         let list = Array.from(this.tasks.values());

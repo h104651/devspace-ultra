@@ -3,6 +3,7 @@ export type StandardScope =
   | 'mcp:access'
   | 'tasks:submit'
   | 'tasks:read'
+  | 'tasks:inventory'
   | 'artifacts:read'
   | 'kaggle:submit'
   | 'kaggle:read'

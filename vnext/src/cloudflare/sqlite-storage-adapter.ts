@@ -1,4 +1,4 @@
-import { IStorageAdapter } from '../storage/storage-adapter.interface';
+import { IStorageAdapter, TaskInventorySource } from '../storage/storage-adapter.interface';
 import { DurableTask, TaskStatus } from '../types/task';
 import { ClientRecord, DeviceRecord } from '../types/auth';
 import { ArtifactMetadata } from '../types/artifacts';
@@ -128,6 +128,21 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       task.externalRun ? JSON.stringify(task.externalRun) : null,
       task.targetDeviceId || null
     );
+  }
+
+  readTaskInventorySync(limit: number): TaskInventorySource[] {
+    // Deliberately do not SELECT * or hydrate terminal history into TaskStore.
+    const rows = this.sql.exec(
+      "SELECT taskId, backend, capability, status, targetDeviceId, leaseJson, attemptsJson, createdAt, updatedAt, startedAt, completedAt FROM tasks WHERE status IN ('queued','claimed','acknowledged','running','retrying') OR (backend = 'local' AND status = 'stale') ORDER BY taskId LIMIT ?",
+      limit
+    ).toArray();
+    return rows.map(row => ({
+      taskId: row.taskId, backend: row.backend, capability: row.capability, status: row.status,
+      targetDeviceId: row.targetDeviceId || undefined, lease: row.leaseJson ? JSON.parse(row.leaseJson) : undefined,
+      attempts: row.attemptsJson ? JSON.parse(row.attemptsJson) : [],
+      createdAt: row.createdAt, updatedAt: row.updatedAt, startedAt: row.startedAt || undefined,
+      completedAt: row.completedAt || undefined
+    }));
   }
 
   async listActiveTasks(): Promise<DurableTask[]> {

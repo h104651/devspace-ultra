@@ -3,6 +3,10 @@ import { ClientRecord, DeviceRecord } from '../types/auth';
 import { ArtifactMetadata } from '../types/artifacts';
 import { AuditEvent } from '../types/audit';
 
+// Inventory excludes payload, result, logs, artifacts and client-supplied metadata.
+export type TaskInventorySource = Pick<DurableTask, 'taskId' | 'backend' | 'capability' | 'status' |
+  'targetDeviceId' | 'lease' | 'attempts' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt'>;
+
 export interface IStorageAdapter {
   // Tasks
   getTask(taskId: string): Promise<DurableTask | undefined>;
@@ -12,6 +16,8 @@ export interface IStorageAdapter {
   saveTaskSync?(task: DurableTask): void;
   listTasks(filter?: { status?: TaskStatus; backend?: string; capability?: string; limit?: number; offset?: number }): Promise<DurableTask[]>;
   deleteTask(taskId: string): Promise<boolean>;
+  /** Single bounded durable snapshot of active work and local stale records. */
+  readTaskInventorySync?(limit: number): TaskInventorySource[];
 
   // Idempotency
   getIdempotency(key: string): Promise<DurableTask | undefined>;

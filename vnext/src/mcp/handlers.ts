@@ -126,6 +126,13 @@ export class McpHandlers {
     };
   }
 
+  public async handleTaskInventory(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'tasks:read');
+    this.requireScope(auth, 'tasks:inventory');
+    return this.gateway.taskStore.taskInventory(args);
+  }
+
   public async handleRemoteTaskStatus(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'tasks:read');

@@ -1693,6 +1693,9 @@ class GatewayDurableObject {
                         case 'remote_task_status':
                             result = await this.mcpHandlers.handleRemoteTaskStatus(args, caller);
                             break;
+                        case 'task_inventory':
+                            result = await this.mcpHandlers.handleTaskInventory(args, caller);
+                            break;
                         case 'remote_task_wait':
                             result = await (0, reliability_tools_1.handleRemoteTaskWait)(this.taskStore, args, caller.scopes);
                             break;

@@ -126,6 +126,7 @@ export class GatewayServer {
     switch (name) {
       case 'remote_task_submit': return this.mcpHandlers.handleRemoteTaskSubmit(args, caller);
       case 'remote_task_status': return this.mcpHandlers.handleRemoteTaskStatus(args, caller);
+      case 'task_inventory': return this.mcpHandlers.handleTaskInventory(args, caller);
       case 'remote_task_wait': return handleRemoteTaskWait(this.taskStore, args, caller.scopes);
       case 'remote_task_logs': return this.mcpHandlers.handleRemoteTaskLogs(args, caller);
       case 'remote_task_artifacts': return this.mcpHandlers.handleRemoteTaskArtifacts(args, caller);

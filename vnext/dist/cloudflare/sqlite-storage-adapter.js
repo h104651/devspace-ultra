@@ -136,6 +136,17 @@ class CloudflareSqliteStorageAdapter {
         startedAt, completedAt, createdAt, updatedAt, attemptsJson, activeAttemptId, externalRunJson, targetDeviceId
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.taskId, task.taskKey || null, task.idempotencyKey || null, task.clientRequestId || null, task.backend, task.capability, task.requiredScope, task.status, task.priority, JSON.stringify(task.payload), JSON.stringify(task.retryPolicy), task.lease ? JSON.stringify(task.lease) : null, task.result !== undefined ? JSON.stringify(task.result) : null, task.error !== undefined ? JSON.stringify(task.error) : null, JSON.stringify(task.artifacts || []), JSON.stringify(task.logs || []), task.metadata ? JSON.stringify(task.metadata) : null, task.startedAt || null, task.completedAt || null, task.createdAt, task.updatedAt, JSON.stringify(task.attempts || []), task.activeAttemptId || null, task.externalRun ? JSON.stringify(task.externalRun) : null, task.targetDeviceId || null);
     }
+    readTaskInventorySync(limit) {
+        // Deliberately do not SELECT * or hydrate terminal history into TaskStore.
+        const rows = this.sql.exec("SELECT taskId, backend, capability, status, targetDeviceId, leaseJson, attemptsJson, createdAt, updatedAt, startedAt, completedAt FROM tasks WHERE status IN ('queued','claimed','acknowledged','running','retrying') OR (backend = 'local' AND status = 'stale') ORDER BY taskId LIMIT ?", limit).toArray();
+        return rows.map(row => ({
+            taskId: row.taskId, backend: row.backend, capability: row.capability, status: row.status,
+            targetDeviceId: row.targetDeviceId || undefined, lease: row.leaseJson ? JSON.parse(row.leaseJson) : undefined,
+            attempts: row.attemptsJson ? JSON.parse(row.attemptsJson) : [],
+            createdAt: row.createdAt, updatedAt: row.updatedAt, startedAt: row.startedAt || undefined,
+            completedAt: row.completedAt || undefined
+        }));
+    }
     async listActiveTasks() {
         const activeStatuses = ['queued', 'claimed', 'acknowledged', 'running', 'retrying'];
         const placeholders = activeStatuses.map(() => '?').join(', ');

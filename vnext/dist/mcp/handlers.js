@@ -133,6 +133,12 @@ class McpHandlers {
             message: 'Task successfully submitted and queued in durable storage'
         };
     }
+    async handleTaskInventory(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'tasks:read');
+        this.requireScope(auth, 'tasks:inventory');
+        return this.gateway.taskStore.taskInventory(args);
+    }
     async handleRemoteTaskStatus(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'tasks:read');
