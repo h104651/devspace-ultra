@@ -283,7 +283,12 @@ export class ConnectionManager {
 
     if (msg.type === 'TASK_CLAIM_POLL') {
       // Use strictly the agent's authorized capabilities, ignoring unauthorized escalation
-      const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities, undefined, sessionId, supportsAttemptFencing);
+      // Execution capabilities must be both session-authorized and currently requested by the agent.
+      const claimCapabilities = agent.capabilities.filter(cap => {
+        if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
+        return Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
+      });
+      const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, sessionId, supportsAttemptFencing);
       if (task) {
         socket.send(JSON.stringify({
           type: 'TASK_ASSIGNED',

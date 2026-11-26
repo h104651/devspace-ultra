@@ -396,7 +396,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         deviceId,
         token: deviceToken,
         projects: [
-          { projectId: 'project-a', displayName: 'Project Alpha', root: rootA, permissions: { read: true, write: true, test: true, build: true, hostExecution: true } },
+          { projectId: 'project-a', displayName: 'Project Alpha', root: rootA, permissions: { read: true, write: true, test: true, build: true, hostExecution: true }, commands: { test: { npm: { executable: process.execPath, args: ['-e', 'console.log("fixture test")'] } } } },
           { projectId: 'project-b', displayName: 'Project Beta', root: rootB, permissions: { read: true, write: true, test: true, build: true, hostExecution: true } }
         ],
         pollIntervalMs: 50,
@@ -409,6 +409,23 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         if (server.connectionManager.getConnectedAgents().length > 0) break;
       }
       assert.strictEqual(server.connectionManager.getConnectedAgents().length, 1);
+      await test('Execution advertisement requires local runner and authenticated scope', () => {
+        const connected = server.connectionManager.getConnectedAgents()[0];
+        assert.ok(connected.capabilities.includes('local:run_tests'));
+        assert.ok(!connected.capabilities.includes('local:build_project'));
+        const agentInternal = agent as any;
+        const registry = agentInternal.executor.getRegistry();
+        registry.registerProject({
+          projectId: 'project-a', root: rootA,
+          permissions: { read: true, write: true, test: true, build: true, hostExecution: true }
+        });
+        assert.deepStrictEqual(agentInternal.currentExecutionCapabilities(['local:read_file', 'local:run_tests', 'local:build_project']), ['local:read_file']);
+        registry.registerProject({
+          projectId: 'project-a', root: rootA,
+          permissions: { read: true, write: true, test: true, build: true, hostExecution: true },
+          commands: { test: { npm: { executable: process.execPath, args: ['-e', 'console.log("fixture test")'] } } }
+        });
+      });
 
       const mcpHandlers = new McpHandlers(server);
 

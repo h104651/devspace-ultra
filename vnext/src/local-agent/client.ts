@@ -204,6 +204,16 @@ export class LocalAgentClient {
     }
   }
 
+  private currentExecutionCapabilities(capabilities: string[]): string[] {
+    const executionPolicyReadable = !this.executorConfig.projectsConfigFile || !!this.executorConfig.projectRegistry ||
+      (!!this.executorConfigRevision && this.computeExecutorConfigRevision() === this.executorConfigRevision);
+    const projects = executionPolicyReadable ? this.executor.getRegistry().listProjects().filter(p => p.enabled) : [];
+    return capabilities.filter(cap => {
+      if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
+      return projects.some(project => project.availableCapabilities.includes(cap));
+    });
+  }
+
   private connect(): void {
     if (!this.isRunning) return;
 
@@ -300,7 +310,7 @@ export class LocalAgentClient {
       deviceId: this.config.deviceId,
       name: this.config.name || `Local-Agent-${probe.hostname}`,
       platform: probe.platform,
-      capabilities: probe.capabilities,
+      capabilities: this.currentExecutionCapabilities(probe.capabilities),
       token: this.config.token,
       supportsAttemptFencing: true,
       reconnectProof: this.reconnectProof,
@@ -337,7 +347,7 @@ export class LocalAgentClient {
         messageId: crypto.randomUUID(),
         timestamp: Date.now(),
         deviceId: this.config.deviceId,
-        supportedCapabilities: capabilities
+        supportedCapabilities: this.currentExecutionCapabilities(capabilities)
       });
     }, this.config.pollIntervalMs);
   }
@@ -417,6 +427,12 @@ export class LocalAgentClient {
         }
       };
 
+      if (task.capability === 'local:run_tests' || task.capability === 'local:build_project') {
+        // Policy may have changed since the claim poll. Never execute with stale config.
+        if (!this.currentExecutionCapabilities([task.capability]).includes(task.capability)) {
+          throw new Error('EXECUTION_POLICY_CHANGED: Local execution policy is unavailable or no longer permits this capability.');
+        }
+      }
       const result = await this.executor.executeTask(task, (line) => {
         logBuffer.push(line);
         if (logBuffer.length >= 5) {

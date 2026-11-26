@@ -1339,7 +1339,13 @@ class GatewayDurableObject {
                     return;
                 }
                 this.taskStore.recoverStaleTasks();
-                const task = this.taskStore.claimTask(authenticatedDeviceId, authorizedCapabilities, undefined, currentSessionId, supportsAttemptFencing);
+                // Execution capabilities must be both session-authorized and currently requested by the agent.
+                const claimCapabilities = authorizedCapabilities.filter(cap => {
+                    if (cap !== 'local:run_tests' && cap !== 'local:build_project')
+                        return true;
+                    return Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
+                });
+                const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, currentSessionId, supportsAttemptFencing);
                 if (task) {
                     ws.send(JSON.stringify({
                         type: 'TASK_ASSIGNED',
