@@ -777,7 +777,6 @@ class TaskStore {
             (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running')) {
             return false;
         }
-
         this.finishActiveAttempt(task, 'cancelled', { code: 'TASK_CANCELLED', message: reason });
         task.status = 'cancelled';
         task.error = { code: 'TASK_CANCELLED', message: reason };

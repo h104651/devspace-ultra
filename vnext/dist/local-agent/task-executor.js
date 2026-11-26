@@ -660,7 +660,7 @@ class TaskExecutor {
         }
         return cwd;
     }
-    executeProcessWithoutShell(executable, args, cwd, extraEnv, onLog, timeoutMs = 1800000, signal) {
+    executeProcessWithoutShell(executable, args, cwd, extraEnv, onLog, timeoutMs = 1_800_000, signal) {
         // Runner environment is intentionally distinct from the Agent environment.
         // This does not provide an OS sandbox or prevent same-user filesystem access.
         if (typeof executable !== 'string' || !executable.trim() || executable.includes('\0') ||
@@ -718,7 +718,7 @@ class TaskExecutor {
                 throw new Error('LOCAL_RUNNER_INVALID: Unsupported Windows executable type.');
             }
         }
-        if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 7200000) {
+        if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 7_200_000) {
             throw new Error('LOCAL_RUNNER_INVALID: Invalid locally configured timeout.');
         }
         if (signal?.aborted)
@@ -772,7 +772,7 @@ class TaskExecutor {
                     forcedHostStop = true;
                     this.executionQuarantined = true;
                     child.kill();
-                }, timeoutMs + 20000);
+                }, timeoutMs + 20_000);
             }
             let stdoutAcc = '';
             const maxOutputChars = 256 * 1024;
