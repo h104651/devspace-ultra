@@ -9,6 +9,8 @@ export const ALLOWED_DEVICE_SCOPES = new Set<string>([
   'local:write',
   'local:test',
   'local:exec',
+  'local:execute:test',
+  'local:execute:build',
   'local:list_projects',
   'local:project_status',
   'local:read_file',

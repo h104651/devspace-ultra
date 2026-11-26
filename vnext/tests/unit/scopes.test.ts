@@ -30,6 +30,17 @@ export async function runScopesUnitTests(): Promise<{ passed: number; failed: nu
     assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:write_file'), 'local:write');
     assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:raw_shell'), 'raw_shell:run');
     passed++;
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:run_tests'), 'local:execute:test');
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:build_project'), 'local:execute:build');
+    for (const scope of ['local:read', 'local:write', 'local:test', 'local:run_tests', 'local:build_project']) {
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:execute:test'), false);
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:execute:build'), false);
+    }
+    assert.strictEqual(ScopeChecker.hasScope(['local:execute:test'], 'local:execute:build'), false);
+    assert.strictEqual(ScopeChecker.hasScope(['local:execute:build'], 'local:execute:test'), false);
+    assert.strictEqual(ScopeChecker.hasScope(['local:exec'], 'local:execute:test'), true);
+    assert.strictEqual(ScopeChecker.hasScope(['local:exec'], 'local:execute:build'), true);
+    passed++;
   } catch (err: any) {
     console.error('Scopes test failed:', err);
     failed++;

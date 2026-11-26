@@ -334,7 +334,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       const { deviceId, token: deviceToken } = server.authManager.registerDevice(
         'Multi-Project Worker',
         'windows',
-        ['local:list_projects', 'local:project_status', 'local:read', 'local:write', 'local:git_status', 'local:run_tests']
+        ['local:list_projects', 'local:project_status', 'local:read', 'local:write', 'local:git_status', 'local:execute:test']
       );
 
       agent = new LocalAgentClient({
@@ -367,7 +367,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       await test('MCP Handlers: local_run_tests requires local:exec scope (rejected without local:exec)', async () => {
         await assert.rejects(
           async () => mcpHandlers.handleLocalRunTests({ projectId: 'project-a' }, callerWithoutExec),
-          /AUTH_FORBIDDEN: Required one of scopes: local:exec/
+          /AUTH_FORBIDDEN: Required one of scopes: local:execute:test/
         );
       });
 
@@ -425,7 +425,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
             capability: 'local:run_tests',
             payload: { projectId: 'project-a' }
           }, callerTestNoExec),
-          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:exec'/
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:execute:test'/
         );
       });
 
@@ -449,7 +449,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
             capability: 'local:run_tests',
             payload: { projectId: 'project-a' }
           }, callerExecOnly),
-          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:exec'/
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:execute:test'/
         );
       });
 

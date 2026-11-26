@@ -2322,8 +2322,8 @@ class McpHandlers {
     }
     async handleLocalRunTests(args, caller) {
         const auth = this.requireCaller(caller);
-        this.requireScope(auth, 'local:exec');
-        this.requireScope(auth, 'local:test', 'tasks:submit');
+        this.requireScope(auth, 'local:execute:test');
+        this.requireScope(auth, 'tasks:submit');
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_run_tests');
         }
@@ -2341,8 +2341,8 @@ class McpHandlers {
     }
     async handleLocalBuildProject(args, caller) {
         const auth = this.requireCaller(caller);
-        this.requireScope(auth, 'local:exec');
-        this.requireScope(auth, 'local:test', 'tasks:submit');
+        this.requireScope(auth, 'local:execute:build');
+        this.requireScope(auth, 'tasks:submit');
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_build_project');
         }

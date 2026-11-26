@@ -38,7 +38,10 @@ dsu_<type>_<base64url_payload>.<signature>
 | `kaggle:read` | `kaggle:status`, `kaggle:logs`, `kaggle:artifacts` |
 | `local:read` | `local:git_status`, `local:read_file`, `remote_task_status`, `remote_task_logs`, `remote_task_artifacts` |
 | `local:write` | `local:write_file`, `local:patch_file`, `local:read_file`, `remote_task_cancel` |
-| `local:test` | `local:run_tests`, `local:build_project` |
+| `local:test` | Legacy non-execution scope; does not grant test/build execution |
+| `local:execute:test` | `local:run_tests` (explicit grant; requires tasks:submit and eligible device/project) |
+| `local:execute:build` | `local:build_project` (explicit grant; requires tasks:submit and eligible device/project) |
+| `local:exec` | Legacy execution grant implies both execution scopes; no additional operations |
 | `swarm:dispatch` | `swarm:dispatch`, `swarm:status` |
 | `raw_shell:run` | `local:raw_shell` *(Strictly disabled by default on Local Agent)* |
 | `admin` | Full access across all backends, devices, audit logs, and kill switch controls |
