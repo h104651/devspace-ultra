@@ -2298,10 +2298,10 @@ export class McpHandlers {
           directResult: true
         };
       }
-      if (currentTask.status === 'cancelled') {
+      if (currentTask.status === 'cancelled' || currentTask.status === 'stale') {
         return {
           taskId,
-          status: 'cancelled',
+          status: currentTask.status,
           error: currentTask.error,
           completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
           directResult: true
@@ -2340,10 +2340,10 @@ export class McpHandlers {
           directResult: true
         };
       }
-      if (currentTask.status === 'cancelled') {
+      if (currentTask.status === 'cancelled' || currentTask.status === 'stale') {
         return {
           taskId,
-          status: 'cancelled',
+          status: currentTask.status,
           error: currentTask.error,
           completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
           directResult: true

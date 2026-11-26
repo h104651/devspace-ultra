@@ -344,6 +344,33 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     assert.strictEqual(projectListRes.directResult, true);
     passed++;
 
+    // A superseded mutation is terminal stale, not pending or safely retryable.
+    const staleRequestId = 'req-stale-mutation';
+    const staleArgs = {
+      projectId: 'astor-tuneup', relativePath: 'fixture.txt', content: 'fixture',
+      targetDeviceId: deviceId, clientRequestId: staleRequestId, waitMs: 1000
+    };
+    const stalePending = handlers.handleLocalWriteFile(staleArgs, callerAdmin);
+    await new Promise(r => setTimeout(r, 50));
+    const staleClaim = taskStore.claimTask(deviceId, ['local:write_file'], undefined, 'old-session');
+    assert.ok(staleClaim, 'Mutation must be claimed before session supersession');
+    assert.strictEqual(taskStore.failTasksForSupersededSession(deviceId, 'old-session'), 1);
+    const staleResult = await stalePending;
+    assert.strictEqual(staleResult.taskId, staleClaim!.taskId);
+    assert.strictEqual(staleResult.status, 'stale');
+    assert.strictEqual(staleResult.directResult, true);
+    assert.notStrictEqual(staleResult.pending, true);
+    assert.strictEqual(staleResult.error.code, 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN');
+    assert.ok(staleResult.completedAt);
+    passed++;
+
+    const staleReplay = await handlers.handleLocalWriteFile(staleArgs, callerAdmin);
+    assert.strictEqual(staleReplay.taskId, staleResult.taskId);
+    assert.strictEqual(staleReplay.status, 'stale');
+    assert.strictEqual(staleReplay.directResult, true);
+    assert.notStrictEqual(staleReplay.pending, true);
+    passed++;
+
     // 8. Async tools remain asynchronous without bounded wait:
     // a. local_run_tests
     const runTestsRes = await handlers.handleLocalRunTests({ projectId: 'astor-tuneup' }, callerAdmin);
