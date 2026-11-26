@@ -649,15 +649,11 @@ export class TaskExecutor {
           throw err;
         }
 
-        const workingRel = task.payload.workingRelativePath;
-        const targetCwd = (workingRel && workingRel !== '.')
-          ? ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, workingRel)
-          : project.canonicalRoot;
-
         const runnerId = task.payload.runnerId || task.payload.runner || 'npm';
         const cmdConfig = this.resolveTestCommand(project, runnerId);
+        const targetCwd = this.resolveRunnerCwd(project, task.payload.workingRelativePath, cmdConfig);
 
-        onLog(`[EXECUTOR] Running tests in project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via runner '${runnerId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
+        onLog(`[EXECUTOR] Running tests in project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via runner '${runnerId}': [locally configured command]`);
         return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog);
       }
 
@@ -676,15 +672,11 @@ export class TaskExecutor {
           throw err;
         }
 
-        const workingRel = task.payload.workingRelativePath;
-        const targetCwd = (workingRel && workingRel !== '.')
-          ? ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, workingRel)
-          : project.canonicalRoot;
-
         const commandId = task.payload.commandId || 'npm';
         const cmdConfig = this.resolveBuildCommand(project, commandId);
+        const targetCwd = this.resolveRunnerCwd(project, task.payload.workingRelativePath, cmdConfig);
 
-        onLog(`[EXECUTOR] Building project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via command '${commandId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
+        onLog(`[EXECUTOR] Building project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via command '${commandId}': [locally configured command]`);
         return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog);
       }
 
@@ -710,67 +702,36 @@ export class TaskExecutor {
     }
   }
 
-  private resolveTestCommand(project: any, runnerId: string): ConfiguredCommand {
-    // 1. Check custom configured project commands
-    if (project.commands?.test && Object.prototype.hasOwnProperty.call(project.commands.test, runnerId)) {
-      return project.commands.test[runnerId];
+  private resolveConfiguredCommand(project: any, kind: 'test' | 'build', id: string): ConfiguredCommand {
+    // Existing broad hostExecution permissions alone do not authorize a runner.
+    const group = project.commands?.[kind];
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(id) ||
+        !group || !Object.prototype.hasOwnProperty.call(group, id)) {
+      throw new Error('LOCAL_RUNNER_NOT_ALLOWED: Explicit local project runner configuration required.');
     }
+    const config = group[id];
+    if (!config || typeof config.executable !== 'string' || !path.isAbsolute(config.executable)) {
+      throw new Error('LOCAL_RUNNER_INVALID: Configure an absolute executable path.');
+    }
+    return config;
+  }
 
-    // 2. Standard built-in runners
-    const isWindows = process.platform === 'win32';
-    switch (runnerId.toLowerCase()) {
-      case 'npm':
-      case 'npm_test':
-        return {
-          executable: isWindows ? 'npm.cmd' : 'npm',
-          args: ['test']
-        };
-      case 'pytest':
-        return {
-          executable: isWindows ? 'pytest.exe' : 'pytest',
-          args: []
-        };
-      case 'flutter':
-      case 'flutter_test':
-        return {
-          executable: isWindows ? 'flutter.bat' : 'flutter',
-          args: ['test']
-        };
-      default: {
-        const err: any = new Error(`LOCAL_RUNNER_NOT_FOUND: Unknown test runnerId '${runnerId}' for project '${project.projectId}'. Configure it in project.commands.test or use standard runners (npm, pytest, flutter).`);
-        err.code = 'LOCAL_RUNNER_NOT_FOUND';
-        throw err;
-      }
-    }
+  private resolveTestCommand(project: any, runnerId: string): ConfiguredCommand {
+    return this.resolveConfiguredCommand(project, 'test', runnerId);
   }
 
   private resolveBuildCommand(project: any, commandId: string): ConfiguredCommand {
-    // 1. Check custom configured project commands
-    if (project.commands?.build && Object.prototype.hasOwnProperty.call(project.commands.build, commandId)) {
-      return project.commands.build[commandId];
-    }
+    return this.resolveConfiguredCommand(project, 'build', commandId);
+  }
 
-    // 2. Standard built-in build commands
-    const isWindows = process.platform === 'win32';
-    switch (commandId.toLowerCase()) {
-      case 'npm':
-      case 'npm_build':
-        return {
-          executable: isWindows ? 'npm.cmd' : 'npm',
-          args: ['run', 'build']
-        };
-      case 'flutter':
-      case 'flutter_apk':
-        return {
-          executable: isWindows ? 'flutter.bat' : 'flutter',
-          args: ['build', 'apk']
-        };
-      default: {
-        const err: any = new Error(`LOCAL_COMMAND_NOT_FOUND: Unknown build commandId '${commandId}' for project '${project.projectId}'. Configure it in project.commands.build or use standard commands (npm, flutter).`);
-        err.code = 'LOCAL_COMMAND_NOT_FOUND';
-        throw err;
-      }
+  private resolveRunnerCwd(project: any, requested: string | undefined, config: ConfiguredCommand): string {
+    const configured = config.workingRelativePath ?? '.';
+    const cwd = configured === '.' ? project.canonicalRoot : ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, configured);
+    const requestedPath = !requested || requested === '.' ? project.canonicalRoot : ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requested);
+    if (cwd !== requestedPath) {
+      throw new Error('LOCAL_RUNNER_WORKDIR_DENIED: Requested directory differs from the locally configured runner directory.');
     }
+    return cwd;
   }
 
   private executeProcessWithoutShell(

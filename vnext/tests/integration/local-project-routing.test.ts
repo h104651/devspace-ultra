@@ -335,6 +335,40 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       }
     });
 
+    await test('TaskExecutor: legacy hostExecution does not authorize implicit runner', async () => {
+      await assert.rejects(
+        () => executor.executeTask(makeTask('local:run_tests', { projectId: 'project-a', runnerId: 'npm' }), () => {}),
+        /LOCAL_RUNNER_NOT_ALLOWED/
+      );
+      await assert.rejects(
+        () => executor.executeTask(makeTask('local:build_project', { projectId: 'project-a', commandId: 'flutter' }), () => {}),
+        /LOCAL_RUNNER_NOT_ALLOWED/
+      );
+    });
+
+    await test('TaskExecutor: explicit runner and pinned working directory required', async () => {
+      fs.mkdirSync(path.join(rootA, 'nested'), { recursive: true });
+      registry.registerProject({
+        projectId: 'project-a', root: rootA,
+        permissions: { read: true, test: true, hostExecution: true },
+        commands: { test: {
+          fixture: { executable: process.execPath, args: ['-e', 'console.log("fixture-ok")'], workingRelativePath: 'nested' },
+          relative: { executable: 'node', args: ['--version'] }
+        } }
+      });
+      await assert.rejects(() => executor.executeTask(makeTask('local:run_tests', {
+        projectId: 'project-a', runnerId: 'fixture'
+      }), () => {}), /LOCAL_RUNNER_WORKDIR_DENIED/);
+      await assert.rejects(() => executor.executeTask(makeTask('local:run_tests', {
+        projectId: 'project-a', runnerId: 'relative'
+      }), () => {}), /LOCAL_RUNNER_INVALID/);
+      const result = await executor.executeTask(makeTask('local:run_tests', {
+        projectId: 'project-a', runnerId: 'fixture', workingRelativePath: 'nested'
+      }), () => {});
+      assert.strictEqual(result.exitCode, 0);
+      assert.ok(result.stdout.includes('fixture-ok'));
+    });
+
     // PART 2: Full Gateway + LocalAgent Client E2E Flow & execution scope check
     // ----------------------------------------------------
     const testStorageDir = path.join(tmpBase, '.devspace-storage-gateway');
