@@ -18,6 +18,8 @@ $active = [Collections.Generic.List[Diagnostics.Process]]::new()
 $secrets = [Collections.Generic.List[Security.SecureString]]::new()
 $cleanupFailed = $false
 $rootCreated = $false
+$pipe = $null
+$pipeName = 'dsu-ci-' + [Guid]::NewGuid().ToString('N')
 
 function New-FixtureAccount([string]$Name) {
     # Random disposable password: never written to disk or a command line/log.
@@ -69,7 +71,8 @@ function Invoke-FixtureProbe($Account, [string]$Role, [string]$Work) {
     # Locally generated paths only; no credential or password on argv.
     $argv = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',
         ('"' + $probe + '"'), '-Root', ('"' + $root + '"'), '-Role', $Role,
-        '-ExpectedSid', $Account.Sid.Value, '-Report', ('"' + $report + '"'))
+        '-ExpectedSid', $Account.Sid.Value, '-Report', ('"' + $report + '"'),
+        '-PipeName', $pipeName, '-SupervisorSid', $identity.User.Value, '-SupervisorPid', [string]$PID)
     $startArgs = @{
         FilePath = $exe
         Credential = $Account.Credential
@@ -99,10 +102,10 @@ function Invoke-FixtureProbe($Account, [string]$Role, [string]$Work) {
     $expected = if ($Role -eq 'execution') {
         @('own-write','own-read','agent-read','agent-write','agent-delete','agent-move',
           'agent-create','agent-acl','broker-read','broker-write','broker-delete','broker-move',
-          'broker-create','broker-acl','sibling-read','sibling-write','code-write','root-create')
+          'broker-create','broker-acl','sibling-read','sibling-write','code-write','root-create','pipe-open-denied','pipe-instance-denied')
     } else {
         @('own-write','own-read','broker-read','broker-write','broker-delete','broker-move',
-          'broker-create','broker-acl','execution-read','execution-write','code-write','root-create')
+          'broker-create','broker-acl','execution-read','execution-write','code-write','root-create','pipe-instance-denied','pipe-peer-roundtrip')
     }
     if (Compare-Object -ReferenceObject @($expected | Sort-Object) -DifferenceObject @($result.checks | Sort-Object)) {
         throw "Missing or extra fixture checks for $Role."
@@ -134,6 +137,9 @@ try {
     Set-FixtureDirectoryAcl $workspace @($modE) $true
     Set-FixtureDirectoryAcl $sibling @() $false
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Probe-Identity.ps1') -Destination (Join-Path $code 'Probe-Identity.ps1')
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'PipeBoundaryFixture.cs') -Destination (Join-Path $code 'PipeBoundaryFixture.cs')
+    Add-Type -Path (Join-Path $code 'PipeBoundaryFixture.cs')
+    $pipe = [PipeBoundaryFixture]::CreateServer($pipeName, $identity.User.Value, $agent.Sid.Value)
     foreach ($dir in @($agentPrivate, $brokerPrivate, $workspace, $sibling, $code)) {
         [IO.File]::WriteAllText((Join-Path $dir 'sentinel.txt'), 'synthetic-only')
     }
@@ -141,7 +147,10 @@ try {
     foreach ($name in @('agent-stolen.txt','broker-stolen.txt')) {
         if ([IO.File]::Exists((Join-Path $workspace $name))) { throw 'Protected move unexpectedly created a destination.' }
     }
+    $accept = [PipeBoundaryFixture]::AcceptAsync($pipe, $agent.Sid.Value)
     Invoke-FixtureProbe $agent 'agent' $agentPrivate
+    if (-not $accept.Wait(10000) -or $accept.Result -ne $agent.Sid.Value) { throw 'Supervisor did not authenticate the Agent peer.' }
+    Write-Host 'PIPE_PEER_AUTH_FIXTURE PASS'
     if ([IO.File]::Exists((Join-Path $agentPrivate 'broker-stolen.txt'))) { throw 'Protected move unexpectedly created a destination.' }
     foreach ($dir in @($agentPrivate, $brokerPrivate, $workspace, $sibling, $code)) {
         if ([IO.File]::ReadAllText((Join-Path $dir 'sentinel.txt')) -ne 'synthetic-only') {
@@ -150,6 +159,7 @@ try {
     }
     Write-Host 'CROSS_IDENTITY_ACL_FIXTURE PASS'
 } finally {
+    if ($null -ne $pipe) { $pipe.Dispose() }
     foreach ($proc in $active) {
         try {
             if (-not $proc.HasExited) { $proc.Kill(); if (-not $proc.WaitForExit(5000)) { throw 'unverified process exit' } }

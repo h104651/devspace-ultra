@@ -2,7 +2,10 @@ param(
     [Parameter(Mandatory=$true)][string]$Root,
     [Parameter(Mandatory=$true)][ValidateSet('agent','execution')][string]$Role,
     [Parameter(Mandatory=$true)][string]$ExpectedSid,
-    [Parameter(Mandatory=$true)][string]$Report
+    [Parameter(Mandatory=$true)][string]$Report,
+    [Parameter(Mandatory=$true)][string]$PipeName,
+    [Parameter(Mandatory=$true)][string]$SupervisorSid,
+    [Parameter(Mandatory=$true)][uint32]$SupervisorPid
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -70,4 +73,18 @@ if ($Role -eq 'execution') {
 }
 Expect-Denied 'code-write' { [IO.File]::WriteAllText((Join-Path $Root 'code\sentinel.txt'), 'bad') }
 Expect-Denied 'root-create' { [IO.File]::WriteAllText((Join-Path $Root 'bad-new.txt'), 'bad') }
+# Compile only the supervisor-owned fixed fixture source. Temp is writable
+# by this test identity, not shared with the supervisor or other identity.
+$env:TEMP = $own
+$env:TMP = $own
+Add-Type -Path (Join-Path $Root 'code\PipeBoundaryFixture.cs')
+[PipeBoundaryFixture]::RequireCreateInstanceDenied($PipeName)
+$checks.Add('pipe-instance-denied')
+if ($Role -eq 'execution') {
+    [PipeBoundaryFixture]::RequireOpenDenied($PipeName)
+    $checks.Add('pipe-open-denied')
+} else {
+    [PipeBoundaryFixture]::RoundTrip($PipeName, $SupervisorSid, $SupervisorPid)
+    $checks.Add('pipe-peer-roundtrip')
+}
 [IO.File]::WriteAllText($Report, (@{sid=$identity.User.Value;admin=$isAdmin;role=$Role;checks=@($checks)} | ConvertTo-Json -Compress))
