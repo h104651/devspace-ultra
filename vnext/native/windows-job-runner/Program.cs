@@ -84,7 +84,7 @@ internal static class Program
     }
     static int Run(Plan plan, Task<int> cancel) {
         IntPtr job = IntPtr.Zero, input = IntPtr.Zero, output = IntPtr.Zero, error = IntPtr.Zero;
-        IntPtr attrs = IntPtr.Zero, handles = IntPtr.Zero;
+        IntPtr attrs = IntPtr.Zero, handles = IntPtr.Zero, jobHandles = IntPtr.Zero;
         bool attrsInitialized = false, assigned = false, resumed = false;
         ProcessInfo pi = default;
         try {
@@ -101,10 +101,10 @@ internal static class Program
             output = InheritOutput(-11);
             error = InheritOutput(-12);
             UIntPtr size = UIntPtr.Zero;
-            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+            InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref size);
             Win(size != UIntPtr.Zero, "Attribute list size");
             attrs = Marshal.AllocHGlobal(checked((int)size.ToUInt64()));
-            Win(InitializeProcThreadAttributeList(attrs, 1, 0, ref size), "Initialize attribute list");
+            Win(InitializeProcThreadAttributeList(attrs, 2, 0, ref size), "Initialize attribute list");
             attrsInitialized = true;
             handles = Marshal.AllocHGlobal(IntPtr.Size * 3);
             Marshal.WriteIntPtr(handles, 0, input);
@@ -112,6 +112,13 @@ internal static class Program
             Marshal.WriteIntPtr(handles, IntPtr.Size * 2, error);
             Win(UpdateProcThreadAttribute(attrs, 0, HANDLE_LIST, handles, (UIntPtr)(IntPtr.Size * 3),
                 IntPtr.Zero, IntPtr.Zero), "Set inherited handle allowlist");
+            // Windows 10+ supports creation-time job assignment. Keep the
+            // attribute backing memory alive until deleting the attribute list.
+            // No separate uncontained launch/assign sequence and no fallback.
+            jobHandles = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(jobHandles, job);
+            Win(UpdateProcThreadAttribute(attrs, 0, JOB_LIST, jobHandles, (UIntPtr)IntPtr.Size,
+                IntPtr.Zero, IntPtr.Zero), "Set creation-time job list");
             var startup = new StartupInfoEx {
                 StartupInfo = new StartupInfo {
                     cb = (uint)Marshal.SizeOf<StartupInfoEx>(), dwFlags = STARTF_USESTDHANDLES,
@@ -125,7 +132,10 @@ internal static class Program
             Win(CreateProcessWithHandles(plan.Executable, command, IntPtr.Zero, IntPtr.Zero, true,
                 CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
                 IntPtr.Zero, plan.Cwd, ref startup, out pi), "Create suspended runner");
-            Win(AssignProcessToJobObject(job, pi.hProcess), "Assign runner to job");
+            // The process was created with JOB_LIST and is still suspended.
+            // Verify membership before any runner instruction is allowed.
+            Win(IsProcessInJob(pi.hProcess, job, out var inJob), "Verify created process job membership");
+            if (!inJob) throw new InvalidOperationException("Created runner is outside its job");
             assigned = true;
             if (cancel.IsCompleted) {
                 Win(TerminateJobObject(job, Cancelled), "Cancel before resume");
@@ -165,6 +175,7 @@ internal static class Program
             if (attrsInitialized) DeleteProcThreadAttributeList(attrs);
             if (attrs != IntPtr.Zero) Marshal.FreeHGlobal(attrs);
             if (handles != IntPtr.Zero) Marshal.FreeHGlobal(handles);
+            if (jobHandles != IntPtr.Zero) Marshal.FreeHGlobal(jobHandles);
             foreach (var h in new[] { input, output, error, pi.hProcess, pi.hThread })
                 if (ValidHandle(h)) CloseHandle(h);
         }

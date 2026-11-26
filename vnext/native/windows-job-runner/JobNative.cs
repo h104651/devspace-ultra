@@ -89,6 +89,7 @@ internal static class JobNative
     internal const uint OPEN_EXISTING = 3;
     internal const uint FILE_ATTRIBUTE_NORMAL = 0x80;
     internal static readonly IntPtr HANDLE_LIST = new(0x00020002);
+    internal static readonly IntPtr JOB_LIST = new(0x0002000D);
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct StartupInfoEx {
@@ -129,4 +130,7 @@ internal static class JobNative
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsProcessInJob(IntPtr process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
 }
