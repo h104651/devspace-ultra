@@ -142,7 +142,7 @@ class ConnectionManager {
                 ? msg.capabilities
                 : [...capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES];
             const executionPolicyRevision = typeof msg.executionPolicyRevision === 'string' && /^[a-f0-9]{32}$/.test(msg.executionPolicyRevision)
-                    ? msg.executionPolicyRevision : undefined;
+                ? msg.executionPolicyRevision : undefined;
             const authorizedCaps = requestedCaps.filter(cap => {
                 if (!(0, capabilities_1.isLocalExecutableCapability)(cap))
                     return false;

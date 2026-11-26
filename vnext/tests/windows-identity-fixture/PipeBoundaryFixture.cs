@@ -13,7 +13,9 @@ using Microsoft.Win32.SafeHandles;
 public static class PipeBoundaryFixture {
     const uint Duplex = 3, FirstInstance = 0x00080000, Overlapped = 0x40000000;
     const uint RejectRemote = 8, OpenExisting = 3;
-    const uint ClientAccess = 0x00120003; // SYNCHRONIZE | READ_CONTROL | READ_DATA | WRITE_DATA
+    // Explicit per-rights pipe mask; do not grant generic write.
+    // Includes data, EA, attributes, READ_CONTROL and SYNCHRONIZE; excludes create-instance.
+    const uint ClientAccess = 0x0012019b;
     const uint Identification = 0x00110000; // SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION
     const int AccessDenied = 5;
     [StructLayout(LayoutKind.Sequential)]
@@ -50,7 +52,10 @@ public static class PipeBoundaryFixture {
         if (!condition) throw new InvalidOperationException(message);
     }
     static void Win(bool condition, string operation) {
-        if (!condition) throw new Win32Exception(Marshal.GetLastWin32Error(), operation);
+        if (!condition) {
+            int code = Marshal.GetLastWin32Error();
+            throw new Win32Exception(code, operation + " (Win32=" + code + ")");
+        }
     }
     static SafePipeHandle Open(string name) {
         return CreateFileW(PathFor(name), ClientAccess, 0, IntPtr.Zero, OpenExisting, Identification, IntPtr.Zero);
@@ -68,7 +73,7 @@ public static class PipeBoundaryFixture {
         string owner = new SecurityIdentifier(supervisorSid).Value;
         string agent = new SecurityIdentifier(agentSid).Value;
         Require(owner != agent, "Supervisor and Agent must differ.");
-        string sddl = "O:" + owner + "D:P(A;;FA;;;SY)(A;;FA;;;" + owner + ")(A;;0x00120003;;;" + agent + ")";
+        string sddl = "O:" + owner + "D:P(A;;FA;;;SY)(A;;FA;;;" + owner + ")(A;;0x0012019b;;;" + agent + ")";
         IntPtr sd;
         uint size;
         Win(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, out size), "Convert SDDL");
