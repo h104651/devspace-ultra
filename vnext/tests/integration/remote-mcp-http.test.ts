@@ -89,6 +89,17 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     assert.ok(toolNames.includes('kaggle_workspace_continue'));
     passed++;
 
+    const inventoryRead = await makeMcpRequest('/mcp', { method: 'tools/call', params: { name: 'task_inventory', arguments: {} } }, clientToken);
+    assert.strictEqual(inventoryRead.statusCode, 200);
+    const inventory = JSON.parse(inventoryRead.body.result.content[0].text);
+    assert.strictEqual(inventory.snapshotComplete, true);
+    assert.strictEqual(inventory.maintenanceAuthorized, false);
+    const { token: limitedToken } = server.authManager.registerClient('Inventory denied fixture', ['mcp:access', 'tasks:read']);
+    const deniedInventory = await makeMcpRequest('/mcp', { method: 'tools/call', params: { name: 'task_inventory', arguments: {} } }, limitedToken);
+    assert.ok(deniedInventory.statusCode === 403 || deniedInventory.body.result?.isError === true);
+    assert.ok(JSON.stringify(deniedInventory.body).includes('tasks:inventory'));
+    passed++;
+
     // Test 3: Authenticated tools/call for remote_task_submit
     const callRes = await makeMcpRequest(
       '/mcp',

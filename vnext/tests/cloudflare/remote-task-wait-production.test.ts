@@ -50,6 +50,26 @@ export async function runRemoteTaskWaitProductionTests(): Promise<{ passed: numb
     assert.ok(toolNames.includes('remote_task_wait'), 'Production Cloudflare MCP tools/list must expose remote_task_wait');
     passed++;
 
+    assert.ok(toolNames.includes('task_inventory'));
+    const inventoryRequest = (bearer: string) => durableObject.fetch(new Request('https://gateway.workers.dev/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${bearer}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'task_inventory', arguments: {} } })
+    }));
+    const deniedInventory = await inventoryRequest(token);
+    const deniedBody = await deniedInventory.json() as any;
+    assert.ok(deniedInventory.status === 403 || deniedBody.result?.isError === true);
+    assert.ok(JSON.stringify(deniedBody).includes('tasks:inventory'));
+    const { token: inventoryToken } = auth.generateToken('inventory-client', 'client', ['mcp:access', 'tasks:read', 'tasks:inventory']);
+    const inventoryResponse = await inventoryRequest(inventoryToken);
+    assert.strictEqual(inventoryResponse.status, 200);
+    const inventoryBody = await inventoryResponse.json() as any;
+    const inventory = JSON.parse(inventoryBody.result.content[0].text);
+    assert.strictEqual(inventory.snapshotComplete, true);
+    assert.strictEqual(inventory.observedEmpty, true);
+    assert.strictEqual(inventory.maintenanceAuthorized, false);
+    passed++;
+
     const callResponse = await durableObject.fetch(new Request('https://gateway.workers.dev/mcp', {
       method: 'POST',
       headers: {
