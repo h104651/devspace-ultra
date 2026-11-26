@@ -99,9 +99,23 @@ jobs:
         timeout-minutes: 3
         run: node tests/windows-job-runner-smoke.cjs native/windows-job-runner/bin/Release/net8.0/WindowsJobRunner.exe
 
+  verify-windows-identity:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: vnext
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Cross-identity ACL fixture (disposable hosted runner only)
+        shell: powershell
+        run: .\tests\windows-identity-fixture\Invoke-IdentityFixture.ps1
+
   deploy-production:
     name: Deploy Cloudflare production
-    needs: [verify-vnext, verify-windows-runner]
+    needs: [verify-vnext, verify-windows-runner, verify-windows-identity]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.deploy_production == true && inputs.preflight_inventory_confirmed == true
     runs-on: ubuntu-latest
     concurrency:

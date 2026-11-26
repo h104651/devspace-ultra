@@ -89,3 +89,6 @@ Run 45871952736 passed native Windows integration but failed the legacy daemon i
 
 ### Release artifact consistency gate
 The Linux vNext CI now rejects any tracked dist difference after compilation and any untracked compiled runtime files. Manual dist synchronization is a candidate until this gate passes. This gate precedes dry-run/deploy eligibility. See `WINDOWS_EXECUTION_IDENTITY_CONTRACT.md` for the remaining three-identity boundary and explicit activation requirements; the same-user native runner is not a production permission grant.
+
+### Cross-identity ACL fixture
+Added a dedicated GitHub-hosted Windows verification job with ephemeral standard accounts and synthetic protected/approved paths. It tests actual distinct SID access rather than administrator simulation. Production deployment depends on this job passing; the CLI execution hold remains unchanged. See identity contract for scope and remaining evidence.
