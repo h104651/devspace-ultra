@@ -22,6 +22,15 @@ export async function runWorkflowDeploymentGateTests(): Promise<{ passed: number
 
   const content = fs.readFileSync(workflowPath, 'utf8');
 
+  // A malformed or accidentally duplicated workflow can prevent Actions from
+  // registering at all. Keep exactly one definition of each critical job.
+  for (const job of ['verify-vnext', 'verify-windows-runner', 'verify-windows-identity', 'deploy-production']) {
+    ok(content.split('\n').filter(line => line === '  ' + job + ':').length === 1, 'Exactly one job: ' + job);
+  }
+  ok(content.includes('os: windows-11-arm') && content.includes('arch: arm64'), 'Native ARM64 matrix retained');
+  ok(content.includes('Native Windows Job Object process-tree fixture'), 'Native tree fixture retained');
+  ok(content.includes('Verify native .NET architecture'), 'Native .NET architecture gate retained');
+
   // Test 1: workflow_dispatch inputs definition
   ok(content.includes('workflow_dispatch:'), 'Workflow declares workflow_dispatch trigger');
   ok(content.includes('deploy_production:'), 'workflow_dispatch defines deploy_production input');

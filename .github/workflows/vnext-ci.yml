@@ -86,17 +86,21 @@ jobs:
         working-directory: vnext
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
+          architecture: ${{ matrix.arch }}
       - name: Install
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: TypeScript build
         run: npm run build
       - name: Verify native Node architecture (no emulation)
         shell: pwsh
-        run: |
-          node -e "if(process.arch!=='${{ matrix.arch }}') throw new Error('Expected native Node architecture'); console.log(process.arch)"
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: node -e "if(process.arch!==process.env.EXPECTED_ARCH) throw new Error('Expected native Node architecture'); console.log(process.arch)"
       - name: Compiled Windows runner smoke
         run: node tests/windows-runner-smoke.cjs
       - uses: actions/setup-dotnet@v4
@@ -104,281 +108,23 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Verify native .NET architecture
         shell: pwsh
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
           $info = dotnet --info | Out-String
           Write-Host $info
-          if ($info -notmatch '(?im)^\s*Architecture:\s*${{ matrix.arch }}\s*      - name: Build native Windows runner candidate
-        timeout-minutes: 3
-        run: dotnet build native/windows-job-runner/WindowsJobRunner.csproj --configuration Release
-      - name: Native runner integration (deadline, cancel, descendant drain)
-        timeout-minutes: 3
-        run: node tests/windows-job-runner-smoke.cjs native/windows-job-runner/bin/Release/net8.0/WindowsJobRunner.exe
-
-  verify-windows-identity:
-    runs-on: windows-latest
-    timeout-minutes: 8
-    defaults:
-      run:
-        working-directory: vnext
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Cross-identity ACL fixture (disposable hosted runner only)
-        shell: powershell
-        run: .\tests\windows-identity-fixture\Invoke-IdentityFixture.ps1
-
-  deploy-production:
-    name: Deploy Cloudflare production
-    needs: [verify-vnext, verify-windows-runner, verify-windows-identity]
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.deploy_production == true && inputs.preflight_inventory_confirmed == true
-    runs-on: ubuntu-latest
-    concurrency:
-      group: devspace-ultra-vnext-production
-      cancel-in-progress: false
-    defaults:
-      run:
-        working-directory: vnext
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate Deployment Authorization & Target SHA
-        shell: bash
-        env:
-          INPUT_TARGET_SHA: ${{ inputs.target_commit_sha }}
-          INPUT_OPERATOR: ${{ inputs.operator_name }}
-          ACTOR_NAME: ${{ github.actor }}
-        run: |
-          set -euo pipefail
-          echo "=== Production Deployment Authorization Gate ==="
-
-          # 1. Reject empty SHA
-          if [ -z "$INPUT_TARGET_SHA" ]; then
-            echo "::error::Target commit SHA is required and cannot be empty. Aborting deployment."
-            exit 1
-          fi
-
-          # 2. Enforce exact 40-character hexadecimal format
-          if ! [[ "$INPUT_TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::Target commit SHA must be a 40-character hexadecimal Git commit SHA (got: '$INPUT_TARGET_SHA'). Aborting deployment."
-            exit 1
-          fi
-
-          # 3. Enforce exact match with checked out GITHUB_SHA
-          if [ "$INPUT_TARGET_SHA" != "$GITHUB_SHA" ]; then
-            echo "::error::Target commit SHA '$INPUT_TARGET_SHA' does not match checked out GITHUB_SHA '$GITHUB_SHA'. Aborting deployment."
-            exit 1
-          fi
-
-          OPERATOR="${INPUT_OPERATOR:-$ACTOR_NAME}"
-          echo "Deployment authorized by: $OPERATOR"
-          echo "Preflight inventory confirmed: true"
-          echo "Target SHA verified: $GITHUB_SHA"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.x'
-      - name: Install
-        run: npm install --ignore-scripts --no-audit --no-fund
-      - name: Prepare Cloudflare CI credentials
-        env:
-          RAW_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          RAW_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          missing=0
-          if [ -z "$RAW_CLOUDFLARE_API_TOKEN" ]; then
-            echo '::error::CLOUDFLARE_API_TOKEN is not configured in GitHub Actions.'
-            missing=1
-          fi
-          if [ -z "$RAW_CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo '::error::CLOUDFLARE_ACCOUNT_ID is not configured in GitHub Actions.'
-            missing=1
-          fi
-          if [ "$missing" -ne 0 ]; then
-            exit 1
-          fi
-
-          if [[ "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\r'* || "$RAW_CLOUDFLARE_ACCOUNT_ID" == *$'\n'* ]]; then
-            echo '::error::CLOUDFLARE_ACCOUNT_ID must be a single line.'
-            exit 1
-          fi
-          if ! [[ "$RAW_CLOUDFLARE_ACCOUNT_ID" =~ ^[A-Fa-f0-9]{32}$ ]]; then
-            echo '::error::CLOUDFLARE_ACCOUNT_ID must be a 32-character hexadecimal account identifier.'
-            exit 1
-          fi
-
-          token_file="$(mktemp)"
-          TOKEN_FILE="$token_file" node <<'NODE'
-          const fs = require('node:fs');
-          const raw = process.env.RAW_CLOUDFLARE_API_TOKEN ?? '';
-          const matches = raw.match(/cfat_[A-Za-z0-9]{40}[A-Fa-f0-9]{8}/g) || [];
-          if (matches.length !== 1) {
-            console.error(`Expected exactly one canonical cfat_ account token in CLOUDFLARE_API_TOKEN; found ${matches.length}.`);
-            process.exit(1);
-          }
-          fs.writeFileSync(process.env.TOKEN_FILE, matches[0], { encoding: 'utf8', mode: 0o600 });
-          NODE
-
-          clean_token="$(cat "$token_file")"
-          rm -f "$token_file"
-          if [ "${#clean_token}" -ne 53 ]; then
-            echo '::error::Extracted Cloudflare account token has an unexpected length.'
-            exit 1
-          fi
-
-          echo "::add-mask::$clean_token"
-          echo 'Cloudflare account token extracted in canonical cfat_ format (53 characters).'
-          echo 'Cloudflare account ID has valid 32-character hexadecimal shape.'
-          printf 'CLOUDFLARE_API_TOKEN=%s\n' "$clean_token" >> "$GITHUB_ENV"
-          printf 'CLOUDFLARE_ACCOUNT_ID=%s\n' "$RAW_CLOUDFLARE_ACCOUNT_ID" >> "$GITHUB_ENV"
-      - name: Diagnose Cloudflare account-token pairing
-        shell: bash
-        run: |
-          set -euo pipefail
-          body="$(mktemp)"
-          status="$(curl --silent --show-error \
-            --output "$body" \
-            --write-out '%{http_code}' \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID")"
-          ACCOUNT_PROBE_BODY="$body" ACCOUNT_PROBE_STATUS="$status" node <<'NODE'
-          const fs = require('node:fs');
-          const status = process.env.ACCOUNT_PROBE_STATUS;
-          let payload = {};
-          try { payload = JSON.parse(fs.readFileSync(process.env.ACCOUNT_PROBE_BODY, 'utf8')); } catch {}
-          const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
-          if (status === '200' && payload.success === true) {
-            console.log('Cloudflare account-details probe: HTTP 200 (token can access configured account).');
-          } else {
-            console.log(`Cloudflare account-details probe: HTTP ${status}; errorCode=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
-          }
-          NODE
-      - name: Verify Cloudflare account API token
-        shell: bash
-        run: |
-          set -euo pipefail
-          body="$(mktemp)"
-          status="$(curl --silent --show-error \
-            --output "$body" \
-            --write-out '%{http_code}' \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify")"
-
-          TOKEN_VERIFY_BODY="$body" TOKEN_VERIFY_STATUS="$status" node <<'NODE'
-          const fs = require('node:fs');
-          const status = process.env.TOKEN_VERIFY_STATUS;
-          let payload = {};
-          try { payload = JSON.parse(fs.readFileSync(process.env.TOKEN_VERIFY_BODY, 'utf8')); } catch {}
-          if (status !== '200') {
-            const first = Array.isArray(payload.errors) ? payload.errors[0] : undefined;
-            console.error(`Cloudflare account token verification failed: HTTP ${status}; code=${first?.code ?? 'none'}; message=${first?.message ?? 'none'}`);
-            process.exit(1);
-          }
-          if (payload.success !== true || payload.result?.status !== 'active') {
-            console.error(`Cloudflare account token is not active (status=${payload.result?.status ?? 'unknown'}).`);
-            process.exit(1);
-          }
-          console.log('Cloudflare account API token verification: active');
-          NODE
-      - name: Deploy existing production Worker
-        run: npx --yes wrangler@4.129.0 deploy
-      - name: Production smoke test
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          health_status='000'
-          health_body=''
-          for attempt in 1 2 3 4 5 6; do
-            body_file="$(mktemp)"
-            health_status="$(curl --silent --show-error \
-              --output "$body_file" \
-              --write-out '%{http_code}' \
-              "$PRODUCTION_ORIGIN/health" || true)"
-            health_body="$(cat "$body_file" || true)"
-            rm -f "$body_file"
-
-            if [ "$health_status" = '200' ] && [ "$health_body" = '{"ok":true}' ]; then
-              echo "Production /health passed on attempt $attempt."
-              break
-            fi
-
-            echo "::warning::Production /health attempt $attempt returned HTTP $health_status body: $health_body"
-            if [ "$attempt" -lt 6 ]; then
-              case "$attempt" in
-                1) sleep 2 ;;
-                2) sleep 4 ;;
-                3) sleep 8 ;;
-                4) sleep 16 ;;
-                5) sleep 30 ;;
-              esac
-            fi
-          done
-
-          if [ "$health_status" != '200' ] || [ "$health_body" != '{"ok":true}' ]; then
-            echo "::error::Production /health remained unhealthy after bounded exponential-backoff retries: HTTP $health_status body: $health_body"
-            exit 1
-          fi
-
-          for path in \
-            '/.well-known/oauth-authorization-server' \
-            '/.well-known/oauth-protected-resource' \
-            '/.well-known/oauth-protected-resource/mcp'
-          do
-            status="$(curl --silent --show-error --output /tmp/discovery.json --write-out '%{http_code}' "$PRODUCTION_ORIGIN$path")"
-            if [ "$status" != '200' ]; then
-              echo "::error::$path returned HTTP $status"
-              cat /tmp/discovery.json || true
-              exit 1
-            fi
-          done
-
-          curl --fail --silent --show-error \
-            "$PRODUCTION_ORIGIN/.well-known/oauth-protected-resource/mcp" \
-            --output /tmp/protected-resource.json
-
-          node <<'NODE'
-          const fs = require('node:fs');
-          const metadata = JSON.parse(fs.readFileSync('/tmp/protected-resource.json', 'utf8'));
-          const scopes = metadata.scopes_supported || [];
-          for (const required of ['local:read', 'local:write']) {
-            if (!scopes.includes(required)) {
-              console.error(`Missing required production OAuth scope: ${required}`);
-              process.exit(1);
-            }
-          }
-          NODE
-
-          headers="$(mktemp)"
-          body="$(mktemp)"
-          status="$(curl --silent --show-error \
-            --output "$body" \
-            --dump-header "$headers" \
-            --write-out '%{http_code}' \
-            --request POST \
-            --header 'Content-Type: application/json' \
-            --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-            "$PRODUCTION_ORIGIN/mcp")"
-
-          if [ "$status" != '401' ]; then
-            echo "::error::Unauthenticated POST /mcp returned HTTP $status instead of 401"
-            cat "$body" || true
-            exit 1
-          fi
-
-          if ! grep -qi '^www-authenticate:.*oauth-protected-resource/mcp' "$headers"; then
-            echo '::error::Unauthenticated POST /mcp is missing the expected WWW-Authenticate resource metadata challenge.'
-            cat "$headers" || true
-            exit 1
-          fi
-) { throw 'Expected native .NET host architecture' }
+          $pattern = '(?im)^\s*Architecture:\s*' + [regex]::Escape($env:EXPECTED_ARCH) + '\s*$'
+          if ($info -notmatch $pattern) { throw 'Expected native .NET host architecture' }
       - name: Native Windows Job Object process-tree fixture
         timeout-minutes: 3
         shell: pwsh
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
           $output = dotnet run --project tests/windows-job-fixture/WindowsJobFixture.csproj --configuration Release
           $code = $LASTEXITCODE
           $output | Write-Host
-          if ($code -ne 0 -or ($output -join "`n") -notmatch 'architecture=${{ matrix.arch }}') { throw 'Native Job Object fixture or architecture failed' }
+          if ($code -ne 0 -or ($output -join "`n") -notmatch ('architecture=' + $env:EXPECTED_ARCH)) { throw 'Native Job Object fixture or architecture failed' }
       - name: Build native Windows runner candidate
         timeout-minutes: 3
         run: dotnet build native/windows-job-runner/WindowsJobRunner.csproj --configuration Release
