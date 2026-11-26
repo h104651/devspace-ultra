@@ -1,5 +1,8 @@
 import * as assert from 'node:assert';
 import { runTaskInventory, InventoryOptions } from '../../scripts/inventory-tasks';
+import { TaskStore } from '../../src/storage/task-store';
+import { McpHandlers } from '../../src/mcp/handlers';
+import { CHATGPT_LEAST_PRIVILEGE_SCOPES } from '../../src/oauth/oauth-manager';
 
 export async function runInventoryTasksUnitTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0;
@@ -1008,6 +1011,55 @@ export async function runInventoryTasksUnitTests(): Promise<{ passed: number; fa
     ok(res.error?.includes('PAGINATION_INCONSISTENCY'), 'Error indicates PAGINATION_INCONSISTENCY');
   } catch (err: any) {
     console.error('Test 18 failed:', err);
+  }
+
+  // MCP inventory requires an explicit grant, covers all active backends plus
+  // local stale, and must detect even a same-count pagination change.
+  try {
+    const store = new TaskStore(':memory:');
+    const handlers = new McpHandlers({ taskStore: store } as any);
+    const caller = { subjectId: 'fixture-inventory', scopes: ['tasks:read', 'tasks:inventory'] };
+    const ordinary = { subjectId: 'fixture-ordinary', scopes: ['tasks:read', 'tasks:submit'] };
+    assert.ok(!CHATGPT_LEAST_PRIVILEGE_SCOPES.includes('tasks:inventory'));
+    await assert.rejects(() => handlers.handleTaskInventory({}, ordinary), /AUTH_FORBIDDEN/);
+    await assert.rejects(() => handlers.handleTaskInventory({}, { subjectId: 'fixture', scopes: ['tasks:inventory'] }), /AUTH_FORBIDDEN/);
+    const empty = await handlers.handleTaskInventory({}, caller);
+    assert.strictEqual(empty.observedEmpty, true);
+    assert.strictEqual(empty.maintenanceAuthorized, false);
+    const stale = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: 'device-a', payload: { content: 'fixture-secret-payload' } });
+    assert.ok(store.claimTaskById(stale.taskId, 'device-a', 60000, 'fixture-session'));
+    assert.strictEqual(store.failTasksForSupersededSession('device-a', 'fixture-session'), 1);
+    store.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'device-a', payload: {} });
+    store.createTask({ backend: 'local', capability: 'local:read_file', payload: {} });
+    const browser = store.createTask({ backend: 'browser', capability: 'browser:run', payload: { secret: 'fixture-secret-payload' } });
+    store.createTask({ backend: 'swarm', capability: 'swarm:dispatch', payload: {} });
+    store.createTask({ backend: 'kaggle', capability: 'kaggle:run', payload: {} });
+    const filtered = await handlers.handleTaskInventory({ backend: 'local', targetDeviceId: 'device-a' }, caller);
+    assert.deepStrictEqual(filtered.summary, { allActiveCount: 5, activeLocalCount: 2, quarantinedLocalCount: 1, staleLocalCount: 1 });
+    assert.strictEqual(filtered.total, 2);
+    assert.strictEqual(filtered.observedEmpty, false);
+    assert.ok(filtered.tasks.some(t => t.taskId === stale.taskId && t.status === 'stale' && t.priorClaimant === 'device-a'));
+    assert.ok(!JSON.stringify(filtered).includes('fixture-secret-payload'));
+    const first = await handlers.handleTaskInventory({ limit: 1 }, caller);
+    assert.strictEqual(first.snapshotComplete, true);
+    assert.strictEqual(first.hasMore, true);
+    assert.strictEqual(first.pageComplete, false);
+    const next = await handlers.handleTaskInventory({ offset: 1, limit: 1, snapshotRevision: first.snapshotRevision }, caller);
+    assert.notStrictEqual(first.tasks[0].taskId, next.tasks[0].taskId);
+    await assert.rejects(() => handlers.handleTaskInventory({ offset: 1 }, caller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleTaskInventory({ limit: 1000 }, caller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleTaskInventory({ status: 'stale', snapshotRevision: first.snapshotRevision }, caller), /INVENTORY_SNAPSHOT_CHANGED/);
+    assert.ok(store.cancelTask(browser.taskId, 'fixture only'));
+    store.createTask({ backend: 'browser', capability: 'browser:run', payload: {} });
+    const changed = await handlers.handleTaskInventory({}, caller);
+    assert.strictEqual(changed.total, first.total);
+    await assert.rejects(() => handlers.handleTaskInventory({ limit: 1, offset: 1, snapshotRevision: first.snapshotRevision }, caller), /INVENTORY_SNAPSHOT_CHANGED/);
+    store.blockLocalDispatch();
+    await assert.rejects(() => handlers.handleTaskInventory({}, caller), /INVENTORY_UNAVAILABLE/);
+    passed += 6;
+  } catch (err: any) {
+    failed++;
+    console.error('MCP inventory fixture failed:', err);
   }
 
   console.log(`Unit: Read-Only Task Inventory: ${passed} passed, ${failed} failed`);

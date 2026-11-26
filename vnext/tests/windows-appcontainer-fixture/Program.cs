@@ -121,7 +121,10 @@ internal static class Program {
                 StartupInfo=new StartupInfo {cb=(uint)Marshal.SizeOf<StartupInfoEx>(),lpDesktop="",dwFlags=STARTF_USESTDHANDLES,hStdInput=nul,hStdOutput=nul,hStdError=diagnostics},
                 lpAttributeList=attrs
             };
-            var command=new StringBuilder(Q(node)+" "+Q(script)+" "+Q(root)+" "+port);
+            // Node's default main-module realpath walks drive-root ancestors.
+            // The fixed staged script is reparse-free and read-only to the package;
+            // avoid that lookup without granting ACL rights to the drive root.
+            var command=new StringBuilder(Q(node)+" --preserve-symlinks-main "+Q(script)+" "+Q(root)+" "+port);
             Win(CreateProcessWithHandles(node,command,IntPtr.Zero,IntPtr.Zero,true,
                 CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT|CreateUnicodeEnvironment|DetachedProcess,env,work,ref startup,out pi),"Create AppContainer fixture");
             created=true; safeToRemove=false;

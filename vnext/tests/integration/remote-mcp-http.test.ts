@@ -82,6 +82,7 @@ export async function runRemoteMcpHttpTests(): Promise<{ passed: number; failed:
     assert.ok(toolNames.includes('kaggle_run'));
     assert.ok(toolNames.includes('remote_task_submit'));
     assert.ok(toolNames.includes('remote_task_status'));
+    assert.ok(toolNames.includes('task_inventory'));
     assert.ok(toolNames.includes('remote_task_wait'), 'Remote MCP must expose event-driven remote_task_wait');
     assert.ok(toolNames.includes('kaggle_workspace_get'));
     assert.ok(toolNames.includes('kaggle_workspace_file'));
