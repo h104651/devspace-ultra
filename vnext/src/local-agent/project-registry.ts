@@ -14,6 +14,7 @@ export interface ConfiguredCommand {
   args: string[];
   env?: Record<string, string>;
   workingRelativePath?: string;
+  timeoutMs?: number;
 }
 
 export interface LocalProjectCommands {

@@ -18,6 +18,8 @@ export interface LocalAgentClientConfig {
   projectRegistry?: ProjectRegistry;
   projectsConfigFile?: string;
   allowRawShell?: boolean;
+  hostExecutionBlocked?: boolean;
+  windowsJobRunnerPath?: string;
   heartbeatIntervalMs?: number;
   pollIntervalMs?: number;
   onPolicyRejected?: (reason: string) => void;
@@ -57,7 +59,9 @@ export class LocalAgentClient {
       projects: config.projects,
       projectRegistry: config.projectRegistry,
       projectsConfigFile: config.projectsConfigFile,
-      allowRawShell: config.allowRawShell
+      allowRawShell: config.allowRawShell,
+      hostExecutionBlocked: config.hostExecutionBlocked,
+      windowsJobRunnerPath: config.windowsJobRunnerPath
     };
     this.executor = new TaskExecutor(this.executorConfig);
     this.executorConfigRevision = this.computeExecutorConfigRevision();
@@ -207,7 +211,7 @@ export class LocalAgentClient {
   private currentExecutionCapabilities(capabilities: string[]): string[] {
     const executionPolicyReadable = !this.executorConfig.projectsConfigFile || !!this.executorConfig.projectRegistry ||
       (!!this.executorConfigRevision && this.computeExecutorConfigRevision() === this.executorConfigRevision);
-    const projects = executionPolicyReadable ? this.executor.getRegistry().listProjects().filter(p => p.enabled) : [];
+    const projects = executionPolicyReadable && !this.executor.isHostExecutionBlocked() ? this.executor.getRegistry().listProjects().filter(p => p.enabled) : [];
     return capabilities.filter(cap => {
       if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
       return projects.some(project => project.availableCapabilities.includes(cap));

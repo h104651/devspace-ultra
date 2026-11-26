@@ -84,6 +84,9 @@ jobs:
       - name: Build native Windows runner candidate
         timeout-minutes: 3
         run: dotnet build native/windows-job-runner/WindowsJobRunner.csproj --configuration Release
+      - name: Native runner integration (deadline, cancel, descendant drain)
+        timeout-minutes: 3
+        run: node tests/windows-job-runner-smoke.cjs native/windows-job-runner/bin/Release/net8.0/WindowsJobRunner.exe
 
   deploy-production:
     name: Deploy Cloudflare production

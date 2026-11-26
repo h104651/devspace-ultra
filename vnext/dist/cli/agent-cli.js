@@ -170,6 +170,8 @@ async function main() {
             projectsConfigFile: projectsConfigFile ? path.resolve(projectsConfigFile) : undefined,
             allowedWorkspaces,
             allowRawShell,
+            // Production CLI remains blocked until an independently verified execution identity is available.
+            hostExecutionBlocked: true,
             onPolicyRejected: (policyReason) => {
                 void performShutdown(`gateway policy rejection (${(0, service_exit_codes_1.redactSensitiveLogLine)(policyReason)})`, {
                     timeoutMs: 3000,
