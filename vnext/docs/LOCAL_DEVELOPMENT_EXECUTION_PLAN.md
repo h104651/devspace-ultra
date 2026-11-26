@@ -98,3 +98,6 @@ Execution-capable registration now advertises an opaque random generation; local
 
 ### CI corrections and offline isolation decision
 Policy-generation CI reported 651 tests passed / 0 failed and two generated continuation-indent mismatches; synchronized exact dist lines. Pipe fixture passed 20 execution-identity checks, including denied connection/instance creation, but allowed Agent open failed; candidate explicitly includes pipe data, EA and attribute rights with READ_CONTROL and SYNCHRONIZE, excluding FILE_CREATE_PIPE_INSTANCE/WRITE_DAC/WRITE_OWNER/DELETE. Native error code now included. Prioritize offline zero-capability AppContainer based on documented Windows APIs; no private dependency or generic privileged service. Production execution remains held.
+
+### Hosted ARM64 matrix and offline AppContainer fixture
+Restored unique workflow job blocks and original production authorization logic; matrix asserts actual native Node/.NET architectures. Added a hosted-only zero-capability AppContainer fixture using original shared native declarations and synthetic workspace/protected paths. It checks kernel token and job membership before resume, approved and denied operations, loopback and cleanup. No production execution activation or remote generic launch path. Native results pending.

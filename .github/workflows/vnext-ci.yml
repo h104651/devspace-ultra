@@ -131,6 +131,13 @@ jobs:
       - name: Native runner integration (deadline, cancel, descendant drain)
         timeout-minutes: 3
         run: node tests/windows-job-runner-smoke.cjs native/windows-job-runner/bin/Release/net8.0/WindowsJobRunner.exe
+      - name: Zero-capability AppContainer offline boundary fixture
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          $node = (Get-Command node.exe -ErrorAction Stop).Source
+          dotnet run --project tests/windows-appcontainer-fixture/WindowsAppContainerFixture.csproj --configuration Release -- "$node"
+          if ($LASTEXITCODE -ne 0) { throw 'AppContainer boundary fixture failed' }
 
   verify-windows-identity:
     runs-on: windows-latest
