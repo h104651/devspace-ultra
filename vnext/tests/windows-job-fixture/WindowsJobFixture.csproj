@@ -6,4 +6,7 @@
     <Nullable>enable</Nullable>
     <UseAppHost>true</UseAppHost>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../native/windows-job-runner/JobNative.cs" Link="JobNative.cs" />
+  </ItemGroup>
 </Project>

@@ -81,6 +81,9 @@ jobs:
       - name: Native Windows Job Object process-tree fixture
         timeout-minutes: 3
         run: dotnet run --project tests/windows-job-fixture/WindowsJobFixture.csproj --configuration Release
+      - name: Build native Windows runner candidate
+        timeout-minutes: 3
+        run: dotnet build native/windows-job-runner/WindowsJobRunner.csproj --configuration Release
 
   deploy-production:
     name: Deploy Cloudflare production
