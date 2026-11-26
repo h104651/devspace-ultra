@@ -75,6 +75,12 @@ jobs:
         run: npm run build
       - name: Compiled Windows runner smoke
         run: node tests/windows-runner-smoke.cjs
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Native Windows Job Object process-tree fixture
+        timeout-minutes: 3
+        run: dotnet run --project tests/windows-job-fixture/WindowsJobFixture.csproj --configuration Release
 
   deploy-production:
     name: Deploy Cloudflare production
