@@ -712,7 +712,7 @@ export class TaskExecutor {
 
   private resolveTestCommand(project: any, runnerId: string): ConfiguredCommand {
     // 1. Check custom configured project commands
-    if (project.commands?.test?.[runnerId]) {
+    if (project.commands?.test && Object.prototype.hasOwnProperty.call(project.commands.test, runnerId)) {
       return project.commands.test[runnerId];
     }
 
@@ -746,7 +746,7 @@ export class TaskExecutor {
 
   private resolveBuildCommand(project: any, commandId: string): ConfiguredCommand {
     // 1. Check custom configured project commands
-    if (project.commands?.build?.[commandId]) {
+    if (project.commands?.build && Object.prototype.hasOwnProperty.call(project.commands.build, commandId)) {
       return project.commands.build[commandId];
     }
 
@@ -779,32 +779,62 @@ export class TaskExecutor {
     cwd: string,
     extraEnv: Record<string, string> | undefined,
     onLog: (line: string) => void
-  ): Promise<{ stdout: string; exitCode: number }> {
+  ): Promise<{ stdout: string; exitCode: number; outputTruncated: boolean }> {
+    // Runner environment is intentionally distinct from the Agent environment.
+    // This does not provide an OS sandbox or prevent same-user filesystem access.
+    if (typeof executable !== 'string' || !executable.trim() || executable.includes('\0') ||
+        !Array.isArray(args) || args.some(arg => typeof arg !== 'string' || arg.includes('\0'))) {
+      throw new Error('LOCAL_RUNNER_INVALID: Invalid configured executable or arguments.');
+    }
+    const allowed = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'LANG', 'LC_ALL', 'CI', 'JAVA_HOME', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'FLUTTER_ROOT', 'PUB_CACHE', 'GRADLE_USER_HOME', 'VIRTUAL_ENV']);
+    const env: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (allowed.has(key.toUpperCase()) && value !== undefined) env[key] = value;
+    }
+    for (const [key, value] of Object.entries(extraEnv || {})) {
+      if (!allowed.has(key.toUpperCase()) || typeof value !== 'string' || value.includes('\0')) {
+        throw new Error('LOCAL_RUNNER_ENV_DENIED: Configured environment key or value is not permitted.');
+      }
+      for (const existing of Object.keys(env)) {
+        if (existing.toUpperCase() === key.toUpperCase()) delete env[existing];
+      }
+      env[key] = value;
+    }
     return new Promise((resolve, reject) => {
       const child = spawn(executable, args, {
         cwd,
-        env: { ...process.env, ...extraEnv },
+        env,
         shell: false,
         windowsHide: true
       });
 
       let stdoutAcc = '';
+      const maxOutputChars = 256 * 1024;
+      let outputTruncated = false;
+      const appendOutput = (text: string, stderr: boolean) => {
+        const remaining = Math.max(0, maxOutputChars - stdoutAcc.length);
+        const accepted = text.slice(0, remaining);
+        stdoutAcc += accepted;
+        if (accepted) onLog(stderr ? `[STDERR] ${accepted.trim()}` : accepted.trim());
+        if (accepted.length < text.length && !outputTruncated) {
+          outputTruncated = true;
+          onLog('[EXECUTOR] Output limit reached; further output discarded.');
+        }
+      };
 
       child.stdout?.on('data', (data) => {
         const text = data.toString();
-        stdoutAcc += text;
-        onLog(text.trim());
+        appendOutput(text, false);
       });
 
       child.stderr?.on('data', (data) => {
         const text = data.toString();
-        stdoutAcc += text;
-        onLog(`[STDERR] ${text.trim()}`);
+        appendOutput(text, true);
       });
 
       child.on('close', (code) => {
         if (code === 0) {
-          resolve({ stdout: stdoutAcc, exitCode: 0 });
+          resolve({ stdout: stdoutAcc, exitCode: 0, outputTruncated });
         } else {
           const err: any = new Error(`Process failed with exit code ${code}: ${stdoutAcc.slice(-500)}`);
           err.code = 'LOCAL_PROCESS_FAILED';

@@ -315,7 +315,27 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
     });
 
     // ----------------------------------------------------
-    // PART 2: Full Gateway + LocalAgent Client E2E Flow & local:exec scope check
+    await test('TaskExecutor: child env excludes Agent credentials and output is bounded', async () => {
+      const previous = process.env.AGENT_TOKEN;
+      process.env.AGENT_TOKEN = 'fixture-not-a-production-token';
+      try {
+        const res = await (executor as any).executeProcessWithoutShell(process.execPath,
+          ['-e', 'process.stdout.write(String(Boolean(process.env.AGENT_TOKEN)) + ":" + "x".repeat(400000))'],
+          rootA, undefined, () => {});
+        assert.ok(res.stdout.startsWith('false:'));
+        assert.strictEqual(res.stdout.length, 256 * 1024);
+        assert.strictEqual(res.outputTruncated, true);
+        await assert.rejects(async () => (executor as any).executeProcessWithoutShell(
+          process.execPath, ['-e', ''], rootA, { agent_token: 'fixture' }, () => {}), /LOCAL_RUNNER_ENV_DENIED/);
+        await assert.rejects(async () => (executor as any).executeProcessWithoutShell(
+          process.execPath, [123], rootA, undefined, () => {}), /LOCAL_RUNNER_INVALID/);
+      } finally {
+        if (previous === undefined) delete process.env.AGENT_TOKEN;
+        else process.env.AGENT_TOKEN = previous;
+      }
+    });
+
+    // PART 2: Full Gateway + LocalAgent Client E2E Flow & execution scope check
     // ----------------------------------------------------
     const testStorageDir = path.join(tmpBase, '.devspace-storage-gateway');
     const port = 27100 + Math.floor(Math.random() * 2000);
