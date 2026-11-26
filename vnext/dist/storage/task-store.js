@@ -768,7 +768,7 @@ class TaskStore {
         const task = this.tasks.get(taskId);
         if (!task)
             return false;
-        if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'cancelled') {
+        if (task_1.TERMINAL_TASK_STATUSES.has(task.status)) {
             return false;
         }
         this.finishActiveAttempt(task, 'cancelled', { code: 'TASK_CANCELLED', message: reason });

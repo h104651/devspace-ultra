@@ -48,7 +48,9 @@ export class TaskRouter {
       throw new Error(`KILL_SWITCH_ACTIVE: ${killCheck.reason}`);
     }
 
-    const requiredScope = options.requiredScope || ScopeChecker.getRequiredScopeForCapability(options.capability);
+    const requiredScope = options.backend === 'local'
+        ? ScopeChecker.getRequiredScopeForCapability(options.capability)
+        : options.requiredScope || ScopeChecker.getRequiredScopeForCapability(options.capability);
     const hasCapabilityScope = ScopeChecker.hasScope(callerScopes, requiredScope);
     const hasGenericSubmitScope = ScopeChecker.hasScope(callerScopes, 'tasks:submit');
 
@@ -183,6 +185,17 @@ export class TaskRouter {
           }
         }
         return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
+      }
+    }
+
+    // Execution tasks must not become latent work on an ineligible or offline device.
+    // Existing read-only bounded wait and legacy file-task routing remain unchanged.
+    if (options.backend === 'local' && (options.capability === 'local:run_tests' || options.capability === 'local:build_project')) {
+      const agents = this.connectionManager?.getConnectedAgents?.({ healthyOnly: true }) || [];
+      const eligible = agents.some((agent: any) => agent.deviceId === options.targetDeviceId && agent.capabilities?.includes(options.capability));
+      if (!eligible) {
+        this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { reason: 'EXECUTION_TARGET_NOT_ELIGIBLE', capability: options.capability, targetDeviceId: options.targetDeviceId } });
+        throw new Error('EXECUTION_TARGET_NOT_ELIGIBLE: Execution requires a healthy target advertising the requested capability.');
       }
     }
 

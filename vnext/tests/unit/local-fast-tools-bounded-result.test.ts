@@ -371,6 +371,24 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     assert.notStrictEqual(staleReplay.pending, true);
     passed++;
 
+    // Denied execution is rejected before creating a durable task.
+    await assert.rejects(
+      () => handlers.handleLocalRunTests({ projectId: 'astor-tuneup', targetDeviceId: deviceId }, callerAdmin),
+      /EXECUTION_TARGET_NOT_ELIGIBLE/
+    );
+    await assert.rejects(
+      () => handlers.handleRemoteTaskSubmit({ backend: 'local', capability: 'local:build_project', targetDeviceId: deviceId, payload: { projectId: 'astor-tuneup' } }, callerAdmin),
+      /EXECUTION_TARGET_NOT_ELIGIBLE/
+    );
+    mockConnectedAgents = [];
+    await assert.rejects(
+      () => handlers.handleLocalRunTests({ projectId: 'astor-tuneup', targetDeviceId: deviceId }, callerAdmin),
+      /EXECUTION_TARGET_NOT_ELIGIBLE/
+    );
+    passed++;
+
+    mockConnectedAgents = [{ deviceId, capabilities: [...liveCapabilities, 'local:run_tests', 'local:build_project'], status: 'online' }];
+
     // 8. Async tools remain asynchronous without bounded wait:
     // a. local_run_tests
     const runTestsRes = await handlers.handleLocalRunTests({ projectId: 'astor-tuneup' }, callerAdmin);

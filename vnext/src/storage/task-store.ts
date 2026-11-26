@@ -778,7 +778,7 @@ export class TaskStore {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
-    if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'cancelled') {
+    if (TERMINAL_TASK_STATUSES.has(task.status)) {
       return false;
     }
 

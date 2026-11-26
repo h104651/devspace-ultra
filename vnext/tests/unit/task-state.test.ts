@@ -189,6 +189,18 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     assert.ok(recoveredAttemptTask.attempts[0].completedAt);
     passed++;
 
+    // A stale mutation remains terminal and cannot be hidden by cancellation.
+    const mutation = store.createTask({
+      backend: 'local', capability: 'local:write_file',
+      payload: { path: 'fixture.txt', content: 'fixture' }, targetDeviceId: 'device-stale-mutation'
+    });
+    assert.ok(store.claimTaskById(mutation.taskId, 'device-stale-mutation', 1000, 'old-session'));
+    assert.strictEqual(store.failTasksForSupersededSession('device-stale-mutation', 'old-session'), 1);
+    assert.strictEqual(store.cancelTask(mutation.taskId, 'must not hide stale'), false);
+    assert.strictEqual(store.getTask(mutation.taskId)?.status, 'stale');
+    assert.strictEqual(store.getTask(mutation.taskId)?.error?.code, 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN');
+    passed++;
+
     // Test 13: Event-driven wait resolves on task change and reports bounded timeout without polling.
     const task8 = store.createTask({
       backend: 'local',
