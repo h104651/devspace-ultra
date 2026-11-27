@@ -9,6 +9,9 @@ export interface GitBranchLease {
   // An absolute, preverified empty directory owned by the execution policy.
   readonly emptyHooksDirectory: string;
   snapshot(intent: GitBranchIntent): Promise<GitBranchSnapshot>;
+  // Optional until a protected staged index adapter is provisioned.
+  readonly indexWorkspace?: { root: string; approvedPaths: readonly string[] };
+  query?(args: readonly string[]): Promise<string>;
   // Resolve only after the entire process tree exits successfully.
   // Reject for any uncertainty, truncation, cancellation or nonzero exit.
   run(args: readonly string[]): Promise<void>;

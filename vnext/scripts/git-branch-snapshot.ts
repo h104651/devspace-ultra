@@ -42,7 +42,13 @@ function assertDirectDirectory(dir: string): void {
 
 export async function collectGitBranchSnapshot(root: string, intent: GitBranchIntent, read: GitSnapshotReader): Promise<GitBranchSnapshot> {
   const checked = parseGitBranchIntent(intent);
-  if (checked.expectedHead.length !== 40) throw new Error('GIT_STAGED_OBJECT_FORMAT_DENIED');
+  return collectStagedGitSnapshot(root, checked.expectedHead, checked.branch, read);
+}
+
+export async function collectStagedGitSnapshot(root: string, expectedHead: string, targetBranch: string, read: GitSnapshotReader): Promise<GitBranchSnapshot> {
+  if (!/^[a-f0-9]{40}$/.test(expectedHead) || !/^[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)*$/.test(targetBranch)) {
+    throw new Error('GIT_STAGED_OBJECT_FORMAT_DENIED');
+  }
   assertDirectDirectory(root);
   const gitDir = path.join(root, '.git');
   assertDirectDirectory(gitDir);
@@ -64,7 +70,7 @@ export async function collectGitBranchSnapshot(root: string, intent: GitBranchIn
   if (!currentRef.startsWith('refs/heads/')) throw new Error('GIT_STAGED_HEAD_DENIED');
   const head = (await query(['rev-parse','--verify','HEAD^{commit}'])).trim();
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error('GIT_STAGED_HEAD_DENIED');
-  const target = 'refs/heads/' + checked.branch;
+  const target = 'refs/heads/' + targetBranch;
   let targetHead: string | null = null;
   let currentFound = false;
   const refs = await query(['for-each-ref','--format=%(refname)%00%(objectname)%00%(symref)%00%(objecttype)','refs/heads']);

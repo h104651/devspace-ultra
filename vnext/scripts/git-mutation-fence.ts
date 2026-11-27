@@ -35,6 +35,11 @@ export function withDurableGitFence(protectedDirectory: string, inner: GitBranch
       return {
         approvedTargets: lease.approvedTargets,
         emptyHooksDirectory: lease.emptyHooksDirectory,
+        indexWorkspace: lease.indexWorkspace,
+        query: lease.query ? (args) => {
+          if (finished) throw new Error('GIT_MUTATION_LEASE_CLOSED');
+          return lease.query!(args);
+        } : undefined,
         snapshot(intent) {
           if (finished) throw new Error('GIT_MUTATION_LEASE_CLOSED');
           return lease.snapshot(intent);

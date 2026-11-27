@@ -1,3 +1,4 @@
+import { parseGitIndexIntent, runGitIndexMutation } from '../../scripts/execute-git-index-mutations';
 import { collectGitBranchSnapshot } from '../../scripts/git-branch-snapshot';
 import { withDurableGitFence } from '../../scripts/git-mutation-fence';
 import { GitBranchAdapter, runGitBranchMutation } from '../../scripts/execute-git-branch-mutations';
@@ -319,5 +320,50 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       passed++;
     } finally { fs.rmSync(dir,{recursive:true,force:true}); }
   } catch(err) { failed++; console.error('Git durable fence fixture regression:',err); }
+  try {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-index-'));
+    const hooks=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-index-hooks-'));
+    const locks=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-index-lock-'));
+    try {
+      const env={...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:os.devNull,GIT_OPTIONAL_LOCKS:'0',GIT_NO_LAZY_FETCH:'1',GIT_TERMINAL_PROMPT:'0'};
+      for(const key of Object.keys(env)) if(key.startsWith('GIT_')&&!['GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_OPTIONAL_LOCKS','GIT_NO_LAZY_FETCH','GIT_TERMINAL_PROMPT'].includes(key)) delete env[key];
+      const git=(args:readonly string[])=>execFileSync('git',[...args],{cwd:dir,env,encoding:'utf8',timeout:10000,maxBuffer:262144});
+      git(['init','-q','-b','feat/index','--object-format=sha1']);
+      git(['config','user.name','Synthetic Fixture']);git(['config','user.email','fixture@example.invalid']);
+      git(['config','commit.gpgsign','false']);
+      fs.writeFileSync(path.join(dir,'one.txt'),'before\n');
+      git(['add','one.txt']);git(['commit','-qm','initial']);
+      const head=git(['rev-parse','HEAD']).trim();
+      fs.writeFileSync(path.join(dir,'one.txt'),'after\n');
+      fs.writeFileSync(path.join(dir,'two.txt'),'unselected\n');
+      const sha256=require('crypto').createHash('sha256').update('after\n').digest('hex');
+      const inner: GitBranchAdapter={async acquire(projectId){
+        assert.strictEqual(projectId,'fixture');
+        return {approvedTargets:['feat/index'],emptyHooksDirectory:hooks,indexWorkspace:{root:dir,approvedPaths:['one.txt']},
+          async snapshot(intent){return collectGitBranchSnapshot(dir,intent,async args=>git(args));},
+          async query(args){return git(args);},async run(args){git(args);},async finish(){}};
+      }};
+      const adapter=withDurableGitFence(locks,inner);
+      const stage={projectId:'fixture',operation:'git_stage',branch:'feat/index',expectedHead:head,files:[{path:'one.txt',sha256}]};
+      for(const bad of ['../one.txt','.git/config','C:/one.txt','one.txt:stream','CON.txt','one.txt.','a//b']) assert.throws(()=>parseGitIndexIntent({...stage,files:[{path:bad,sha256}]}));
+      assert.throws(()=>parseGitIndexIntent({...stage,files:[{path:'one.txt',sha256},{path:'ONE.TXT',sha256}]}),/DUPLICATE/);
+      await assert.rejects(()=>runGitIndexMutation({...stage,files:[{path:'one.txt',sha256:'0'.repeat(64)}]},adapter),/CONTENT_CHANGED/);
+      assert.strictEqual(git(['diff','--cached','--name-only']),'');
+      const staged=await runGitIndexMutation(stage,adapter);
+      assert.strictEqual(git(['diff','--cached','--name-only']).trim(),'one.txt');
+      assert.strictEqual(git(['rev-parse','HEAD']).trim(),head);
+      await assert.rejects(()=>runGitIndexMutation(stage,adapter),/NOT_EMPTY/);
+      const commit={projectId:'fixture',operation:'git_commit',branch:'feat/index',expectedHead:head,paths:['one.txt'],expectedTree:staged.tree,message:'fixture update'};
+      const committed=await runGitIndexMutation(commit,adapter);
+      assert.strictEqual(git(['rev-parse','HEAD']).trim(),committed.head);
+      assert.strictEqual(git(['rev-parse','HEAD^']).trim(),head);
+      assert.strictEqual(git(['show','HEAD:one.txt']),'after\n');
+      assert.strictEqual(git(['diff','--cached','--name-only']),'');
+      assert.strictEqual(fs.readFileSync(path.join(dir,'two.txt'),'utf8'),'unselected\n');
+      assert.ok(git(['status','--porcelain']).includes('?? two.txt'));
+      await assert.rejects(()=>runGitIndexMutation(commit,adapter),/STATE_CONFLICT/);
+      passed++;
+    } finally { fs.rmSync(dir,{recursive:true,force:true});fs.rmSync(hooks,{recursive:true,force:true});fs.rmSync(locks,{recursive:true,force:true}); }
+  } catch(err) { failed++; console.error('Git index mutation fixture regression:',err); }
   return {passed,failed};
 }
