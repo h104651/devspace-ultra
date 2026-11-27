@@ -594,8 +594,11 @@ class TaskExecutor {
                     if (process.platform !== 'win32' || !this.windowsAppContainerSid || !this.windowsJobRunnerPath) {
                         throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Git history profiles require offline Windows isolation.');
                     }
-                    if (path.basename(cmdConfig.executable).toLowerCase() !== 'git.exe' || Object.keys(cmdConfig.env || {}).length ||
-                        (cmdConfig.timeoutMs ?? 30000) > 30000) {
+                    if (!project.permissions.read) {
+                        throw new Error('LOCAL_PROJECT_PERMISSION_DENIED: Git history requires project read permission.');
+                    }
+                    if (path.basename(fs.realpathSync(cmdConfig.executable)).toLowerCase() !== 'git.exe' || Object.keys(cmdConfig.env || {}).length ||
+                        !Number.isInteger(cmdConfig.timeoutMs) || cmdConfig.timeoutMs < 100 || cmdConfig.timeoutMs > 30000) {
                         throw new Error('LOCAL_GIT_PROFILE_DENIED: Expected fixed Git executable and bounded timeout without environment overrides.');
                     }
                     (0, git_read_plan_1.validateGitReadProfile)(runnerId, cmdConfig.args);

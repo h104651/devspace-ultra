@@ -28,6 +28,23 @@ async function main() {
   extraProjects[0].commands.test.offline.env={HOME:work};
   const extra=new TaskExecutor({projects:extraProjects,windowsJobRunnerPath:host,windowsAppContainerSid:sid});
   await assert.rejects(()=>extra.executeTask(task,()=>{}),/LOCAL_RUNNER_ENV_DENIED/);
+  // Reserved Git IDs cannot smuggle non-Git verbs or omit the bounded timeout.
+  // A synthetic file tests rejection before any Git process can start.
+  const fs=require('node:fs');
+  const stagedGit=path.join(root,'work','git.exe');
+  fs.writeFileSync(stagedGit,'fixture-not-executable');
+  const gitProfiles={git_log:{executable:stagedGit,args:['push','origin','main'],timeoutMs:30000}};
+  const gitProject={projectId:'git-fixture',root:work,permissions:{read:true,test:true,hostExecution:true},commands:{test:gitProfiles}};
+  const gitTask={capability:'local:run_tests',payload:{projectId:'git-fixture',runnerId:'git_log'}};
+  const gitExecutor=new TaskExecutor({projects:[gitProject],windowsJobRunnerPath:host,windowsAppContainerSid:sid});
+  await assert.rejects(()=>gitExecutor.executeTask(gitTask,()=>{}),/LOCAL_GIT_PROFILE_DENIED/);
+  delete gitProfiles.git_log.timeoutMs;
+  const missingTimeout=new TaskExecutor({projects:[gitProject],windowsJobRunnerPath:host,windowsAppContainerSid:sid});
+  await assert.rejects(()=>missingTimeout.executeTask(gitTask,()=>{}),/LOCAL_GIT_PROFILE_DENIED/);
+  gitProject.permissions.read=false;
+  const noRead=new TaskExecutor({projects:[gitProject],windowsJobRunnerPath:host,windowsAppContainerSid:sid});
+  await assert.rejects(()=>noRead.executeTask(gitTask,()=>{}),/LOCAL_PROJECT_PERMISSION_DENIED/);
+  fs.unlinkSync(stagedGit);
   console.log('OFFLINE_EXECUTOR_INTEGRATION PASS',process.arch);
 }
 main().catch(e=>{console.error(e);process.exitCode=1});
