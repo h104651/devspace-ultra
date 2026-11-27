@@ -215,6 +215,17 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
       assert.strictEqual(store.startTask(runningExecution.taskId, 'device-exec-cancel'), true);
       assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
       assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'running');
+      const attempt = runningExecution.activeAttemptId!;
+      assert.throws(() => store.requestExecutionCancellation(runningExecution.taskId, 'wrong-device', 'cancel-session', attempt), /EXECUTION_CANCEL_NOT_ACTIVE/);
+      const requestId = store.requestExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt);
+      assert.strictEqual(store.requestExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt), requestId);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'running');
+      assert.strictEqual(store.getPendingExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'wrong-session', attempt), undefined);
+      assert.strictEqual(store.confirmExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt, 'wrong-request'), false);
+      assert.strictEqual(store.getPendingExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt)?.requestId, requestId);
+      assert.strictEqual(store.confirmExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt, requestId), true);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'cancelled');
+      assert.strictEqual(store.confirmExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt, requestId), false);
       passed++;
     }
 

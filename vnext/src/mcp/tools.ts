@@ -15,7 +15,7 @@ export const REMOTE_TASK_SUBMIT_SCHEMA = {
 export const REMOTE_TASK_STATUS_SCHEMA = { type: 'object', properties: { taskId: { type: 'string', description: 'ID of the task to query' } }, required: ['taskId'], additionalProperties: false };
 export const REMOTE_TASK_LOGS_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' }, limit: { type: 'number', description: 'Maximum number of recent log lines to retrieve' } }, required: ['taskId'], additionalProperties: false };
 export const REMOTE_TASK_ARTIFACTS_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'], additionalProperties: false };
-export const REMOTE_TASK_CANCEL_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' } }, required: ['taskId'], additionalProperties: false };
+export const REMOTE_TASK_CANCEL_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' }, targetDeviceId: { type: 'string', description: 'Required for active local Build/Test cancellation' }, attemptId: { type: 'string', description: 'Exact active attempt for Build/Test cancellation' } }, required: ['taskId'], additionalProperties: false };
 
 export const KAGGLE_RUN_SCHEMA = {
   type: 'object',
@@ -730,7 +730,7 @@ export function getCanonicalToolsList(): McpToolDefinition[] {
     { name: 'device_maintenance_check', description: 'Observe target device tasks and session health; requires local:read and tasks:inventory; never authorizes maintenance', inputSchema: DEVICE_MAINTENANCE_CHECK_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
     { name: 'remote_task_logs', description: 'Fetch task execution logs', inputSchema: REMOTE_TASK_LOGS_SCHEMA },
     { name: 'remote_task_artifacts', description: 'List task artifacts', inputSchema: REMOTE_TASK_ARTIFACTS_SCHEMA },
-    { name: 'remote_task_cancel', description: 'Cancel active task', inputSchema: REMOTE_TASK_CANCEL_SCHEMA },
+    { name: 'remote_task_cancel', description: 'Cancel queued task or request confirmed active Build/Test cancellation; inspect status for terminal outcome', inputSchema: REMOTE_TASK_CANCEL_SCHEMA },
     { name: 'kaggle_run', description: 'Run code on Kaggle backend', inputSchema: KAGGLE_RUN_SCHEMA },
     { name: 'kaggle_status', description: 'Check Kaggle execution status', inputSchema: KAGGLE_STATUS_SCHEMA },
     { name: 'kaggle_logs', description: 'Fetch Kaggle execution logs', inputSchema: KAGGLE_LOGS_SCHEMA },

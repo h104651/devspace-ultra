@@ -12,6 +12,7 @@ import { isSessionHealthy, parseReconnectIdentity, isSameReconnectIdentity, canR
 export interface ConnectedAgent {
   sessionId: string;
   supportsAttemptFencing?: boolean;
+  supportsExecutionCancellation?: boolean;
   executionPolicyRevision?: string;
   reconnectProofHash?: string;
   reconnectSequence?: number;
@@ -191,6 +192,7 @@ export class ConnectionManager {
       const agent: ConnectedAgent = {
         sessionId,
         supportsAttemptFencing: msg.supportsAttemptFencing === true,
+        supportsExecutionCancellation: msg.supportsAttemptFencing === true && msg.supportsExecutionCancellation === true,
         executionPolicyRevision,
         ...reconnectIdentity,
         deviceId: authoritativeDeviceId,
@@ -265,6 +267,7 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'AGENT_HEARTBEAT') {
+      const cancellations: Array<{ taskId: string; attemptId: string; requestId: string }> = [];
       agent.lastHeartbeatAt = Date.now();
       this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);
 
@@ -274,6 +277,10 @@ export class ConnectionManager {
           const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
           if (ownsAttempt(tid, attemptId)) {
             this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, sessionId);
+            if (agent.supportsExecutionCancellation && attemptId) {
+              const request = this.taskStore.getPendingExecutionCancellation(tid, authenticatedDeviceId, sessionId, attemptId);
+              if (request) cancellations.push(request);
+            }
           }
         }
       }
@@ -281,7 +288,8 @@ export class ConnectionManager {
       socket.send(JSON.stringify({
         type: 'AGENT_HEARTBEAT_ACK',
         messageId: msg.messageId,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        ...(cancellations.length ? { cancellations } : {})
       }));
       return;
     }
@@ -371,6 +379,13 @@ export class ConnectionManager {
         taskId: msg.taskId,
         result: 'SUCCESS'
       });
+      return;
+    }
+
+    if (msg.type === 'TASK_CANCEL_CONFIRMED') {
+      if (agent.supportsExecutionCancellation && ownsAttempt(msg.taskId, msg.attemptId)) {
+        this.taskStore.confirmExecutionCancellation(msg.taskId, authenticatedDeviceId, sessionId, msg.attemptId, msg.requestId);
+      }
       return;
     }
 

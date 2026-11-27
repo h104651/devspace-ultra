@@ -160,6 +160,7 @@ export class GatewayDurableObject {
             platform: att.platform || 'windows',
             capabilities: att.capabilities || [],
             executionPolicyRevision: att.executionPolicyRevision,
+            supportsExecutionCancellation: att.supportsExecutionCancellation === true,
             connectedAt: att.connectedAt || now,
             lastHeartbeatAt: lastHb,
             socket: ws
@@ -1273,6 +1274,7 @@ export class GatewayDurableObject {
         const attachmentData: AgentSessionAttachment = {
           sessionId: newSessionId,
           supportsAttemptFencing: msg.supportsAttemptFencing === true,
+          supportsExecutionCancellation: msg.supportsAttemptFencing === true && msg.supportsExecutionCancellation === true,
           executionPolicyRevision,
           ...reconnectIdentity,
           deviceId: authoritativeDeviceId,
@@ -1352,6 +1354,7 @@ export class GatewayDurableObject {
       if (!isSessionHealthy(attachment, Date.now(), HEARTBEAT_TTL_MS)) { ws.close(1000, 'Heartbeat timeout'); return; }
 
       if (msg.type === 'AGENT_HEARTBEAT') {
+        const cancellations: Array<{ taskId: string; attemptId: string; requestId: string }> = [];
         const now = Date.now();
         attachment.lastHeartbeatAt = Math.max(attachment.lastHeartbeatAt || 0, now);
         (ws as any).serializeAttachment(attachment);
@@ -1367,13 +1370,18 @@ export class GatewayDurableObject {
             const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
             if (ownsAttempt(tid, attemptId)) {
               this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, currentSessionId);
+              if (attachment.supportsExecutionCancellation && attemptId) {
+                const request = this.taskStore.getPendingExecutionCancellation(tid, authenticatedDeviceId, currentSessionId, attemptId);
+                if (request) cancellations.push(request);
+              }
             }
           }
         }
         ws.send(JSON.stringify({
           type: 'AGENT_HEARTBEAT_ACK',
           messageId: (msg as any).messageId || crypto.randomUUID(),
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          ...(cancellations.length ? { cancellations } : {})
         }));
         return;
       }
@@ -1435,6 +1443,13 @@ export class GatewayDurableObject {
           return;
         }
         this.taskStore.completeTask(msg.taskId, msg.result, authenticatedDeviceId, currentSessionId);
+        return;
+      }
+
+      if (msg.type === 'TASK_CANCEL_CONFIRMED') {
+        if (attachment.supportsExecutionCancellation && ownsAttempt(msg.taskId, msg.attemptId)) {
+          this.taskStore.confirmExecutionCancellation(msg.taskId, authenticatedDeviceId, currentSessionId, msg.attemptId, msg.requestId);
+        }
         return;
       }
 

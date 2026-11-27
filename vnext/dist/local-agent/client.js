@@ -63,6 +63,7 @@ class LocalAgentClient {
     executionPolicyFingerprint;
     executionPolicyRevision;
     taskSockets = new Map();
+    executionCancels = new Map();
     lastPolicyError;
     policyRejectedNotified = false;
     constructor(config) {
@@ -366,6 +367,7 @@ class LocalAgentClient {
             executionPolicyRevision: this.executionPolicyRevision,
             token: this.config.token,
             supportsAttemptFencing: true,
+            supportsExecutionCancellation: process.platform === 'win32' && !!this.config.windowsJobRunnerPath && !!this.executionPolicyRevision,
             reconnectProof: this.reconnectProof,
             reconnectSequence: ++this.reconnectSequence
         });
@@ -428,6 +430,22 @@ class LocalAgentClient {
             }
             return;
         }
+        if (msg.type === 'AGENT_HEARTBEAT_ACK') {
+            if (this.registeredSocket !== socket || !Array.isArray(msg.cancellations))
+                return;
+            for (const request of msg.cancellations) {
+                const task = this.activeTasks.get(request.taskId);
+                const control = this.executionCancels.get(request.taskId);
+                if (!task || !control || this.taskSockets.get(request.taskId) !== socket ||
+                    task.lease?.claimedSessionId !== this.registeredSessionId || task.activeAttemptId !== request.attemptId ||
+                    typeof request.requestId !== 'string' || !/^[a-f0-9-]{36}$/.test(request.requestId) ||
+                    (control.requestId && control.requestId !== request.requestId))
+                    continue;
+                control.requestId = request.requestId;
+                control.controller.abort();
+            }
+            return;
+        }
         if (msg.type === 'TASK_ASSIGNED') {
             if (!this.isRunning || this.isStopping || this.registeredSocket !== socket || this.activeTasks.size > 0)
                 return;
@@ -453,6 +471,10 @@ class LocalAgentClient {
     }
     async runAssignedTask(task, socket = this.taskSockets.get(task.taskId)) {
         let retainTaskForAudit = false;
+        const control = process.platform === 'win32' && !!this.config.windowsJobRunnerPath &&
+            (task.capability === 'local:run_tests' || task.capability === 'local:build_project') ? { controller: new AbortController() } : undefined;
+        if (control)
+            this.executionCancels.set(task.taskId, control);
         const sendForAttempt = (message) => {
             if (!socket || this.activeTasks.get(task.taskId) !== task || this.taskSockets.get(task.taskId) !== socket)
                 return;
@@ -495,7 +517,7 @@ class LocalAgentClient {
                 if (logBuffer.length >= 5) {
                     flushLogs();
                 }
-            });
+            }, control?.controller.signal);
             flushLogs();
             sendForAttempt({
                 type: 'TASK_COMPLETE',
@@ -508,6 +530,13 @@ class LocalAgentClient {
         }
         catch (err) {
             const errCode = err.code || (typeof err.message === 'string' && err.message.split(':')[0]) || 'LOCAL_TASK_EXECUTION_ERROR';
+            if (errCode === 'LOCAL_PROCESS_CANCELLED' && control?.requestId && control.controller.signal.aborted) {
+                sendForAttempt({
+                    type: 'TASK_CANCEL_CONFIRMED', messageId: crypto.randomUUID(), timestamp: Date.now(),
+                    taskId: task.taskId, deviceId: this.config.deviceId, requestId: control.requestId
+                });
+                return;
+            }
             if (errCode === 'LOCAL_PROCESS_TREE_UNCERTAIN' && (0, capabilities_1.isSideEffectCapability)(task.capability)) {
                 // Leave the attempt in flight for lease-expiry recovery. Never advertise
                 // normal failure/completion or release the local agent lock.
@@ -546,6 +575,7 @@ class LocalAgentClient {
             if (!retainTaskForAudit && this.activeTasks.get(task.taskId) === task) {
                 this.activeTasks.delete(task.taskId);
                 this.taskSockets.delete(task.taskId);
+                this.executionCancels.delete(task.taskId);
             }
             this.refreshExecutorConfigIfIdle();
         }

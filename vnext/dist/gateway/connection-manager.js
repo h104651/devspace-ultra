@@ -192,6 +192,7 @@ class ConnectionManager {
             const agent = {
                 sessionId,
                 supportsAttemptFencing: msg.supportsAttemptFencing === true,
+                supportsExecutionCancellation: msg.supportsAttemptFencing === true && msg.supportsExecutionCancellation === true,
                 executionPolicyRevision,
                 ...reconnectIdentity,
                 deviceId: authoritativeDeviceId,
@@ -260,6 +261,7 @@ class ConnectionManager {
             return;
         }
         if (msg.type === 'AGENT_HEARTBEAT') {
+            const cancellations = [];
             agent.lastHeartbeatAt = Date.now();
             this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);
             // Renew lease for all owned active tasks
@@ -268,13 +270,19 @@ class ConnectionManager {
                     const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
                     if (ownsAttempt(tid, attemptId)) {
                         this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, sessionId);
+                        if (agent.supportsExecutionCancellation && attemptId) {
+                            const request = this.taskStore.getPendingExecutionCancellation(tid, authenticatedDeviceId, sessionId, attemptId);
+                            if (request)
+                                cancellations.push(request);
+                        }
                     }
                 }
             }
             socket.send(JSON.stringify({
                 type: 'AGENT_HEARTBEAT_ACK',
                 messageId: msg.messageId,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                ...(cancellations.length ? { cancellations } : {})
             }));
             return;
         }
@@ -360,6 +368,12 @@ class ConnectionManager {
                 taskId: msg.taskId,
                 result: 'SUCCESS'
             });
+            return;
+        }
+        if (msg.type === 'TASK_CANCEL_CONFIRMED') {
+            if (agent.supportsExecutionCancellation && ownsAttempt(msg.taskId, msg.attemptId)) {
+                this.taskStore.confirmExecutionCancellation(msg.taskId, authenticatedDeviceId, sessionId, msg.attemptId, msg.requestId);
+            }
             return;
         }
         if (msg.type === 'TASK_FAIL') {

@@ -48,6 +48,7 @@ export class LocalAgentClient {
   private executionPolicyFingerprint?: string;
   private executionPolicyRevision?: string;
   private taskSockets = new Map<string, WebSocket>();
+  private executionCancels = new Map<string, { controller: AbortController; requestId?: string }>();
   private lastPolicyError?: string;
   private policyRejectedNotified = false;
 
@@ -351,6 +352,7 @@ export class LocalAgentClient {
       executionPolicyRevision: this.executionPolicyRevision,
       token: this.config.token,
       supportsAttemptFencing: true,
+      supportsExecutionCancellation: process.platform === 'win32' && !!this.config.windowsJobRunnerPath && !!this.executionPolicyRevision,
       reconnectProof: this.reconnectProof,
       reconnectSequence: ++this.reconnectSequence
     });
@@ -412,6 +414,20 @@ export class LocalAgentClient {
       }
       return;
     }
+    if (msg.type === 'AGENT_HEARTBEAT_ACK') {
+      if (this.registeredSocket !== socket || !Array.isArray(msg.cancellations)) return;
+      for (const request of msg.cancellations) {
+        const task = this.activeTasks.get(request.taskId);
+        const control = this.executionCancels.get(request.taskId);
+        if (!task || !control || this.taskSockets.get(request.taskId) !== socket ||
+            task.lease?.claimedSessionId !== this.registeredSessionId || task.activeAttemptId !== request.attemptId ||
+            typeof request.requestId !== 'string' || !/^[a-f0-9-]{36}$/.test(request.requestId) ||
+            (control.requestId && control.requestId !== request.requestId)) continue;
+        control.requestId = request.requestId;
+        control.controller.abort();
+      }
+      return;
+    }
     if (msg.type === 'TASK_ASSIGNED') {
       if (!this.isRunning || this.isStopping || this.registeredSocket !== socket || this.activeTasks.size > 0) return;
       const task = msg.task;
@@ -439,6 +455,10 @@ export class LocalAgentClient {
 
   private async runAssignedTask(task: DurableTask, socket = this.taskSockets.get(task.taskId)): Promise<void> {
     let retainTaskForAudit = false;
+    const control: { controller: AbortController; requestId?: string } | undefined =
+      process.platform === 'win32' && !!this.config.windowsJobRunnerPath &&
+      (task.capability === 'local:run_tests' || task.capability === 'local:build_project') ? { controller: new AbortController() } : undefined;
+    if (control) this.executionCancels.set(task.taskId, control);
     const sendForAttempt = (message: any) => {
       if (!socket || this.activeTasks.get(task.taskId) !== task || this.taskSockets.get(task.taskId) !== socket) return;
       this.send({ ...message, attemptId: task.activeAttemptId }, socket);
@@ -482,7 +502,7 @@ export class LocalAgentClient {
         if (logBuffer.length >= 5) {
           flushLogs();
         }
-      });
+      }, control?.controller.signal);
 
       flushLogs();
 
@@ -496,6 +516,13 @@ export class LocalAgentClient {
       });
     } catch (err: any) {
       const errCode = err.code || (typeof err.message === 'string' && err.message.split(':')[0]) || 'LOCAL_TASK_EXECUTION_ERROR';
+      if (errCode === 'LOCAL_PROCESS_CANCELLED' && control?.requestId && control.controller.signal.aborted) {
+        sendForAttempt({
+          type: 'TASK_CANCEL_CONFIRMED', messageId: crypto.randomUUID(), timestamp: Date.now(),
+          taskId: task.taskId, deviceId: this.config.deviceId, requestId: control.requestId
+        });
+        return;
+      }
       if (errCode === 'LOCAL_PROCESS_TREE_UNCERTAIN' && isSideEffectCapability(task.capability)) {
         // Leave the attempt in flight for lease-expiry recovery. Never advertise
         // normal failure/completion or release the local agent lock.
@@ -526,6 +553,7 @@ export class LocalAgentClient {
       if (!retainTaskForAudit && this.activeTasks.get(task.taskId) === task) {
         this.activeTasks.delete(task.taskId);
         this.taskSockets.delete(task.taskId);
+        this.executionCancels.delete(task.taskId);
       }
       this.refreshExecutorConfigIfIdle();
     }

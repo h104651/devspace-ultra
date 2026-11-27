@@ -150,6 +150,12 @@ export class McpHandlers {
       result: redactObject(task.result),
       error: task.error,
       artifactsCount: task.artifacts.length,
+      targetDeviceId: task.targetDeviceId,
+      activeAttemptId: task.backend === 'local' ? task.activeAttemptId : undefined,
+      cancellation: task.metadata?.executionCancellation ? {
+        requestedAt: task.metadata.executionCancellation.requestedAt,
+        confirmedAt: task.metadata.executionCancellation.confirmedAt
+      } : undefined,
       logsCount: task.logs.length
     };
   }
@@ -189,6 +195,21 @@ export class McpHandlers {
   public async handleRemoteTaskCancel(args: any, caller?: McpCallerContext) {
     const auth = this.requireCaller(caller);
     this.requireScope(auth, 'tasks:submit');
+    const task = this.gateway.taskStore.getTask(args.taskId);
+    if (task?.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project')) {
+      this.requireScope(auth, ScopeChecker.getRequiredScopeForCapability(task.capability));
+      if (['claimed', 'acknowledged', 'running'].includes(task.status)) {
+        if (args.targetDeviceId !== task.targetDeviceId || !args.attemptId || args.attemptId !== task.activeAttemptId || !task.lease?.claimedSessionId) {
+          throw new Error('EXECUTION_CANCEL_FENCE_REQUIRED: Supply exact targetDeviceId and active attemptId.');
+        }
+        const sessions = this.gateway.connectionManager?.getConnectedAgents?.({ healthyOnly: true }) || [];
+        const live = sessions.filter(agent => agent.deviceId === task.targetDeviceId && agent.sessionId === task.lease.claimedSessionId &&
+          agent.supportsExecutionCancellation === true && isSessionHealthy(agent));
+        if (live.length !== 1) throw new Error('EXECUTION_CANCEL_UNAVAILABLE: Current session does not support confirmed cancellation.');
+        this.gateway.taskStore.requestExecutionCancellation(task.taskId, task.targetDeviceId, task.lease.claimedSessionId, task.activeAttemptId);
+        return { taskId: task.taskId, status: task.status, cancelRequested: true, cancelConfirmed: false };
+      }
+    }
     const success = this.gateway.taskStore.cancelTask(args.taskId, args.reason || 'Cancelled by MCP caller');
     if (!success) throw new Error(`TASK_CANCEL_FAILED: Task '${args.taskId}' could not be cancelled`);
     return { taskId: args.taskId, status: 'cancelled' };

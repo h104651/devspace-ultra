@@ -296,6 +296,8 @@ export class TaskStore {
     const taskId = options.taskId || `task-${crypto.randomBytes(8).toString('hex')}`;
     const requiredScope = options.requiredScope || ScopeChecker.getRequiredScopeForCapability(options.capability);
 
+    const metadata = options.metadata ? { ...options.metadata } : undefined;
+    if (metadata) delete metadata.executionCancellation;
     const task: DurableTask<TPayload> = {
       taskId,
       taskKey: options.taskKey,
@@ -319,7 +321,7 @@ export class TaskStore {
       targetDeviceId: options.targetDeviceId ? options.targetDeviceId.trim() : undefined,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      metadata: options.metadata
+      metadata
     };
 
     this.tasks.set(taskId, task);
@@ -789,6 +791,52 @@ export class TaskStore {
 
   public failTaskTerminal(taskId: string, error: { code: string; message: string; details?: any }): boolean {
     return this.failTask(taskId, error, { retryable: false });
+  }
+
+  private isExecutionTask(task: DurableTask): boolean {
+    return task.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project');
+  }
+
+  public requestExecutionCancellation(taskId: string, deviceId: string, sessionId: string, attemptId: string) {
+    const task = this.tasks.get(taskId);
+    if (!task || !this.isExecutionTask(task) || !attemptId || !this.ownsLocalAttempt(taskId, deviceId, sessionId, attemptId, true)) {
+      throw new Error('EXECUTION_CANCEL_NOT_ACTIVE: Exact live execution attempt required.');
+    }
+    const previous = task.metadata?.executionCancellation;
+    if (previous) {
+      if (previous.sessionId !== sessionId || previous.attemptId !== attemptId || previous.confirmedAt) {
+        throw new Error('EXECUTION_CANCEL_CONFLICT: Existing request is not current.');
+      }
+      return previous.requestId as string;
+    }
+    const requestId = crypto.randomUUID();
+    task.metadata = { ...task.metadata, executionCancellation: { requestId, sessionId, attemptId, requestedAt: Date.now() } };
+    this.saveTask(task);
+    return requestId;
+  }
+
+  public getPendingExecutionCancellation(taskId: string, deviceId: string, sessionId: string, attemptId: string) {
+    const task = this.tasks.get(taskId);
+    const request = task?.metadata?.executionCancellation;
+    if (!task || !this.isExecutionTask(task) || !request || request.confirmedAt ||
+        request.sessionId !== sessionId || request.attemptId !== attemptId ||
+        !this.ownsLocalAttempt(taskId, deviceId, sessionId, attemptId, true)) return undefined;
+    return { taskId, attemptId, requestId: request.requestId as string };
+  }
+
+  public confirmExecutionCancellation(taskId: string, deviceId: string, sessionId: string, attemptId: string, requestId: string): boolean {
+    const pending = this.getPendingExecutionCancellation(taskId, deviceId, sessionId, attemptId);
+    if (!pending || !requestId || pending.requestId !== requestId) return false;
+    const task = this.tasks.get(taskId)!;
+    const error = { code: 'TASK_CANCELLED', message: 'Agent confirmed native process-tree cancellation.' };
+    task.metadata!.executionCancellation.confirmedAt = Date.now();
+    this.finishActiveAttempt(task, 'cancelled', error);
+    task.status = 'cancelled';
+    task.error = error;
+    task.completedAt = Date.now();
+    task.lease = undefined;
+    this.saveTask(task);
+    return true;
   }
 
   public cancelTask(taskId: string, reason = 'User requested cancellation'): boolean {
