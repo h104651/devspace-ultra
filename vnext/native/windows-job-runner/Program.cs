@@ -145,7 +145,9 @@ internal static class Program
                 string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
                 string tool = Path.GetDirectoryName(plan.Executable)!;
                 var block = string.Join('\0', new[] {
-                    "APPDATA=" + plan.Cwd, "LOCALAPPDATA=" + plan.Cwd, "PATH=" + tool + ";" + Environment.SystemDirectory,
+                    "APPDATA=" + plan.Cwd, "GIT_CONFIG_GLOBAL=NUL", "GIT_CONFIG_NOSYSTEM=1",
+                    "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0",
+                    "LOCALAPPDATA=" + plan.Cwd, "PATH=" + tool + ";" + Environment.SystemDirectory,
                     "SystemRoot=" + windows, "TEMP=" + plan.Cwd, "TMP=" + plan.Cwd,
                     "USERPROFILE=" + plan.Cwd, "WINDIR=" + windows
                 }) + "\0\0";

@@ -589,6 +589,16 @@ class TaskExecutor {
                 const runnerId = task.payload.runnerId || task.payload.runner || 'npm';
                 const cmdConfig = this.resolveTestCommand(project, runnerId);
                 const targetCwd = this.resolveRunnerCwd(project, task.payload.workingRelativePath, cmdConfig);
+                if (runnerId === 'git_log' || runnerId === 'git_diff_commits') {
+                    if (process.platform !== 'win32' || !this.windowsAppContainerSid || !this.windowsJobRunnerPath) {
+                        throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Git history profiles require offline Windows isolation.');
+                    }
+                    const gitDir = path.join(targetCwd, '.git');
+                    const stat = fs.lstatSync(gitDir);
+                    if (!stat.isDirectory() || stat.isSymbolicLink() || path.relative(gitDir, fs.realpathSync(gitDir)) !== '') {
+                        throw new Error('LOCAL_GIT_REPOSITORY_DENIED: Direct staged .git directory required.');
+                    }
+                }
                 onLog(`[EXECUTOR] Running tests in project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via runner '${runnerId}': [locally configured command]`);
                 return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog, cmdConfig.timeoutMs, signal);
             }

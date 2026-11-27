@@ -23,13 +23,15 @@ const PROFILES = {
   python_pytest: { tool: 'python', group: 'test', args: ['-I', '-m', 'pytest'], timeoutMs: 1800000 },
   python_version: { tool: 'python', group: 'test', args: ['--version'], timeoutMs: 10000 },
   java_version: { tool: 'java', group: 'test', args: ['-version'], timeoutMs: 10000 },
-  adb_version: { tool: 'adb', group: 'test', args: ['version'], timeoutMs: 10000 }
+  adb_version: { tool: 'adb', group: 'test', args: ['version'], timeoutMs: 10000 },
+  git_log: { tool: 'git', group: 'test', args: [], timeoutMs: 30000 },
+  git_diff_commits: { tool: 'git', group: 'test', args: [], timeoutMs: 30000 }
 } as const;
 
 const NAMES: Record<string, RegExp> = {
   flutter: /^flutter\.bat$/i, dart: /^dart\.(bat|exe)$/i, gradle: /^gradlew\.bat$/i,
   npm: /^npm\.cmd$/i, node: /^node\.exe$/i, python: /^python(?:3)?\.exe$/i,
-  java: /^java\.exe$/i, adb: /^adb\.exe$/i
+  java: /^java\.exe$/i, adb: /^adb\.exe$/i, git: /^git\.exe$/i
 };
 
 function object(value: unknown): value is Record<string, any> {
@@ -61,13 +63,44 @@ function checkedTool(tool: string, value: unknown): string {
   return value;
 }
 
+// Git query inputs are operator-selected immutable object IDs, not arbitrary
+// revision expressions, options, pathspecs, remotes or shell fragments.
+export function buildGitReadArgs(id: 'git_log' | 'git_diff_commits', selection: unknown): string[] {
+  if (!object(selection)) throw new Error('Explicit Git commit selection required');
+  onlyKeys(selection, id === 'git_log' ? ['head', 'limit'] : ['base', 'head']);
+  const oid = (value: unknown): string => {
+    if (typeof value !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value) || /^0+$/.test(value)) {
+      throw new Error('Full lowercase Git object ID required');
+    }
+    return value;
+  };
+  const head = oid(selection.head);
+  // Explicit .git path prevents discovery in parent directories. No working
+  // tree content, external diff/textconv, notes, signatures or replace refs.
+  // Network is denied by AppContainer, not solely these Git options.
+  const common = ['--no-pager', '--no-replace-objects', '--literal-pathspecs',
+    '--git-dir=.git', '--work-tree=.', '-c', 'protocol.allow=never',
+    '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0'];
+  if (id === 'git_log') {
+    const limit = selection.limit ?? 30;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Git log limit must be 1-100');
+    return [...common, 'log', '--no-notes', '--no-show-signature', '--no-decorate',
+      '--no-color', '--no-patch', '--format=%H%x09%P%x09%ct%x09%s', '--max-count=' + limit, head, '--'];
+  }
+  if (id !== 'git_diff_commits') throw new Error('Unknown Git read operation');
+  const base = oid(selection.base);
+  if (base.length !== head.length) throw new Error('Git object ID lengths must match');
+  return [...common, 'diff-tree', '-r', '--no-commit-id', '--patch', '--no-ext-diff',
+    '--no-textconv', '--no-renames', '--no-color', '--ignore-submodules=all', base, head, '--'];
+}
+
 export function planOfflineRunners(input: unknown): {
   commands: LocalProjectCommands;
   selections: Array<{ id: string; group: 'test' | 'build'; dependencyMutation: boolean }>;
   activationAuthorized: false;
 } {
   if (!object(input)) throw new Error('Planner input must be an object');
-  onlyKeys(input, ['tools', 'profiles', 'workingRelativePath', 'allowDependencyMutation']);
+  onlyKeys(input, ['tools', 'profiles', 'workingRelativePath', 'allowDependencyMutation', 'gitSelections']);
   if (!object(input.tools) || !Array.isArray(input.profiles) || input.profiles.length === 0 ||
       input.profiles.length > Object.keys(PROFILES).length) throw new Error('Explicit tools and profiles required');
   onlyKeys(input.tools, Object.keys(NAMES));
@@ -78,6 +111,11 @@ export function planOfflineRunners(input: unknown): {
   const commands: LocalProjectCommands = { test: {}, build: {} };
   const selections: Array<{ id: string; group: 'test' | 'build'; dependencyMutation: boolean }> = [];
   const selected = new Set<string>();
+  if (input.gitSelections !== undefined) {
+    if (!object(input.gitSelections)) throw new Error('Git selections must be an object');
+    onlyKeys(input.gitSelections, ['git_log', 'git_diff_commits']);
+    if (Object.keys(input.gitSelections).some(id => !input.profiles.includes(id))) throw new Error('Unselected Git profile input');
+  }
   for (const id of input.profiles) {
     if (typeof id !== 'string' || !own(PROFILES,id) || selected.has(id)) throw new Error('Unknown or duplicate fixed profile');
     selected.add(id);
@@ -87,7 +125,8 @@ export function planOfflineRunners(input: unknown): {
     if (!own(input.tools,spec.tool)) throw new Error('Missing explicit tool path for ' + spec.tool);
     const command: ConfiguredCommand = {
       executable: checkedTool(spec.tool,input.tools[spec.tool]),
-      args: [...spec.args], workingRelativePath: workdir, timeoutMs: spec.timeoutMs
+      args: id === 'git_log' || id === 'git_diff_commits' ? buildGitReadArgs(id, input.gitSelections?.[id]) : [...spec.args],
+      workingRelativePath: workdir, timeoutMs: spec.timeoutMs
     };
     commands[spec.group][id] = command;
     selections.push({ id, group: spec.group, dependencyMutation: mutation });
