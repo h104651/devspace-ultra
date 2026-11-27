@@ -1,3 +1,4 @@
+import { collectGitBranchSnapshot } from '../../scripts/git-branch-snapshot';
 import { withDurableGitFence } from '../../scripts/git-mutation-fence';
 import { GitBranchAdapter, runGitBranchMutation } from '../../scripts/execute-git-branch-mutations';
 import { parseGitBranchIntent, checkGitBranchPreflight } from '../../scripts/plan-git-branch-mutations';
@@ -210,18 +211,26 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
             approvedTargets:['feat/fixture','fix/uncertain','fix/race'], emptyHooksDirectory:hooks,
             async snapshot(intent) {
               assert.ok(held);
-              const currentBranch = git(['symbolic-ref','--short','HEAD']).trim();
-              const refs = git(['for-each-ref','--format=%(refname) %(objectname)','refs/heads/' + intent.branch]).trim().split('\n');
-              const match = refs.find(ref => ref.startsWith('refs/heads/' + intent.branch + ' '));
-              return { currentBranch, head:git(['rev-parse','HEAD']).trim(),
-                clean:git(['status','--porcelain','--untracked-files=all','--ignored=matching']).trim() === '',
-                operationInProgress:false, targetHead:match ? match.split(' ')[1] : null, targetCheckedOutElsewhere:false };
+              return collectGitBranchSnapshot(dir,intent,async args=>git(args));
             },
             async run(args) { assert.ok(held); runs++; if (raceBeforeRun) git(['branch','fix/race']); git(args); if (failAfterRun) throw new Error('SIMULATED_UNCERTAIN_EXIT'); },
             async finish(disposition) { assert.ok(held); held = false; quarantined = disposition === 'quarantine'; }
           };
         }
       };
+      // Snapshot reader rejects unsafe config before executing a status query.
+      git(['config','filter.fixture.clean','dsu-fixture-must-not-launch']);
+      let queries = 0;
+      await assert.rejects(()=>collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>{queries++;return git(args);}),/CONFIG_POLICY_DENIED/);
+      assert.strictEqual(queries,1);
+      git(['config','--remove-section','filter.fixture']);
+      fs.writeFileSync(path.join(dir,'.git','MERGE_HEAD'),head+'\n');
+      const merging = await collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>git(args));
+      assert.strictEqual(merging.operationInProgress,true);
+      fs.unlinkSync(path.join(dir,'.git','MERGE_HEAD'));
+      fs.mkdirSync(path.join(dir,'.git','worktrees'));
+      await assert.rejects(()=>collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>git(args)),/REPOSITORY_DENIED/);
+      fs.rmdirSync(path.join(dir,'.git','worktrees'));
       const result = await runGitBranchMutation(create, adapter);
       assert.strictEqual(result.head,head);
       assert.strictEqual(git(['symbolic-ref','--short','HEAD']).trim(),'main');
