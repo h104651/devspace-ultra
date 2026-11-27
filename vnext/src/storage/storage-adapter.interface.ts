@@ -7,7 +7,16 @@ import { AuditEvent } from '../types/audit';
 export type TaskInventorySource = Pick<DurableTask, 'taskId' | 'backend' | 'capability' | 'status' |
   'targetDeviceId' | 'lease' | 'attempts' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt'>;
 
+export interface DeviceAdmissionState {
+  deviceId: string;
+  closed: boolean;
+  revision: string;
+  updatedAt: number;
+}
+
 export interface IStorageAdapter {
+  getDeviceAdmissionSync?(deviceId: string): DeviceAdmissionState | undefined;
+  saveDeviceAdmissionSync?(state: DeviceAdmissionState): void;
   // Tasks
   getTask(taskId: string): Promise<DurableTask | undefined>;
   getTaskSync?(taskId: string): DurableTask | undefined;

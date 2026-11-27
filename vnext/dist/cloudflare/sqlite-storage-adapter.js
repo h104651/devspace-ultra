@@ -62,6 +62,9 @@ class CloudflareSqliteStorageAdapter {
         objectCount INTEGER NOT NULL, classAOperations INTEGER NOT NULL,
         classBOperations INTEGER NOT NULL, updatedAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS device_admission (
+        deviceId TEXT PRIMARY KEY, closed INTEGER NOT NULL CHECK(closed IN (0, 1)), revision TEXT NOT NULL, updatedAt INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS kill_switch_state (
         id TEXT PRIMARY KEY, stateJson TEXT NOT NULL, updatedAt INTEGER NOT NULL
       );
@@ -117,6 +120,17 @@ class CloudflareSqliteStorageAdapter {
         catch {
             return undefined;
         }
+    }
+    getDeviceAdmissionSync(deviceId) {
+        const row = this.sql.exec('SELECT deviceId, closed, revision, updatedAt FROM device_admission WHERE deviceId = ?', deviceId).toArray()[0];
+        if (!row)
+            return undefined;
+        if (row.closed !== 0 && row.closed !== 1)
+            throw new Error('Invalid durable admission state');
+        return { deviceId: row.deviceId, closed: row.closed === 1, revision: row.revision, updatedAt: row.updatedAt };
+    }
+    saveDeviceAdmissionSync(state) {
+        this.sql.exec('INSERT OR REPLACE INTO device_admission (deviceId, closed, revision, updatedAt) VALUES (?, ?, ?, ?)', state.deviceId, state.closed ? 1 : 0, state.revision, state.updatedAt);
     }
     getTaskSync(taskId) {
         const row = this.getFirstRow('SELECT * FROM tasks WHERE taskId = ?', taskId);

@@ -47,6 +47,8 @@ const TASK_LOG_RETENTION_MARKER = `[LOG_RETENTION] Older task logs truncated; re
 const TASK_LOG_LINE_TRUNCATION_MARKER = ' …[LOG_LINE_TRUNCATED]';
 class TaskStore {
     tasksDir;
+    admissionDir;
+    memoryAdmissions = new Map();
     tasks = new Map();
     defaultLeaseDurationMs;
     storageAdapter;
@@ -59,10 +61,12 @@ class TaskStore {
         this.storageAdapter = storageAdapter;
         if (storageDir && storageDir !== ':memory:') {
             this.tasksDir = path.join(storageDir, 'tasks');
+            this.admissionDir = path.join(storageDir, 'device-admission');
             try {
                 if (!fs.existsSync(this.tasksDir)) {
                     fs.mkdirSync(this.tasksDir, { recursive: true });
                 }
+                fs.mkdirSync(this.admissionDir, { recursive: true });
                 this.loadAll();
             }
             catch {
@@ -318,7 +322,113 @@ class TaskStore {
             attempt.errorMessage = error.message;
         task.activeAttemptId = undefined;
     }
+    /** A persistent admission fence, not proof that a host process has stopped. */
+    getDeviceAdmission(deviceId) {
+        if (this.localPersistenceFailed)
+            throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked.');
+        if (!deviceId || typeof deviceId !== 'string')
+            throw new Error('INVALID_ARGUMENT: Device ID required.');
+        try {
+            let state;
+            if (this.storageAdapter) {
+                if (!this.storageAdapter.getDeviceAdmissionSync || !this.storageAdapter.saveDeviceAdmissionSync) {
+                    throw new Error('Device admission persistence unavailable');
+                }
+                state = this.storageAdapter.getDeviceAdmissionSync(deviceId);
+            }
+            else if (this.admissionDir) {
+                // Absence of the directory is a storage failure, not an open device.
+                if (!fs.statSync(this.admissionDir).isDirectory())
+                    throw new Error('Admission directory unavailable');
+                const file = path.join(this.admissionDir, crypto.createHash('sha256').update(deviceId).digest('hex') + '.json');
+                try {
+                    state = JSON.parse(fs.readFileSync(file, 'utf8'));
+                }
+                catch (err) {
+                    if (err.code !== 'ENOENT')
+                        throw err;
+                }
+            }
+            else {
+                state = this.memoryAdmissions.get(deviceId);
+            }
+            if (!state)
+                return { deviceId, closed: false, revision: 'initial', updatedAt: 0 };
+            if (state.deviceId !== deviceId || typeof state.closed !== 'boolean' ||
+                !/^[a-f0-9-]{36}$/.test(state.revision) || !Number.isSafeInteger(state.updatedAt) || state.updatedAt <= 0) {
+                throw new Error('Invalid admission state');
+            }
+            return { ...state };
+        }
+        catch {
+            this.blockLocalDispatch();
+            throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Device admission state could not be confirmed.');
+        }
+    }
+    setDeviceAdmission(deviceId, closed, expectedRevision) {
+        const current = this.getDeviceAdmission(deviceId);
+        if (expectedRevision !== current.revision)
+            throw new Error('DEVICE_ADMISSION_REVISION_CONFLICT: Read current state and retry explicitly.');
+        if (current.closed === closed)
+            return current;
+        if (!closed) {
+            const inventory = this.taskInventory({ backend: 'local', targetDeviceId: deviceId, status: 'active', limit: 1 });
+            if (inventory.total || inventory.summary.staleLocalCount || inventory.summary.quarantinedLocalCount) {
+                throw new Error('DEVICE_RESUME_BLOCKED: Reconcile active, stale and quarantined work first.');
+            }
+        }
+        const state = { deviceId, closed, revision: crypto.randomUUID(), updatedAt: Date.now() };
+        try {
+            if (this.storageAdapter) {
+                this.storageAdapter.saveDeviceAdmissionSync(state);
+            }
+            else if (this.admissionDir) {
+                const file = path.join(this.admissionDir, crypto.createHash('sha256').update(deviceId).digest('hex') + '.json');
+                const tmp = file + '.' + crypto.randomUUID() + '.tmp';
+                try {
+                    const fd = fs.openSync(tmp, 'wx', 0o600);
+                    try {
+                        fs.writeFileSync(fd, JSON.stringify(state), 'utf8');
+                        fs.fsyncSync(fd);
+                    }
+                    finally {
+                        fs.closeSync(fd);
+                    }
+                    fs.renameSync(tmp, file);
+                    if (process.platform !== 'win32') {
+                        const dir = fs.openSync(this.admissionDir, 'r');
+                        try {
+                            fs.fsyncSync(dir);
+                        }
+                        finally {
+                            fs.closeSync(dir);
+                        }
+                    }
+                }
+                finally {
+                    try {
+                        fs.unlinkSync(tmp);
+                    }
+                    catch { }
+                }
+            }
+            else {
+                this.memoryAdmissions.set(deviceId, state);
+            }
+            const persisted = this.getDeviceAdmission(deviceId);
+            if (persisted.revision !== state.revision || persisted.closed !== closed)
+                throw new Error('Admission write unconfirmed');
+            return persisted;
+        }
+        catch {
+            this.blockLocalDispatch();
+            throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Device admission transition unconfirmed; dispatch blocked.');
+        }
+    }
     createTask(options) {
+        if (options.backend === 'local' && options.targetDeviceId && this.getDeviceAdmission(options.targetDeviceId.trim()).closed) {
+            throw new Error('DEVICE_ADMISSION_CLOSED: Device is draining; no new local task accepted.');
+        }
         const taskId = options.taskId || `task-${crypto.randomBytes(8).toString('hex')}`;
         const requiredScope = options.requiredScope || scope_checker_1.ScopeChecker.getRequiredScopeForCapability(options.capability);
         const metadata = options.metadata ? { ...options.metadata } : undefined;
@@ -440,6 +550,8 @@ class TaskStore {
     claimTask(deviceId, supportedCapabilities, leaseDurationMs, sessionId, supportsAttemptFencing = true, executionPolicyRevision) {
         if (this.localPersistenceFailed)
             throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked until reconciliation.');
+        if (this.getDeviceAdmission(deviceId).closed)
+            return undefined;
         this.recoverStaleTasks();
         // Queued execution may never inherit a later session or more permissive policy.
         for (const task of this.tasks.values()) {
@@ -472,6 +584,8 @@ class TaskStore {
         if (!task || task.status !== 'queued')
             return undefined;
         if (!this.executionAdmissionMatches(task, sessionId, executionPolicyRevision))
+            return undefined;
+        if (task.backend === 'local' && this.getDeviceAdmission(deviceId).closed)
             return undefined;
         if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId))
             return undefined;
@@ -542,6 +656,8 @@ class TaskStore {
         if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
             return { assigned: 0, taskIds: [] };
         }
+        if (this.getDeviceAdmission(targetDeviceId).closed)
+            throw new Error('DEVICE_ADMISSION_CLOSED: Cannot assign quarantined work to a draining device.');
         const targetSet = new Set(taskIds);
         const now = Date.now();
         for (const task of this.tasks.values()) {

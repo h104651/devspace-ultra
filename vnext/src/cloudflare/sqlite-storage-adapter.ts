@@ -1,4 +1,4 @@
-import { IStorageAdapter, TaskInventorySource } from '../storage/storage-adapter.interface';
+import { IStorageAdapter, TaskInventorySource, DeviceAdmissionState } from '../storage/storage-adapter.interface';
 import { DurableTask, TaskStatus } from '../types/task';
 import { ClientRecord, DeviceRecord } from '../types/auth';
 import { ArtifactMetadata } from '../types/artifacts';
@@ -68,6 +68,9 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
         objectCount INTEGER NOT NULL, classAOperations INTEGER NOT NULL,
         classBOperations INTEGER NOT NULL, updatedAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS device_admission (
+        deviceId TEXT PRIMARY KEY, closed INTEGER NOT NULL CHECK(closed IN (0, 1)), revision TEXT NOT NULL, updatedAt INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS kill_switch_state (
         id TEXT PRIMARY KEY, stateJson TEXT NOT NULL, updatedAt INTEGER NOT NULL
       );
@@ -94,6 +97,18 @@ export class CloudflareSqliteStorageAdapter implements IStorageAdapter, IR2Usage
       try { return cursor.one(); } catch { return undefined; }
     }
     try { return Array.from(cursor)[0]; } catch { return undefined; }
+  }
+
+  getDeviceAdmissionSync(deviceId: string): DeviceAdmissionState | undefined {
+    const row = this.sql.exec('SELECT deviceId, closed, revision, updatedAt FROM device_admission WHERE deviceId = ?', deviceId).toArray()[0];
+    if (!row) return undefined;
+    if (row.closed !== 0 && row.closed !== 1) throw new Error('Invalid durable admission state');
+    return { deviceId: row.deviceId, closed: row.closed === 1, revision: row.revision, updatedAt: row.updatedAt };
+  }
+
+  saveDeviceAdmissionSync(state: DeviceAdmissionState): void {
+    this.sql.exec('INSERT OR REPLACE INTO device_admission (deviceId, closed, revision, updatedAt) VALUES (?, ?, ?, ?)',
+      state.deviceId, state.closed ? 1 : 0, state.revision, state.updatedAt);
   }
 
   getTaskSync(taskId: string): DurableTask | undefined {

@@ -4,6 +4,7 @@ import { TaskStore } from '../../src/storage/task-store';
 
 class DurableTaskSqlMock implements SqlStorage {
   private taskRows = new Map<string, Record<string, any>>();
+  private admissionRows = new Map<string, Record<string, any>>();
   public alters: string[] = [];
 
   exec(query: string, ...params: any[]): { toArray(): any[]; one(): any; raw(): any } {
@@ -18,6 +19,16 @@ class DurableTaskSqlMock implements SqlStorage {
 
     if (upper.startsWith('CREATE TABLE') || upper.startsWith('CREATE INDEX')) {
       return empty;
+    }
+
+    if (upper.startsWith('INSERT OR REPLACE INTO DEVICE_ADMISSION')) {
+      const [deviceId, closed, revision, updatedAt] = params;
+      this.admissionRows.set(deviceId, { deviceId, closed, revision, updatedAt });
+      return empty;
+    }
+    if (upper.startsWith('SELECT DEVICEID, CLOSED, REVISION, UPDATEDAT FROM DEVICE_ADMISSION')) {
+      const row = this.admissionRows.get(params[0]);
+      return { toArray: () => row ? [row] : [], one: () => row, raw: () => row };
     }
 
     if (upper.startsWith('INSERT OR REPLACE INTO TASKS')) {
@@ -120,6 +131,19 @@ export async function runTaskDurablePersistenceTests(): Promise<{ passed: number
     assert.strictEqual(restarted.failTasksForSupersededSession('cancel-fixture', 'cancel-session'), 1);
     assert.strictEqual(restarted.confirmExecutionCancellation(execution.taskId, 'cancel-fixture', 'cancel-session', attempt, requestId), false);
     assert.strictEqual((await storage.getTask(execution.taskId))?.status, 'stale');
+    passed++;
+
+    const before = store.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'drain-device', payload: {} });
+    const fence = store.setDeviceAdmission('drain-device', true, 'initial');
+    const afterRestart = new TaskStore(undefined, 60000, storage);
+    afterRestart.hydrate(await storage.listActiveTasks());
+    assert.deepStrictEqual(afterRestart.getDeviceAdmission('drain-device'), fence);
+    assert.strictEqual(afterRestart.claimTaskById(before.taskId, 'drain-device'), undefined);
+    assert.strictEqual(afterRestart.claimTask('drain-device', ['local:read_file']), undefined);
+    assert.throws(() => afterRestart.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'drain-device', payload: {} }), /DEVICE_ADMISSION_CLOSED/);
+    assert.throws(() => afterRestart.setDeviceAdmission('drain-device', false, 'initial'), /REVISION_CONFLICT/);
+    assert.throws(() => afterRestart.setDeviceAdmission('drain-device', false, fence.revision), /DEVICE_RESUME_BLOCKED/);
+    assert.strictEqual(afterRestart.getDeviceAdmission('unrelated-device').closed, false);
     passed++;
 
     assert.ok(sql.alters.some(sqlText => /ALTER TABLE tasks ADD COLUMN attemptsJson/i.test(sqlText)), 'Existing Durable Object DBs need an additive attemptsJson migration');
