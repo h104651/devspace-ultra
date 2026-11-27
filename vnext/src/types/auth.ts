@@ -4,6 +4,7 @@ export type StandardScope =
   | 'tasks:submit'
   | 'tasks:read'
   | 'tasks:inventory'
+  | 'devices:maintenance'
   | 'artifacts:read'
   | 'kaggle:submit'
   | 'kaggle:read'

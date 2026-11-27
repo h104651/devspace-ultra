@@ -14,6 +14,30 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
   try {
     const store = new TaskStore(testDir, 1000); // 1 sec default lease for fast testing
 
+    // Real file-backed admission state is retained on gateway restart.
+    const fenceDir = testDir + '/fence-fixture';
+    const fenced = new TaskStore(fenceDir);
+    const queued = fenced.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'paused', payload: {} });
+    const closure = fenced.setDeviceAdmission('paused', true, 'initial');
+    const reloaded = new TaskStore(fenceDir);
+    assert.deepStrictEqual(reloaded.getDeviceAdmission('paused'), closure);
+    assert.strictEqual(reloaded.claimTask('paused', ['local:read_file']), undefined);
+    assert.strictEqual(reloaded.claimTaskById(queued.taskId, 'paused'), undefined);
+    assert.throws(() => reloaded.setDeviceAdmission('paused', false, closure.revision), /DEVICE_RESUME_BLOCKED/);
+    assert.ok(reloaded.cancelTask(queued.taskId, 'fixture cleanup'));
+    const open = reloaded.setDeviceAdmission('paused', false, closure.revision);
+    assert.strictEqual(open.closed, false);
+    assert.deepStrictEqual(new TaskStore(fenceDir).getDeviceAdmission('paused'), open);
+    assert.throws(() => reloaded.setDeviceAdmission('paused', true, closure.revision), /REVISION_CONFLICT/);
+    const unrelated = reloaded.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'other', payload: {} });
+    assert.ok(reloaded.claimTaskById(unrelated.taskId, 'other'));
+    const stateDir = fenceDir + '/device-admission';
+    const stateFile = fs.readdirSync(stateDir).find(name => name.endsWith('.json'))!;
+    fs.writeFileSync(stateDir + '/' + stateFile, 'null');
+    assert.throws(() => reloaded.getDeviceAdmission('paused'), /LOCAL_TASK_PERSISTENCE_UNAVAILABLE/);
+    assert.throws(() => reloaded.claimTask('other', ['local:read_file']), /LOCAL_TASK_PERSISTENCE_UNAVAILABLE/);
+    passed++;
+
     // Test 1: Task creation
     const task = store.createTask({
       backend: 'local',

@@ -76,6 +76,25 @@ export async function runDeviceStatusLiveCapabilitiesUnitTests(): Promise<{ pass
     mockConnectedAgents = [];
     passed++;
 
+    // Admission changes require a separate scope even for inventory readers.
+    const maintainer = { ...maintenanceCaller, scopes: [...maintenanceCaller.scopes, 'devices:maintenance'] };
+    await assert.rejects(() => handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: 'initial' }, maintenanceCaller, true), /AUTH_FORBIDDEN/);
+    const closed = await handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: 'initial' }, maintainer, true);
+    assert.strictEqual(closed.admissionClosed, true);
+    assert.strictEqual(closed.maintenanceAuthorized, false);
+    const observedClosed = await handlers.handleDeviceMaintenanceCheck({ targetDeviceId: deviceId }, maintenanceCaller);
+    assert.strictEqual(observedClosed.admissionRevision, closed.admissionRevision);
+    assert.strictEqual(observedClosed.admissionClosed, true);
+    await assert.rejects(() => handlers.handleRemoteTaskSubmit({ backend: 'local', capability: 'local:git_status', targetDeviceId: deviceId, payload: {} }, callerAdmin), /DEVICE_ADMISSION_CLOSED/);
+    await assert.rejects(() => handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: closed.admissionRevision }, maintainer, false), /DEVICE_RESUME_BLOCKED/);
+    mockConnectedAgents = [{ deviceId, sessionId: 'maintenance-fixture', connectedAt: Date.now() }];
+    const reopened = await handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: closed.admissionRevision }, maintainer, false);
+    assert.strictEqual(reopened.admissionClosed, false);
+    assert.notStrictEqual(reopened.admissionRevision, closed.admissionRevision);
+    await assert.rejects(() => handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: closed.admissionRevision }, maintainer, true), /REVISION_CONFLICT/);
+    mockConnectedAgents = [];
+    passed++;
+
     const offlineStatus = await handlers.handleDeviceStatus(callerAdmin);
     assert.strictEqual(offlineStatus.totalOnline, 0);
     assert.strictEqual(offlineStatus.totalConnections, 0);

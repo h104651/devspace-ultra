@@ -1806,6 +1806,8 @@ export class GatewayDurableObject {
             case 'chat_swarm_runtime_status': result = await this.mcpHandlers.handleChatSwarmRuntimeStatus(caller); break;
             case 'device_status': result = await this.mcpHandlers.handleDeviceStatus(args, caller); break;
             case 'device_maintenance_check': result = await this.mcpHandlers.handleDeviceMaintenanceCheck(args, caller); break;
+            case 'device_drain': result = await this.mcpHandlers.handleDeviceAdmissionChange(args, caller, true); break;
+            case 'device_resume': result = await this.mcpHandlers.handleDeviceAdmissionChange(args, caller, false); break;
             case 'kill_switch_trigger': result = await this.mcpHandlers.handleKillSwitchTrigger(args, caller); break;
             default:
               return Response.json(

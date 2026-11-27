@@ -1159,6 +1159,41 @@ class McpHandlers {
             }))
         };
     }
+    async handleDeviceAdmissionChange(args, caller, closed) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:read');
+        this.requireScope(auth, 'tasks:read');
+        this.requireScope(auth, 'tasks:inventory');
+        this.requireScope(auth, 'devices:maintenance');
+        if (!args || typeof args !== 'object' || Array.isArray(args) ||
+            Object.keys(args).some(key => !['targetDeviceId', 'expectedRevision'].includes(key)) ||
+            typeof args.targetDeviceId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(args.targetDeviceId) ||
+            typeof args.expectedRevision !== 'string' || !/^(initial|[a-f0-9-]{36})$/.test(args.expectedRevision)) {
+            throw new Error('INVALID_ARGUMENT: Exact device ID and expected admission revision required.');
+        }
+        const deviceId = args.targetDeviceId;
+        const registered = this.gateway.authManager.getDevice(deviceId);
+        if (!registered)
+            throw new Error('DEVICE_NOT_FOUND: Target device is not registered.');
+        if (!closed) {
+            const sessions = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+            const target = sessions.filter(agent => agent.deviceId === deviceId);
+            if (registered.status === 'revoked' || this.gateway.killSwitch?.isDeviceRevoked?.(deviceId) ||
+                target.length !== 1 || !target[0].sessionId || !(0, connection_health_policy_1.isSessionHealthy)(target[0])) {
+                throw new Error('DEVICE_RESUME_BLOCKED: Exactly one healthy, non-revoked target session is required.');
+            }
+        }
+        // No await between the final admission check and the durable transition.
+        const state = this.gateway.taskStore.setDeviceAdmission(deviceId, closed, args.expectedRevision);
+        this.gateway.auditLogger.log({
+            actor: auth.subjectId, actorType: 'client', action: closed ? 'DEVICE_DRAIN' : 'DEVICE_RESUME',
+            resource: deviceId, scopeUsed: 'devices:maintenance', result: 'SUCCESS',
+            details: { revision: state.revision, closed: state.closed }
+        });
+        return { ok: true, targetDeviceId: deviceId, admissionClosed: state.closed,
+            admissionRevision: state.revision, updatedAt: state.updatedAt, maintenanceAuthorized: false,
+            note: 'Gateway admission changed only. No local process, service, token or project permission was changed.' };
+    }
     async handleDeviceMaintenanceCheck(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'local:read');
@@ -1173,6 +1208,7 @@ class McpHandlers {
         const registered = this.gateway.authManager.getDevice(deviceId);
         if (!registered)
             throw new Error('DEVICE_NOT_FOUND: Target device is not registered.');
+        const admission = this.gateway.taskStore.getDeviceAdmission(deviceId);
         const inventory = this.gateway.taskStore.taskInventory({ backend: 'local', targetDeviceId: deviceId, status: 'active', limit: 20 });
         const now = Date.now();
         if (typeof this.gateway.connectionManager?.getConnectedAgents !== 'function') {
@@ -1204,8 +1240,8 @@ class McpHandlers {
             snapshotRevision: inventory.snapshotRevision, snapshotComplete: inventory.snapshotComplete,
             tasks: inventory.tasks, hasMore: inventory.hasMore,
             observation: blockers.length === 0 ? 'IDLE_OBSERVED' : 'BLOCKED',
-            blockers, admissionClosed: false, maintenanceAuthorized: false,
-            note: 'Point-in-time observation only; no admission lock, process drain proof or shutdown authorization.'
+            blockers, admissionClosed: admission.closed, admissionRevision: admission.revision, maintenanceAuthorized: false,
+            note: 'Gateway admission state and point-in-time task observation; no local process drain proof or shutdown authorization.'
         };
     }
     async handleDeviceStatus(args, caller) {

@@ -645,6 +645,15 @@ const LOCAL_CREATE_ANNOTATIONS = {
     idempotentHint: true,
     openWorldHint: false
 };
+const DEVICE_ADMISSION_CHANGE_SCHEMA = {
+    type: 'object',
+    properties: {
+        targetDeviceId: { type: 'string', description: 'Exact registered device ID' },
+        expectedRevision: { type: 'string', description: 'Admission revision from device_maintenance_check' }
+    },
+    required: ['targetDeviceId', 'expectedRevision'],
+    additionalProperties: false
+};
 const DEVICE_MAINTENANCE_CHECK_SCHEMA = {
     type: 'object',
     properties: { targetDeviceId: { type: 'string', description: 'Exact registered device ID' } },
@@ -669,6 +678,8 @@ function getCanonicalToolsList() {
         { name: 'remote_task_status', description: 'Query durable task status', inputSchema: exports.REMOTE_TASK_STATUS_SCHEMA },
         { name: 'task_inventory', description: 'Read active tasks and local stale records; revision-checked pagination, minimal metadata, requires explicit tasks:inventory scope', inputSchema: TASK_INVENTORY_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
         { name: 'device_maintenance_check', description: 'Observe target device tasks and session health; requires local:read and tasks:inventory; never authorizes maintenance', inputSchema: DEVICE_MAINTENANCE_CHECK_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+        { name: 'device_drain', description: 'Persistently close one device admission to new local work; requires explicit devices:maintenance scope and current revision; does not stop processes', inputSchema: DEVICE_ADMISSION_CHANGE_SCHEMA, annotations: LOCAL_WRITE_ANNOTATIONS },
+        { name: 'device_resume', description: 'Reopen one device admission after reviewed reconciliation; requires devices:maintenance scope, exact revision and healthy target', inputSchema: DEVICE_ADMISSION_CHANGE_SCHEMA, annotations: LOCAL_WRITE_ANNOTATIONS },
         { name: 'remote_task_logs', description: 'Fetch task execution logs', inputSchema: exports.REMOTE_TASK_LOGS_SCHEMA },
         { name: 'remote_task_artifacts', description: 'List task artifacts', inputSchema: exports.REMOTE_TASK_ARTIFACTS_SCHEMA },
         { name: 'remote_task_cancel', description: 'Cancel queued task or request confirmed active Build/Test cancellation; inspect status for terminal outcome', inputSchema: exports.REMOTE_TASK_CANCEL_SCHEMA },

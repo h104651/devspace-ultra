@@ -352,7 +352,7 @@ class TaskStore {
             else {
                 state = this.memoryAdmissions.get(deviceId);
             }
-            if (!state)
+            if (state === undefined)
                 return { deviceId, closed: false, revision: 'initial', updatedAt: 0 };
             if (state.deviceId !== deviceId || typeof state.closed !== 'boolean' ||
                 !/^[a-f0-9-]{36}$/.test(state.revision) || !Number.isSafeInteger(state.updatedAt) || state.updatedAt <= 0) {
