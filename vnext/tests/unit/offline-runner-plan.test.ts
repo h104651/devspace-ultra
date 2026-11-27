@@ -1,3 +1,4 @@
+import { GitBranchAdapter, runGitBranchMutation } from '../../scripts/execute-git-branch-mutations';
 import { parseGitBranchIntent, checkGitBranchPreflight } from '../../scripts/plan-git-branch-mutations';
 import * as assert from 'assert';
 import { planOfflineRunners, buildGitReadArgs } from '../../scripts/plan-offline-runners';
@@ -178,5 +179,73 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       passed++;
     } finally { fs.rmSync(dir,{recursive:true,force:true}); }
   } catch(err) { failed++; console.error('Git offline execution gate regression:',err); }
+  try {
+    // Real disposable Git fixture: tests the exact candidate argument vectors.
+    // This is not a production AppContainer adapter or a durable lease test.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-git-branch-'));
+    const hooks = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-empty-hooks-'));
+    try {
+      const env = { ...process.env, GIT_CONFIG_NOSYSTEM:'1', GIT_CONFIG_GLOBAL:os.devNull,
+        GIT_OPTIONAL_LOCKS:'0', GIT_NO_LAZY_FETCH:'1', GIT_TERMINAL_PROMPT:'0' };
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('GIT_') && !['GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_OPTIONAL_LOCKS','GIT_NO_LAZY_FETCH','GIT_TERMINAL_PROMPT'].includes(key)) delete env[key];
+      }
+      const git = (args: readonly string[]) => execFileSync('git', [...args], { cwd:dir, env, encoding:'utf8', timeout:10000, maxBuffer:262144 });
+      git(['init','-q','-b','main','--object-format=sha1']);
+      git(['config','user.name','Synthetic Fixture']);
+      git(['config','user.email','fixture@example.invalid']);
+      git(['config','commit.gpgsign','false']);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'one\n');
+      git(['add','fixture.txt']); git(['commit','-qm','first fixture']);
+      const head = git(['rev-parse','HEAD']).trim();
+      const create = { projectId:'fixture', operation:'git_branch_create', expectedBranch:'main', expectedHead:head, branch:'feat/fixture' };
+      let held = false, quarantined = false, failAfterRun = false, runs = 0;
+      const adapter: GitBranchAdapter = {
+        async acquire(projectId) {
+          assert.strictEqual(projectId,'fixture');
+          if (held || quarantined) throw new Error('LEASE_BLOCKED');
+          held = true;
+          return {
+            approvedTargets:['feat/fixture','fix/uncertain'], emptyHooksDirectory:hooks,
+            async snapshot(intent) {
+              assert.ok(held);
+              const currentBranch = git(['symbolic-ref','--short','HEAD']).trim();
+              const refs = git(['for-each-ref','--format=%(refname) %(objectname)','refs/heads/' + intent.branch]).trim().split('\n');
+              const match = refs.find(ref => ref.startsWith('refs/heads/' + intent.branch + ' '));
+              return { currentBranch, head:git(['rev-parse','HEAD']).trim(),
+                clean:git(['status','--porcelain','--untracked-files=all','--ignored=matching']).trim() === '',
+                operationInProgress:false, targetHead:match ? match.split(' ')[1] : null, targetCheckedOutElsewhere:false };
+            },
+            async run(args) { assert.ok(held); runs++; git(args); if (failAfterRun) throw new Error('SIMULATED_UNCERTAIN_EXIT'); },
+            async finish(disposition) { assert.ok(held); held = false; quarantined = disposition === 'quarantine'; }
+          };
+        }
+      };
+      const result = await runGitBranchMutation(create, adapter);
+      assert.strictEqual(result.head,head);
+      assert.strictEqual(git(['symbolic-ref','--short','HEAD']).trim(),'main');
+      assert.strictEqual(git(['rev-parse','refs/heads/feat/fixture']).trim(),head);
+      assert.strictEqual(held,false);
+      await assert.rejects(()=>runGitBranchMutation(create,adapter),/TARGET_CONFLICT/);
+      assert.strictEqual(runs,1);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'dirty\n');
+      const change = { ...create, operation:'git_switch', expectedTargetHead:head };
+      await assert.rejects(()=>runGitBranchMutation(change,adapter),/STATE_CONFLICT/);
+      assert.strictEqual(runs,1);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'one\n');
+      await runGitBranchMutation(change,adapter);
+      assert.strictEqual(git(['symbolic-ref','--short','HEAD']).trim(),'feat/fixture');
+      assert.strictEqual(runs,2);
+      assert.strictEqual(quarantined,false);
+      failAfterRun = true;
+      const uncertain = { ...create, expectedBranch:'feat/fixture', branch:'fix/uncertain' };
+      await assert.rejects(()=>runGitBranchMutation(uncertain,adapter),/SIMULATED_UNCERTAIN_EXIT/);
+      assert.strictEqual(quarantined,true);
+      assert.strictEqual(git(['rev-parse','refs/heads/fix/uncertain']).trim(),head);
+      await assert.rejects(()=>runGitBranchMutation(uncertain,adapter),/LEASE_BLOCKED/);
+      assert.strictEqual(runs,3);
+      passed++;
+    } finally { fs.rmSync(dir,{recursive:true,force:true}); fs.rmSync(hooks,{recursive:true,force:true}); }
+  } catch(err) { failed++; console.error('Git branch mutation fixture regression:',err); }
   return {passed,failed};
 }
