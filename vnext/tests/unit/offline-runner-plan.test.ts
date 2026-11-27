@@ -199,14 +199,14 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       git(['add','fixture.txt']); git(['commit','-qm','first fixture']);
       const head = git(['rev-parse','HEAD']).trim();
       const create = { projectId:'fixture', operation:'git_branch_create', expectedBranch:'main', expectedHead:head, branch:'feat/fixture' };
-      let held = false, quarantined = false, failAfterRun = false, runs = 0;
+      let held = false, quarantined = false, failAfterRun = false, raceBeforeRun = false, runs = 0;
       const adapter: GitBranchAdapter = {
         async acquire(projectId) {
           assert.strictEqual(projectId,'fixture');
           if (held || quarantined) throw new Error('LEASE_BLOCKED');
           held = true;
           return {
-            approvedTargets:['feat/fixture','fix/uncertain'], emptyHooksDirectory:hooks,
+            approvedTargets:['feat/fixture','fix/uncertain','fix/race'], emptyHooksDirectory:hooks,
             async snapshot(intent) {
               assert.ok(held);
               const currentBranch = git(['symbolic-ref','--short','HEAD']).trim();
@@ -216,7 +216,7 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
                 clean:git(['status','--porcelain','--untracked-files=all','--ignored=matching']).trim() === '',
                 operationInProgress:false, targetHead:match ? match.split(' ')[1] : null, targetCheckedOutElsewhere:false };
             },
-            async run(args) { assert.ok(held); runs++; git(args); if (failAfterRun) throw new Error('SIMULATED_UNCERTAIN_EXIT'); },
+            async run(args) { assert.ok(held); runs++; if (raceBeforeRun) git(['branch','fix/race']); git(args); if (failAfterRun) throw new Error('SIMULATED_UNCERTAIN_EXIT'); },
             async finish(disposition) { assert.ok(held); held = false; quarantined = disposition === 'quarantine'; }
           };
         }
@@ -228,22 +228,39 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       assert.strictEqual(held,false);
       await assert.rejects(()=>runGitBranchMutation(create,adapter),/TARGET_CONFLICT/);
       assert.strictEqual(runs,1);
+      // Advance target in a synthetic fixture to prove checkout of a distinct
+      // commit and actual file contents, not just a symbolic branch change.
+      git(['switch','feat/fixture']);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'two\n');
+      git(['add','fixture.txt']); git(['commit','-qm','target fixture']);
+      const targetHead = git(['rev-parse','HEAD']).trim();
+      assert.notStrictEqual(targetHead,head);
+      git(['switch','main']);
       fs.writeFileSync(path.join(dir,'fixture.txt'),'dirty\n');
-      const change = { ...create, operation:'git_switch', expectedTargetHead:head };
+      const change = { ...create, operation:'git_switch', expectedTargetHead:targetHead };
       await assert.rejects(()=>runGitBranchMutation(change,adapter),/STATE_CONFLICT/);
       assert.strictEqual(runs,1);
       fs.writeFileSync(path.join(dir,'fixture.txt'),'one\n');
       await runGitBranchMutation(change,adapter);
       assert.strictEqual(git(['symbolic-ref','--short','HEAD']).trim(),'feat/fixture');
       assert.strictEqual(runs,2);
+      assert.strictEqual(git(['rev-parse','HEAD']).trim(),targetHead);
+      assert.strictEqual(fs.readFileSync(path.join(dir,'fixture.txt'),'utf8'),'two\n');
       assert.strictEqual(quarantined,false);
       failAfterRun = true;
-      const uncertain = { ...create, expectedBranch:'feat/fixture', branch:'fix/uncertain' };
+      const uncertain = { ...create, expectedBranch:'feat/fixture', expectedHead:targetHead, branch:'fix/uncertain' };
       await assert.rejects(()=>runGitBranchMutation(uncertain,adapter),/SIMULATED_UNCERTAIN_EXIT/);
       assert.strictEqual(quarantined,true);
-      assert.strictEqual(git(['rev-parse','refs/heads/fix/uncertain']).trim(),head);
+      assert.strictEqual(git(['rev-parse','refs/heads/fix/uncertain']).trim(),targetHead);
       await assert.rejects(()=>runGitBranchMutation(uncertain,adapter),/LEASE_BLOCKED/);
       assert.strictEqual(runs,3);
+      // Explicit fixture-only reconciliation, never an automatic runtime retry.
+      quarantined = false; failAfterRun = false; raceBeforeRun = true;
+      const race = { ...uncertain, branch:'fix/race' };
+      await assert.rejects(()=>runGitBranchMutation(race,adapter));
+      assert.strictEqual(quarantined,true);
+      assert.strictEqual(git(['rev-parse','refs/heads/fix/race']).trim(),targetHead);
+      assert.strictEqual(runs,4);
       passed++;
     } finally { fs.rmSync(dir,{recursive:true,force:true}); fs.rmSync(hooks,{recursive:true,force:true}); }
   } catch(err) { failed++; console.error('Git branch mutation fixture regression:',err); }
