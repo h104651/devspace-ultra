@@ -1,3 +1,4 @@
+import { withDurableGitFence } from '../../scripts/git-mutation-fence';
 import { GitBranchAdapter, runGitBranchMutation } from '../../scripts/execute-git-branch-mutations';
 import { parseGitBranchIntent, checkGitBranchPreflight } from '../../scripts/plan-git-branch-mutations';
 import * as assert from 'assert';
@@ -264,5 +265,50 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       passed++;
     } finally { fs.rmSync(dir,{recursive:true,force:true}); fs.rmSync(hooks,{recursive:true,force:true}); }
   } catch(err) { failed++; console.error('Git branch mutation fixture regression:',err); }
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-git-fence-'));
+    try {
+      let finishFails = false, acquires = 0;
+      const inner: GitBranchAdapter = {
+        async acquire() {
+          acquires++;
+          return {
+            approvedTargets: [], emptyHooksDirectory: dir,
+            async snapshot() { throw new Error('unused'); },
+            async run() { throw new Error('unused'); },
+            async finish() { if (finishFails) throw new Error('INNER_FINISH_FAILED'); }
+          };
+        }
+      };
+      const a = withDurableGitFence(dir,inner);
+      const b = withDurableGitFence(dir,inner);
+      const lease = await a.acquire('first');
+      await assert.rejects(()=>b.acquire('alias'),/FENCE_HELD/);
+      assert.strictEqual(acquires,1);
+      await lease.finish('release');
+      await assert.rejects(()=>lease.finish('release'),/LEASE_CLOSED/);
+      const next = await b.acquire('alias');
+      await next.finish('quarantine');
+      await assert.rejects(()=>withDurableGitFence(dir,inner).acquire('first'),/FENCE_HELD/);
+      const lock = path.join(dir,'git-mutation.lock');
+      assert.ok(fs.existsSync(lock));
+      fs.unlinkSync(lock); // fixture-only manual reconciliation
+      finishFails = true;
+      const bad = await a.acquire('first');
+      await assert.rejects(()=>bad.finish('release'),/INNER_FINISH_FAILED/);
+      await assert.rejects(()=>b.acquire('alias'),/FENCE_HELD/);
+      fs.unlinkSync(lock);
+      finishFails = false;
+      const owner = await a.acquire('first');
+      fs.writeFileSync(lock,'different owner');
+      await assert.rejects(()=>owner.finish('release'),/OWNER_UNCERTAIN/);
+      assert.strictEqual(fs.readFileSync(lock,'utf8'),'different owner');
+      fs.unlinkSync(lock);
+      const broken = withDurableGitFence(dir,{async acquire(){throw new Error('INNER_ACQUIRE_FAILED');}});
+      await assert.rejects(()=>broken.acquire('first'),/INNER_ACQUIRE_FAILED/);
+      await assert.rejects(()=>a.acquire('first'),/FENCE_HELD/);
+      passed++;
+    } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+  } catch(err) { failed++; console.error('Git durable fence fixture regression:',err); }
   return {passed,failed};
 }
