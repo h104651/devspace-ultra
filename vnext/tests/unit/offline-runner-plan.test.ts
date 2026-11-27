@@ -1,3 +1,4 @@
+import { executeGitNetworkIntent, GitNetworkBroker } from '../../scripts/execute-git-network';
 import { authorizeGitNetworkIntent, parseGitNetworkIntent, validateGitNetworkEndpoint } from '../../scripts/plan-git-network';
 import { createNativeStagedGitAdapter } from '../../scripts/native-staged-git-adapter';
 import { parseGitIndexIntent, runGitIndexMutation } from '../../scripts/execute-git-index-mutations';
@@ -397,5 +398,83 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
     assert.throws(()=>authorizeGitNetworkIntent({...request,operation:'git_pull_ff'},policy,{...state,clean:false}),/NOT_FAST_FORWARD/);
     passed++;
   } catch(err) {failed++;console.error('Git network policy regression:',err);}
+  try {
+    // Real disposable bare remote; this fixture models the server CAS using
+    // update-ref rather than granting network or force-push permissions.
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-git-network-'));
+    try {
+      const local=path.join(dir,'local'), remote=path.join(dir,'remote.git'), source=path.join(dir,'source');
+      fs.mkdirSync(local);fs.mkdirSync(remote);fs.mkdirSync(source);
+      const env={...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:os.devNull,GIT_OPTIONAL_LOCKS:'0',GIT_NO_LAZY_FETCH:'1',GIT_TERMINAL_PROMPT:'0'};
+      for(const key of Object.keys(env)) if(key.startsWith('GIT_')&&!['GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_OPTIONAL_LOCKS','GIT_NO_LAZY_FETCH','GIT_TERMINAL_PROMPT'].includes(key)) delete env[key];
+      const git=(cwd:string,args:readonly string[])=>execFileSync('git',[...args],{cwd,env,encoding:'utf8',timeout:10000,maxBuffer:262144});
+      const branch='feat/network', ref='refs/heads/'+branch;
+      const init=(cwd:string)=>{git(cwd,['init','-q','-b',branch,'--object-format=sha1']);git(cwd,['config','user.name','Fixture']);git(cwd,['config','user.email','fixture@example.invalid']);git(cwd,['config','commit.gpgsign','false']);};
+      init(source);git(remote,['init','--bare','-q','--object-format=sha1']);
+      fs.writeFileSync(path.join(source,'fixture.txt'),'one\n');git(source,['add','fixture.txt']);git(source,['commit','-qm','one']);
+      const a=git(source,['rev-parse','HEAD']).trim();
+      git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
+      init(local);git(local,['-c','protocol.file.allow=always','fetch','--no-tags',remote,ref]);
+      git(local,['reset','--hard','FETCH_HEAD']); // fixture setup only, not broker operation
+      fs.writeFileSync(path.join(source,'fixture.txt'),'two\n');git(source,['add','fixture.txt']);git(source,['commit','-qm','two']);
+      const b=git(source,['rev-parse','HEAD']).trim();
+      git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
+      const endpoint='https://example.invalid/team/repo.git';
+      const policy={projectId:'fixture',remotes:[{id:'origin',url:endpoint,approvedBranches:[branch],operations:['git_fetch','git_pull_ff','git_push'] as const}]};
+      let held=false, quarantined=false, calls=0, race=false;
+      const ancestor=(cwd:string,old:string,next:string)=>{
+        try {git(cwd,['merge-base','--is-ancestor',old,next]);return true;}catch{return false;}
+      };
+      const broker:GitNetworkBroker={async acquire(id){
+        assert.equal(id,'fixture');
+        if(held||quarantined) throw new Error('NETWORK_FENCE_HELD');
+        held=true;
+        return {policy,
+          async observe(intent,url,target){assert.equal(url,endpoint);assert.equal(target,ref);
+            const localHead=git(local,['rev-parse','HEAD']).trim(), remoteHead=git(remote,['rev-parse',ref]).trim();
+            return {currentBranch:git(local,['symbolic-ref','--short','HEAD']).trim(),localHead,remoteHead,
+              clean:git(local,['status','--porcelain']).trim()==='',operationInProgress:false,
+              localIsAncestorOfRemote:ancestor(local,localHead,remoteHead),remoteIsAncestorOfLocal:ancestor(local,remoteHead,localHead)};
+          },
+          async fetchPinned(url,target,expected){assert.equal(url,endpoint);assert.equal(target,ref);calls++;
+            git(local,['-c','protocol.file.allow=always','fetch','--no-tags','--no-recurse-submodules',remote,ref]);
+            assert.equal(git(local,['rev-parse','FETCH_HEAD']).trim(),expected);
+          },
+          async hasFetchedObject(head){try{git(local,['cat-file','-e',head+'^{commit}']);return true;}catch{return false;}},
+          async fastForward(old,next){assert.equal(git(local,['rev-parse','HEAD']).trim(),old);git(local,['merge','--ff-only',next]);},
+          async pushFastForwardCas(url,target,expected,next){
+            assert.equal(url,endpoint);assert.equal(target,ref);calls++;
+            // Transfer objects without moving destination branch, then perform
+            // the server-side exact ref CAS. No force-push in this fixture.
+            git(remote,['-c','protocol.file.allow=always','fetch','--no-tags',local,ref]);
+            assert.equal(git(remote,['rev-parse','FETCH_HEAD']).trim(),next);
+            assert.ok(ancestor(remote,expected,next));
+            if(race) git(remote,['update-ref',ref,next,expected]);
+            git(remote,['update-ref','--no-deref',ref,next,expected]);
+          },
+          async finish(disposition){assert.ok(held);held=false;quarantined=disposition==='quarantine';}
+        };
+      }};
+      const request={projectId:'fixture',operation:'git_fetch',remoteId:'origin',branch,expectedLocalHead:a,expectedRemoteHead:b};
+      await assert.rejects(()=>executeGitNetworkIntent({...request,remoteId:'unapproved'},broker),/POLICY_DENIED/);
+      assert.equal(calls,0);
+      await executeGitNetworkIntent(request,broker);
+      assert.equal(git(local,['rev-parse','HEAD']).trim(),a);
+      await executeGitNetworkIntent({...request,operation:'git_pull_ff'},broker);
+      assert.equal(git(local,['rev-parse','HEAD']).trim(),b);
+      assert.equal(fs.readFileSync(path.join(local,'fixture.txt'),'utf8'),'two\n');
+      fs.writeFileSync(path.join(local,'fixture.txt'),'three\n');git(local,['add','fixture.txt']);git(local,['commit','-qm','three']);
+      const c=git(local,['rev-parse','HEAD']).trim();
+      await executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:c,expectedRemoteHead:b},broker);
+      assert.equal(git(remote,['rev-parse',ref]).trim(),c);
+      fs.writeFileSync(path.join(local,'fixture.txt'),'four\n');git(local,['add','fixture.txt']);git(local,['commit','-qm','four']);
+      const d=git(local,['rev-parse','HEAD']).trim();
+      race=true;
+      await assert.rejects(()=>executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:d,expectedRemoteHead:c},broker));
+      assert.equal(quarantined,true);
+      await assert.rejects(()=>executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:d,expectedRemoteHead:c},broker),/FENCE_HELD/);
+      passed++;
+    } finally {fs.rmSync(dir,{recursive:true,force:true});}
+  } catch(err) {failed++;console.error('Git network broker fixture regression:',err);}
   return {passed,failed};
 }
