@@ -159,8 +159,8 @@ class McpHandlers {
             targetDeviceId: task.targetDeviceId,
             activeAttemptId: task.backend === 'local' ? task.activeAttemptId : undefined,
             cancellation: task.metadata?.executionCancellation ? {
-              requestedAt: task.metadata.executionCancellation.requestedAt,
-              confirmedAt: task.metadata.executionCancellation.confirmedAt
+                requestedAt: task.metadata.executionCancellation.requestedAt,
+                confirmedAt: task.metadata.executionCancellation.confirmedAt
             } : undefined,
             logsCount: task.logs.length
         };
