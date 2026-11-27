@@ -56,6 +56,8 @@ class ScopeChecker {
         if (capability.startsWith('local:')) {
             if (capability === 'local:raw_shell')
                 return 'raw_shell:run';
+            if (capability === 'local:git_read')
+                return 'local:git:read';
             if (capability === 'local:run_tests')
                 return 'local:execute:test';
             if (capability === 'local:build_project')

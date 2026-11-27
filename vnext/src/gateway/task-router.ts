@@ -8,6 +8,7 @@ import { ScopeChecker } from '../security/scope-checker';
 import { isLocalExecutableCapability, LOCAL_EXECUTABLE_CAPABILITIES } from '../local-agent/capabilities';
 import { CreateTaskOptions, DurableTask } from '../types/task';
 import { KaggleTaskPayload } from '../types/kaggle';
+import { parseGitReadTask } from '../local-agent/git-read-plan';
 
 export class TaskRouter {
   constructor(
@@ -46,6 +47,10 @@ export class TaskRouter {
     if (!killCheck.allowed) {
       this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { reason: killCheck.reason, capability: options.capability } });
       throw new Error(`KILL_SWITCH_ACTIVE: ${killCheck.reason}`);
+    }
+
+    if (options.capability === 'local:git_read' && options.backend !== 'local') {
+      throw new Error('INVALID_ARGUMENT: Git read requires local backend.');
     }
 
     const requiredScope = options.backend === 'local'
@@ -87,6 +92,15 @@ export class TaskRouter {
           details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
         });
         throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+      }
+
+      if (options.capability === 'local:git_read') {
+        if (typeof options.targetDeviceId !== 'string' || !/^[a-z0-9_.-]{3,64}$/.test(options.targetDeviceId) ||
+            typeof options.clientRequestId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(options.clientRequestId) ||
+            (options.idempotencyKey !== undefined && options.idempotencyKey !== options.clientRequestId)) {
+          throw new Error('INVALID_ARGUMENT: Explicit Git targetDeviceId and clientRequestId required.');
+        }
+        parseGitReadTask(options.payload);
       }
 
       // Multi-device targeted routing enforcement: only consider healthy, unrevoked connected sessions
@@ -191,7 +205,7 @@ export class TaskRouter {
 
     // Execution tasks must not become latent work on an ineligible or offline device.
     // Existing read-only bounded wait and legacy file-task routing remain unchanged.
-    if (options.backend === 'local' && (options.capability === 'local:run_tests' || options.capability === 'local:build_project')) {
+    if (options.backend === 'local' && (options.capability === 'local:run_tests' || options.capability === 'local:build_project' || options.capability === 'local:git_read')) {
       const agents = this.connectionManager?.getConnectedAgents?.({ healthyOnly: true }) || [];
       const eligible = agents.find((agent: any) => agent.deviceId === options.targetDeviceId && agent.capabilities?.includes(options.capability) &&
         typeof agent.sessionId === 'string' && !!agent.sessionId && /^[a-f0-9]{32}$/.test(agent.executionPolicyRevision || ''));

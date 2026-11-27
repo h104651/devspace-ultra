@@ -491,7 +491,7 @@ export class TaskStore {
   }
 
   private executionAdmissionMatches(task: DurableTask, sessionId?: string, policyRevision?: string): boolean {
-    if (task.backend !== 'local' || (task.capability !== 'local:run_tests' && task.capability !== 'local:build_project')) return true;
+    if (task.backend !== 'local' || (task.capability !== 'local:run_tests' && task.capability !== 'local:build_project' && task.capability !== 'local:git_read')) return true;
     const admission = task.metadata?.executionAdmission;
     return !!sessionId && !!policyRevision && admission?.sessionId === sessionId && admission?.policyRevision === policyRevision;
   }
@@ -930,7 +930,7 @@ export class TaskStore {
 
     // Generic cancellation has no agent acknowledgement or process-tree drain proof.
     // Queued execution can be cancelled; dispatched execution must remain auditable.
-    if (task.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project') &&
+    if (task.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project' || task.capability === 'local:git_read') &&
       (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running')) {
       return false;
     }

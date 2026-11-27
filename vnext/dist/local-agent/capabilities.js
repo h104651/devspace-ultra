@@ -18,6 +18,7 @@ exports.LOCAL_EXECUTABLE_CAPABILITIES = [
     'local:search_text',
     'local:find_repositories',
     'local:create_directory',
+    'local:git_read',
     'local:run_tests',
     'local:build_project',
     'local:raw_shell'
@@ -26,6 +27,7 @@ exports.SIDE_EFFECT_CAPABILITIES = [
     'local:write_file',
     'local:patch_file',
     'local:create_directory',
+    'local:git_read',
     'local:run_tests',
     'local:build_project',
     'local:raw_shell'

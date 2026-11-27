@@ -40,6 +40,12 @@ export async function runScopesUnitTests(): Promise<{ passed: number; failed: nu
     assert.strictEqual(ScopeChecker.hasScope(['local:execute:build'], 'local:execute:test'), false);
     assert.strictEqual(ScopeChecker.hasScope(['local:exec'], 'local:execute:test'), true);
     assert.strictEqual(ScopeChecker.hasScope(['local:exec'], 'local:execute:build'), true);
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:git_read'), 'local:git:read');
+    for (const scope of ['local:read', 'local:write', 'local:test', 'local:exec', 'local:execute:test', 'local:execute:build']) {
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:git:read'), false);
+    }
+    assert.strictEqual(ScopeChecker.hasScope(['local:git:read'], 'local:execute:test'), false);
+    assert.strictEqual(ScopeChecker.hasScope(['local:git:read'], 'local:write'), false);
     passed++;
   } catch (err: any) {
     console.error('Scopes test failed:', err);

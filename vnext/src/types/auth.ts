@@ -12,6 +12,7 @@ export type StandardScope =
   | 'local:write'
   | 'local:test'
   | 'local:exec'
+  | 'local:git:read'
   | 'local:execute:test'
   | 'local:execute:build'
   | 'browser:run'
