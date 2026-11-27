@@ -59,3 +59,22 @@ export function validateGitReadProfile(id: 'git_log' | 'git_diff_commits', args:
     throw new Error('LOCAL_GIT_PROFILE_DENIED: Reserved Git read profile requires canonical arguments.');
   }
 }
+
+// Both generic and dedicated MCP submission use this exact payload validator.
+export function parseGitReadTask(payload: unknown): { projectId: string; operation: 'git_log' | 'git_diff_commits'; args: string[] } {
+  if (!object(payload) || typeof payload.projectId !== 'string' || !/^[a-z0-9_.-]{1,128}$/.test(payload.projectId) ||
+      (payload.operation !== 'git_log' && payload.operation !== 'git_diff_commits')) {
+    throw new Error('INVALID_ARGUMENT: Explicit normalized projectId and supported Git operation required.');
+  }
+  const operation = payload.operation;
+  const allowed = operation === 'git_log' ? ['projectId', 'operation', 'head', 'limit'] : ['projectId', 'operation', 'base', 'head'];
+  if (Object.keys(payload).some(key => !allowed.includes(key))) {
+    throw new Error('INVALID_ARGUMENT: Unexpected Git read task field.');
+  }
+  try {
+    const selection = operation === 'git_log' ? { head: payload.head, limit: payload.limit } : { base: payload.base, head: payload.head };
+    return { projectId: payload.projectId, operation, args: buildGitReadArgs(operation, selection) };
+  } catch {
+    throw new Error('INVALID_ARGUMENT: Git read requires full object IDs and a bounded log count.');
+  }
+}

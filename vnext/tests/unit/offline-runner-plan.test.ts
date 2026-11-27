@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { TaskExecutor } from '../../src/local-agent/task-executor';
-import { validateGitReadProfile } from '../../src/local-agent/git-read-plan';
+import { validateGitReadProfile, parseGitReadTask } from '../../src/local-agent/git-read-plan';
 
 export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0, failed = 0;
@@ -71,6 +71,12 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       assert.ok(p.commands.test.git_diff_commits.args.includes('--no-ext-diff'));
       assert.ok(p.commands.test.git_diff_commits.args.includes('--no-textconv'));
       validateGitReadProfile('git_log',p.commands.test.git_log.args);
+      assert.deepStrictEqual(parseGitReadTask({projectId:'fixture',operation:'git_log',head,limit:2}).args,p.commands.test.git_log.args);
+      assert.deepStrictEqual(parseGitReadTask({projectId:'fixture',operation:'git_diff_commits',head,base}).args,p.commands.test.git_diff_commits.args);
+      for(const extra of [{args:['push']},{base},{workingRelativePath:'.'},{env:{}},{command:'git push'}])
+        assert.throws(()=>parseGitReadTask({projectId:'fixture',operation:'git_log',head,...extra}),/INVALID_ARGUMENT/);
+      assert.throws(()=>parseGitReadTask({projectId:'../other',operation:'git_log',head}),/INVALID_ARGUMENT/);
+      assert.throws(()=>parseGitReadTask({projectId:'fixture',operation:'git_log',head:'HEAD'}),/INVALID_ARGUMENT/);
       validateGitReadProfile('git_diff_commits',p.commands.test.git_diff_commits.args);
       for(const changed of [
         ['push','origin','main'],
@@ -143,6 +149,7 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
         permissions:{read:true,test:true,hostExecution:true},
         commands:{test:{git_log:{executable:process.execPath,args:['--version']}}}}]});
       await assert.rejects(()=>executor.executeTask({capability:'local:run_tests',payload:{projectId:'fixture',runnerId:'git_log'}} as any,()=>{}),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+      await assert.rejects(()=>executor.executeTask({capability:'local:git_read',payload:{projectId:'fixture',operation:'git_log',head:'a'.repeat(40)}} as any,()=>{}),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
       passed++;
     } finally { fs.rmSync(dir,{recursive:true,force:true}); }
   } catch(err) { failed++; console.error('Git offline execution gate regression:',err); }
