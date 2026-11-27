@@ -12,6 +12,8 @@ import { isSessionHealthy, parseReconnectIdentity, isSameReconnectIdentity, canR
 export interface ConnectedAgent {
   sessionId: string;
   supportsAttemptFencing?: boolean;
+  supportsExecutionCancellation?: boolean;
+  executionPolicyRevision?: string;
   reconnectProofHash?: string;
   reconnectSequence?: number;
   deviceId: string;
@@ -145,8 +147,12 @@ export class ConnectionManager {
         ? msg.capabilities
         : [...LOCAL_EXECUTABLE_CAPABILITIES];
 
+      const executionPolicyRevision = typeof msg.executionPolicyRevision === 'string' && /^[a-f0-9]{32}$/.test(msg.executionPolicyRevision)
+        ? msg.executionPolicyRevision : undefined;
       const authorizedCaps = requestedCaps.filter(cap => {
         if (!isLocalExecutableCapability(cap)) return false;
+        if (cap === 'local:git_read' && (!Array.isArray(msg.capabilities) || !msg.capabilities.includes(cap) || msg.supportsAttemptFencing !== true)) return false;
+        if ((cap === 'local:run_tests' || cap === 'local:build_project' || cap === 'local:git_read') && !executionPolicyRevision) return false;
         const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
         return ScopeChecker.hasScope(auth.payload!.scopes, requiredScope);
       });
@@ -187,6 +193,8 @@ export class ConnectionManager {
       const agent: ConnectedAgent = {
         sessionId,
         supportsAttemptFencing: msg.supportsAttemptFencing === true,
+        supportsExecutionCancellation: msg.supportsAttemptFencing === true && msg.supportsExecutionCancellation === true,
+        executionPolicyRevision,
         ...reconnectIdentity,
         deviceId: authoritativeDeviceId,
         name: msg.name || authoritativeDeviceId,
@@ -260,6 +268,7 @@ export class ConnectionManager {
     }
 
     if (msg.type === 'AGENT_HEARTBEAT') {
+      const cancellations: Array<{ taskId: string; attemptId: string; requestId: string }> = [];
       agent.lastHeartbeatAt = Date.now();
       this.authManager.updateDeviceHeartbeat(authenticatedDeviceId);
 
@@ -269,6 +278,10 @@ export class ConnectionManager {
           const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
           if (ownsAttempt(tid, attemptId)) {
             this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, sessionId);
+            if (agent.supportsExecutionCancellation && attemptId) {
+              const request = this.taskStore.getPendingExecutionCancellation(tid, authenticatedDeviceId, sessionId, attemptId);
+              if (request) cancellations.push(request);
+            }
           }
         }
       }
@@ -276,14 +289,23 @@ export class ConnectionManager {
       socket.send(JSON.stringify({
         type: 'AGENT_HEARTBEAT_ACK',
         messageId: msg.messageId,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        ...(cancellations.length ? { cancellations } : {})
       }));
       return;
     }
 
     if (msg.type === 'TASK_CLAIM_POLL') {
       // Use strictly the agent's authorized capabilities, ignoring unauthorized escalation
-      const task = this.taskStore.claimTask(authenticatedDeviceId, agent.capabilities, undefined, sessionId, supportsAttemptFencing);
+      // Execution capabilities must be both session-authorized and currently requested by the agent.
+      if (agent.executionPolicyRevision && msg.executionPolicyRevision !== agent.executionPolicyRevision) {
+        agent.executionPolicyRevision = undefined;
+      }
+      const claimCapabilities = agent.capabilities.filter(cap => {
+        if (cap !== 'local:run_tests' && cap !== 'local:build_project' && cap !== 'local:git_read') return true;
+        return !!agent.executionPolicyRevision && Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
+      });
+      const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, sessionId, supportsAttemptFencing, agent.executionPolicyRevision);
       if (task) {
         socket.send(JSON.stringify({
           type: 'TASK_ASSIGNED',
@@ -358,6 +380,13 @@ export class ConnectionManager {
         taskId: msg.taskId,
         result: 'SUCCESS'
       });
+      return;
+    }
+
+    if (msg.type === 'TASK_CANCEL_CONFIRMED') {
+      if (agent.supportsExecutionCancellation && ownsAttempt(msg.taskId, msg.attemptId)) {
+        this.taskStore.confirmExecutionCancellation(msg.taskId, authenticatedDeviceId, sessionId, msg.attemptId, msg.requestId);
+      }
       return;
     }
 

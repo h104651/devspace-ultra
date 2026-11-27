@@ -10,7 +10,9 @@ const SCOPE_HIERARCHY = {
     ],
     'tasks:submit': ['tasks:read'],
     'tasks:read': ['artifacts:read'],
-    'local:exec': ['local:test', 'local:read'],
+    'local:exec': ['local:test', 'local:read', 'local:execute:test', 'local:execute:build'],
+    'local:execute:test': ['local:read'],
+    'local:execute:build': ['local:read'],
     'local:write': ['local:read'],
     'local:test': ['local:read'],
     'kaggle:submit': ['kaggle:read'],
@@ -54,8 +56,16 @@ class ScopeChecker {
         if (capability.startsWith('local:')) {
             if (capability === 'local:raw_shell')
                 return 'raw_shell:run';
-            if (capability.includes('test') || capability.includes('build'))
-                return 'local:exec';
+            if (capability === 'local:git_read')
+                return 'local:git:read';
+            if (capability === 'local:git_write')
+                return 'local:git:write';
+            if (capability === 'local:git_network')
+                return 'local:git:network';
+            if (capability === 'local:run_tests')
+                return 'local:execute:test';
+            if (capability === 'local:build_project')
+                return 'local:execute:build';
             if (capability.includes('write') || capability.includes('patch') || capability.includes('create') || capability.includes('delete')) {
                 return 'local:write';
             }

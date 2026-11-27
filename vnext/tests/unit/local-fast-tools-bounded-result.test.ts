@@ -344,6 +344,51 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     assert.strictEqual(projectListRes.directResult, true);
     passed++;
 
+    // A superseded mutation is terminal stale, not pending or safely retryable.
+    const staleRequestId = 'req-stale-mutation';
+    const staleArgs = {
+      projectId: 'astor-tuneup', relativePath: 'fixture.txt', content: 'fixture',
+      targetDeviceId: deviceId, clientRequestId: staleRequestId, waitMs: 1000
+    };
+    const stalePending = handlers.handleLocalWriteFile(staleArgs, callerAdmin);
+    await new Promise(r => setTimeout(r, 50));
+    const staleClaim = taskStore.claimTask(deviceId, ['local:write_file'], undefined, 'old-session');
+    assert.ok(staleClaim, 'Mutation must be claimed before session supersession');
+    assert.strictEqual(taskStore.failTasksForSupersededSession(deviceId, 'old-session'), 1);
+    const staleResult = await stalePending;
+    assert.strictEqual(staleResult.taskId, staleClaim!.taskId);
+    assert.strictEqual(staleResult.status, 'stale');
+    assert.strictEqual(staleResult.directResult, true);
+    assert.notStrictEqual(staleResult.pending, true);
+    assert.strictEqual(staleResult.error.code, 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN');
+    assert.ok(staleResult.completedAt);
+    passed++;
+
+    const staleReplay = await handlers.handleLocalWriteFile(staleArgs, callerAdmin);
+    assert.strictEqual(staleReplay.taskId, staleResult.taskId);
+    assert.strictEqual(staleReplay.status, 'stale');
+    assert.strictEqual(staleReplay.directResult, true);
+    assert.notStrictEqual(staleReplay.pending, true);
+    passed++;
+
+    // Denied execution is rejected before creating a durable task.
+    await assert.rejects(
+      () => handlers.handleLocalRunTests({ projectId: 'astor-tuneup', targetDeviceId: deviceId }, callerAdmin),
+      /EXECUTION_TARGET_NOT_ELIGIBLE/
+    );
+    await assert.rejects(
+      () => handlers.handleRemoteTaskSubmit({ backend: 'local', capability: 'local:build_project', targetDeviceId: deviceId, payload: { projectId: 'astor-tuneup' } }, callerAdmin),
+      /EXECUTION_TARGET_NOT_ELIGIBLE/
+    );
+    mockConnectedAgents = [];
+    await assert.rejects(
+      () => handlers.handleLocalRunTests({ projectId: 'astor-tuneup', targetDeviceId: deviceId }, callerAdmin),
+      /EXECUTION_TARGET_NOT_ELIGIBLE/
+    );
+    passed++;
+
+    mockConnectedAgents = [{ deviceId, sessionId: 'fixture-session', executionPolicyRevision: 'a'.repeat(32), capabilities: [...liveCapabilities, 'local:run_tests', 'local:build_project'], status: 'online' }];
+
     // 8. Async tools remain asynchronous without bounded wait:
     // a. local_run_tests
     const runTestsRes = await handlers.handleLocalRunTests({ projectId: 'astor-tuneup' }, callerAdmin);
@@ -355,6 +400,46 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     const buildProjectRes = await handlers.handleLocalBuildProject({ projectId: 'astor-tuneup' }, callerAdmin);
     assert.strictEqual(buildProjectRes.status, 'queued');
     assert.strictEqual((buildProjectRes as any).directResult, undefined, 'local_build_project must remain async');
+    passed++;
+
+    // A new session cannot inherit an older queued execution. Idempotent replay
+    // returns the actual terminal task rather than submitting it again.
+    const old = await handlers.handleLocalRunTests({ projectId: 'astor-tuneup', clientRequestId: 'execution-old-policy' }, callerAdmin);
+    assert.strictEqual(old.task.metadata.executionAdmission.sessionId, 'fixture-session');
+    assert.strictEqual(taskStore.claimTask(deviceId, ['local:run_tests'], undefined, 'new-session', true, 'b'.repeat(32)), undefined);
+    assert.strictEqual(taskStore.getTask(old.taskId)?.error?.code, 'EXECUTION_ADMISSION_EXPIRED');
+    const replay = await handlers.handleLocalRunTests({ projectId: 'astor-tuneup', clientRequestId: 'execution-old-policy' }, callerAdmin);
+    assert.strictEqual(replay.taskId, old.taskId);
+    assert.strictEqual(replay.status, 'failed');
+    passed++;
+
+    // Separate Git API requires explicit routing, payload and scope, including
+    // generic submit bypass and task result retrieval. No production device used.
+    const gitCaller = { subjectId: 'fixture-git', scopes: ['tasks:submit', 'local:git:read'] };
+    const oldCaller = { subjectId: 'fixture-old', scopes: ['tasks:submit', 'local:exec', 'local:read'] };
+    const gitArgs = { projectId: 'astor-tuneup', operation: 'git_log', head: 'a'.repeat(40), targetDeviceId: deviceId, clientRequestId: 'git-read-fixture' };
+    await assert.rejects(() => handlers.handleLocalGitRead(gitArgs, oldCaller), /AUTH_FORBIDDEN/);
+    await assert.rejects(() => handlers.handleLocalGitRead({...gitArgs, targetDeviceId: undefined}, gitCaller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleLocalGitRead({...gitArgs, head: 'HEAD'}, gitCaller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleLocalGitRead({...gitArgs, args: ['push']}, gitCaller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleLocalGitRead(gitArgs, gitCaller), /EXECUTION_TARGET_NOT_ELIGIBLE/);
+    await assert.rejects(() => handlers.handleRemoteTaskSubmit({ backend:'local', capability:'local:git_read', targetDeviceId:deviceId, clientRequestId:'git-bypass', payload:{projectId:'astor-tuneup',operation:'git_log',head:'a'.repeat(40)} }, oldCaller), /AUTH_FORBIDDEN/);
+    for (const capability of ['local:git_write','local:git_network']) {
+      for (const backend of ['local','kaggle']) {
+        await assert.rejects(() => handlers.handleRemoteTaskSubmit({backend, capability, targetDeviceId:deviceId, clientRequestId:'held-'+backend+'-'+capability, payload:{projectId:'astor-tuneup'}},callerAdmin), /LOCAL_GIT_ACTIVATION_HELD/);
+      }
+    }
+    mockConnectedAgents[0].capabilities.push('local:git_read');
+    const git = await handlers.handleLocalGitRead(gitArgs, gitCaller);
+    assert.strictEqual(git.status, 'queued');
+    assert.strictEqual(git.task.requiredScope, 'local:git:read');
+    assert.strictEqual(git.task.metadata.executionAdmission.sessionId, 'fixture-session');
+    assert.strictEqual((await handlers.handleLocalGitRead(gitArgs, gitCaller)).taskId, git.taskId);
+    await assert.rejects(() => handlers.handleRemoteTaskStatus({taskId:git.taskId}, oldCaller), /AUTH_FORBIDDEN/);
+    await assert.rejects(() => handlers.handleRemoteTaskLogs({taskId:git.taskId}, oldCaller), /AUTH_FORBIDDEN/);
+    assert.strictEqual((await handlers.handleRemoteTaskStatus({taskId:git.taskId}, gitCaller)).status,'queued');
+    assert.strictEqual(taskStore.claimTask(deviceId,['local:git_read'],undefined,'new-session',true,'b'.repeat(32)),undefined);
+    assert.strictEqual(taskStore.getTask(git.taskId)?.error?.code,'EXECUTION_ADMISSION_EXPIRED');
     passed++;
 
     // c. remote_task_submit

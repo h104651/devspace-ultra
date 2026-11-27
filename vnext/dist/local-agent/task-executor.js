@@ -38,6 +38,7 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto = __importStar(require("crypto"));
 const child_process_1 = require("child_process");
+const git_read_plan_1 = require("./git-read-plan");
 const project_registry_1 = require("./project-registry");
 function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -45,9 +46,16 @@ function escapeRegExp(str) {
 class TaskExecutor {
     projectRegistry;
     allowRawShell;
+    hostExecutionBlocked;
+    windowsJobRunnerPath;
+    windowsAppContainerSid;
+    executionQuarantined = false;
     fileLocks = new Map();
     constructor(config) {
         this.allowRawShell = !!config.allowRawShell;
+        this.hostExecutionBlocked = config.hostExecutionBlocked === true;
+        this.windowsJobRunnerPath = config.windowsJobRunnerPath;
+        this.windowsAppContainerSid = config.windowsAppContainerSid;
         if (config.projectRegistry) {
             this.projectRegistry = config.projectRegistry;
         }
@@ -58,6 +66,9 @@ class TaskExecutor {
                 initialLegacyWorkspaces: config.allowedWorkspaces
             });
         }
+    }
+    isHostExecutionBlocked() {
+        return this.hostExecutionBlocked || this.executionQuarantined;
     }
     getRegistry() {
         return this.projectRegistry;
@@ -98,7 +109,7 @@ class TaskExecutor {
         }
         return { project: match.project, relativePath: match.relativePath, isLegacy: true };
     }
-    async executeTask(task, onLog) {
+    async executeTask(task, onLog, signal) {
         onLog(`[EXECUTOR] Starting capability: ${task.capability}`);
         switch (task.capability) {
             case 'local:list_projects': {
@@ -560,7 +571,25 @@ class TaskExecutor {
                     status: 'created'
                 };
             }
+            case 'local:git_read': {
+                if (this.isHostExecutionBlocked()) {
+                    throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Execution runtime is not authorized or is quarantined.');
+                }
+                const query = (0, git_read_plan_1.parseGitReadTask)(task.payload);
+                const { project } = this.resolveProjectForTask({ projectId: query.projectId });
+                if (!project.permissions.read || !project.permissions.test || !project.permissions.hostExecution) {
+                    throw new Error('LOCAL_PROJECT_PERMISSION_DENIED: Git read requires read and locally configured test execution permission.');
+                }
+                const cmdConfig = this.resolveTestCommand(project, query.operation);
+                const targetCwd = this.resolveRunnerCwd(project, cmdConfig.workingRelativePath, cmdConfig);
+                this.validateOfflineGitReadCommand(project, query.operation, cmdConfig, targetCwd);
+                onLog(`[EXECUTOR] Reading committed Git history in project '${project.projectId}' via '${query.operation}'`);
+                return this.executeProcessWithoutShell(cmdConfig.executable, query.args, targetCwd, undefined, onLog, cmdConfig.timeoutMs, signal, true);
+            }
             case 'local:run_tests': {
+                if (this.isHostExecutionBlocked()) {
+                    throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Execution runtime is not authorized or is quarantined.');
+                }
                 const { project } = this.resolveProjectForTask(task.payload);
                 if (!project.permissions.test || !project.permissions.hostExecution) {
                     const err = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Host process execution for tests is forbidden on project '${project.projectId}'. Set permissions.test = true and permissions.hostExecution = true to allow.`);
@@ -573,16 +602,19 @@ class TaskExecutor {
                     err.code = 'LOCAL_PROJECT_ARBITRARY_COMMAND_FORBIDDEN';
                     throw err;
                 }
-                const workingRel = task.payload.workingRelativePath;
-                const targetCwd = (workingRel && workingRel !== '.')
-                    ? project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, workingRel)
-                    : project.canonicalRoot;
                 const runnerId = task.payload.runnerId || task.payload.runner || 'npm';
                 const cmdConfig = this.resolveTestCommand(project, runnerId);
-                onLog(`[EXECUTOR] Running tests in project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via runner '${runnerId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
-                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog);
+                const targetCwd = this.resolveRunnerCwd(project, task.payload.workingRelativePath, cmdConfig);
+                if (runnerId === 'git_log' || runnerId === 'git_diff_commits') {
+                    this.validateOfflineGitReadCommand(project, runnerId, cmdConfig, targetCwd);
+                }
+                onLog(`[EXECUTOR] Running tests in project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via runner '${runnerId}': [locally configured command]`);
+                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog, cmdConfig.timeoutMs, signal);
             }
             case 'local:build_project': {
+                if (this.isHostExecutionBlocked()) {
+                    throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Execution runtime is not authorized or is quarantined.');
+                }
                 const { project } = this.resolveProjectForTask(task.payload);
                 if (!project.permissions.build || !project.permissions.hostExecution) {
                     const err = new Error(`LOCAL_PROJECT_PERMISSION_DENIED: Host process execution for build is forbidden on project '${project.projectId}'. Set permissions.build = true and permissions.hostExecution = true to allow.`);
@@ -595,16 +627,16 @@ class TaskExecutor {
                     err.code = 'LOCAL_PROJECT_ARBITRARY_COMMAND_FORBIDDEN';
                     throw err;
                 }
-                const workingRel = task.payload.workingRelativePath;
-                const targetCwd = (workingRel && workingRel !== '.')
-                    ? project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, workingRel)
-                    : project.canonicalRoot;
                 const commandId = task.payload.commandId || 'npm';
                 const cmdConfig = this.resolveBuildCommand(project, commandId);
-                onLog(`[EXECUTOR] Building project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via command '${commandId}': ${cmdConfig.executable} ${cmdConfig.args.join(' ')}`);
-                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog);
+                const targetCwd = this.resolveRunnerCwd(project, task.payload.workingRelativePath, cmdConfig);
+                onLog(`[EXECUTOR] Building project '${project.projectId}' (cwd: '${path.relative(project.canonicalRoot, targetCwd) || '.'}') via command '${commandId}': [locally configured command]`);
+                return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog, cmdConfig.timeoutMs, signal);
             }
             case 'local:raw_shell': {
+                if (this.windowsAppContainerSid !== undefined) {
+                    throw new Error('RAW_SHELL_DENIED: Offline execution identity cannot use raw shell.');
+                }
                 if (!this.allowRawShell) {
                     const err = new Error('RAW_SHELL_DENIED: Raw shell execution is disabled on this agent');
                     err.code = 'RAW_SHELL_DENIED';
@@ -624,87 +656,229 @@ class TaskExecutor {
                 throw new Error(`UNSUPPORTED_CAPABILITY: Agent cannot execute '${task.capability}'`);
         }
     }
+    validateOfflineGitReadCommand(project, runnerId, cmdConfig, targetCwd) {
+        if (process.platform !== 'win32' || !this.windowsAppContainerSid || !this.windowsJobRunnerPath) {
+            throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Git history profiles require offline Windows isolation.');
+        }
+        if (!project.permissions.read) {
+            throw new Error('LOCAL_PROJECT_PERMISSION_DENIED: Git history requires project read permission.');
+        }
+        if (path.basename(fs.realpathSync(cmdConfig.executable)).toLowerCase() !== 'git.exe' || Object.keys(cmdConfig.env || {}).length ||
+            !Number.isInteger(cmdConfig.timeoutMs) || cmdConfig.timeoutMs < 100 || cmdConfig.timeoutMs > 30000) {
+            throw new Error('LOCAL_GIT_PROFILE_DENIED: Expected fixed Git executable and bounded timeout without environment overrides.');
+        }
+        (0, git_read_plan_1.validateGitReadProfile)(runnerId, cmdConfig.args);
+        const gitDir = path.join(targetCwd, '.git');
+        const stat = fs.lstatSync(gitDir);
+        if (!stat.isDirectory() || stat.isSymbolicLink() || path.relative(gitDir, fs.realpathSync(gitDir)) !== '') {
+            throw new Error('LOCAL_GIT_REPOSITORY_DENIED: Direct staged .git directory required.');
+        }
+    }
+    resolveConfiguredCommand(project, kind, id) {
+        // Existing broad hostExecution permissions alone do not authorize a runner.
+        const group = project.commands?.[kind];
+        if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(id) ||
+            !group || !Object.prototype.hasOwnProperty.call(group, id)) {
+            throw new Error('LOCAL_RUNNER_NOT_ALLOWED: Explicit local project runner configuration required.');
+        }
+        const config = group[id];
+        if (!config || typeof config.executable !== 'string' || !path.isAbsolute(config.executable)) {
+            throw new Error('LOCAL_RUNNER_INVALID: Configure an absolute executable path.');
+        }
+        return config;
+    }
     resolveTestCommand(project, runnerId) {
-        // 1. Check custom configured project commands
-        if (project.commands?.test?.[runnerId]) {
-            return project.commands.test[runnerId];
-        }
-        // 2. Standard built-in runners
-        const isWindows = process.platform === 'win32';
-        switch (runnerId.toLowerCase()) {
-            case 'npm':
-            case 'npm_test':
-                return {
-                    executable: isWindows ? 'npm.cmd' : 'npm',
-                    args: ['test']
-                };
-            case 'pytest':
-                return {
-                    executable: isWindows ? 'pytest.exe' : 'pytest',
-                    args: []
-                };
-            case 'flutter':
-            case 'flutter_test':
-                return {
-                    executable: isWindows ? 'flutter.bat' : 'flutter',
-                    args: ['test']
-                };
-            default: {
-                const err = new Error(`LOCAL_RUNNER_NOT_FOUND: Unknown test runnerId '${runnerId}' for project '${project.projectId}'. Configure it in project.commands.test or use standard runners (npm, pytest, flutter).`);
-                err.code = 'LOCAL_RUNNER_NOT_FOUND';
-                throw err;
-            }
-        }
+        return this.resolveConfiguredCommand(project, 'test', runnerId);
     }
     resolveBuildCommand(project, commandId) {
-        // 1. Check custom configured project commands
-        if (project.commands?.build?.[commandId]) {
-            return project.commands.build[commandId];
+        return this.resolveConfiguredCommand(project, 'build', commandId);
+    }
+    resolveRunnerCwd(project, requested, config) {
+        const configured = config.workingRelativePath ?? '.';
+        const cwd = configured === '.' ? project.canonicalRoot : project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, configured);
+        const requestedPath = !requested || requested === '.' ? project.canonicalRoot : project_registry_1.ProjectPathSecurity.resolveDirectoryPath(project.canonicalRoot, requested);
+        if (cwd !== requestedPath) {
+            throw new Error('LOCAL_RUNNER_WORKDIR_DENIED: Requested directory differs from the locally configured runner directory.');
         }
-        // 2. Standard built-in build commands
-        const isWindows = process.platform === 'win32';
-        switch (commandId.toLowerCase()) {
-            case 'npm':
-            case 'npm_build':
-                return {
-                    executable: isWindows ? 'npm.cmd' : 'npm',
-                    args: ['run', 'build']
-                };
-            case 'flutter':
-            case 'flutter_apk':
-                return {
-                    executable: isWindows ? 'flutter.bat' : 'flutter',
-                    args: ['build', 'apk']
-                };
-            default: {
-                const err = new Error(`LOCAL_COMMAND_NOT_FOUND: Unknown build commandId '${commandId}' for project '${project.projectId}'. Configure it in project.commands.build or use standard commands (npm, flutter).`);
-                err.code = 'LOCAL_COMMAND_NOT_FOUND';
-                throw err;
+        return cwd;
+    }
+    /** Local staged Git adapter only; intentionally not routed by executeTask. */
+    async runStagedGitCandidate(executable, args, cwd, timeoutMs, signal) {
+        if (this.isHostExecutionBlocked() || process.platform !== 'win32' || !this.windowsJobRunnerPath ||
+            !/^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$/.test(this.windowsAppContainerSid || '')) {
+            throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Native staged Git identity required.');
+        }
+        if (!path.isAbsolute(executable) || !path.isAbsolute(cwd) ||
+            path.basename(fs.realpathSync(executable)).toLowerCase() !== 'git.exe' ||
+            !Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) {
+            throw new Error('LOCAL_GIT_PROFILE_DENIED: Fixed local Git executable, workspace and bounded timeout required.');
+        }
+        const result = await this.executeProcessWithoutShell(executable, [...args], cwd, undefined, () => { }, timeoutMs, signal, true);
+        if (result.outputTruncated)
+            throw new Error('LOCAL_GIT_OUTPUT_TRUNCATED: Complete Git output required.');
+        return result.stdout;
+    }
+    executeProcessWithoutShell(executable, args, cwd, extraEnv, onLog, timeoutMs = 1_800_000, signal, stdoutOnly = false) {
+        // Runner environment is intentionally distinct from the Agent environment.
+        // This does not provide an OS sandbox or prevent same-user filesystem access.
+        if (typeof executable !== 'string' || !executable.trim() || executable.includes('\0') ||
+            !Array.isArray(args) || args.some(arg => typeof arg !== 'string' || arg.includes('\0'))) {
+            throw new Error('LOCAL_RUNNER_INVALID: Invalid configured executable or arguments.');
+        }
+        const allowed = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'LANG', 'LC_ALL', 'CI', 'JAVA_HOME', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'FLUTTER_ROOT', 'PUB_CACHE', 'GRADLE_USER_HOME', 'VIRTUAL_ENV']);
+        const env = {};
+        for (const [key, value] of Object.entries(process.env)) {
+            if (allowed.has(key.toUpperCase()) && value !== undefined)
+                env[key] = value;
+        }
+        for (const [key, value] of Object.entries(extraEnv || {})) {
+            if (!allowed.has(key.toUpperCase()) || typeof value !== 'string' || value.includes('\0')) {
+                throw new Error('LOCAL_RUNNER_ENV_DENIED: Configured environment key or value is not permitted.');
+            }
+            for (const existing of Object.keys(env)) {
+                if (existing.toUpperCase() === key.toUpperCase())
+                    delete env[existing];
+            }
+            env[key] = value;
+        }
+        // Resolve only locally configured absolute paths. Never search the project cwd or PATH.
+        if (!path.isAbsolute(executable)) {
+            throw new Error('LOCAL_RUNNER_INVALID: Absolute executable path required.');
+        }
+        const resolvedExecutable = fs.realpathSync(executable);
+        if (!fs.statSync(resolvedExecutable).isFile()) {
+            throw new Error('LOCAL_RUNNER_INVALID: Executable is not a regular file.');
+        }
+        let launchExecutable = resolvedExecutable;
+        let launchArgs = args;
+        let verbatim = false;
+        if (process.platform === 'win32') {
+            if (!/^[A-Za-z]:[\\/]/.test(resolvedExecutable)) {
+                throw new Error('LOCAL_RUNNER_INVALID: Windows runner requires a local drive path.');
+            }
+            if (/\.(cmd|bat)$/i.test(resolvedExecutable)) {
+                // cmd /s /c strips the outer quotes. Restrict every token BEFORE quoting.
+                // No caller-controlled text enters this command string.
+                if (!/^[A-Za-z]:[\\/][A-Za-z0-9_ .()~\\/-]+$/.test(resolvedExecutable) ||
+                    args.some(arg => !/^[A-Za-z0-9_ .:\\/=-]+$/.test(arg))) {
+                    throw new Error('LOCAL_RUNNER_WRAPPER_ARGUMENT_DENIED: Unsupported Windows batch path or argument.');
+                }
+                const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT;
+                if (!systemRoot || !/^[A-Za-z]:[\\/]/.test(systemRoot)) {
+                    throw new Error('LOCAL_RUNNER_INVALID: Windows SystemRoot is unavailable.');
+                }
+                launchExecutable = path.join(systemRoot, 'System32', 'cmd.exe');
+                const quoted = [resolvedExecutable, ...args].map(token => '"' + token + '"').join(' ');
+                launchArgs = ['/d', '/s', '/v:off', '/c', '"' + quoted + '"'];
+                verbatim = true;
+            }
+            else if (!/\.exe$/i.test(resolvedExecutable)) {
+                throw new Error('LOCAL_RUNNER_INVALID: Unsupported Windows executable type.');
             }
         }
-    }
-    executeProcessWithoutShell(executable, args, cwd, extraEnv, onLog) {
+        if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 7_200_000) {
+            throw new Error('LOCAL_RUNNER_INVALID: Invalid locally configured timeout.');
+        }
+        if (signal?.aborted)
+            throw new Error('LOCAL_PROCESS_CANCELLED: Cancelled before launch.');
+        const useJobRunner = process.platform === 'win32' && !!this.windowsJobRunnerPath;
+        if (this.windowsAppContainerSid !== undefined && Object.keys(extraEnv || {}).length) {
+            throw new Error('LOCAL_RUNNER_ENV_DENIED: Offline identity uses its own minimal environment; overrides are not supported.');
+        }
+        if (this.windowsAppContainerSid !== undefined && (!useJobRunner || !/^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$/.test(this.windowsAppContainerSid))) {
+            throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Offline identity requires a native Windows Job Runner and valid package SID.');
+        }
+        let plan;
+        let launchCwd = cwd;
+        if (useJobRunner) {
+            if (!path.isAbsolute(this.windowsJobRunnerPath))
+                throw new Error('LOCAL_RUNNER_INVALID: Absolute Job Runner path required.');
+            const host = fs.realpathSync(this.windowsJobRunnerPath);
+            if (path.basename(host).toLowerCase() !== 'windowsjobrunner.exe' || !fs.statSync(host).isFile()) {
+                throw new Error('LOCAL_RUNNER_INVALID: Invalid native Job Runner path.');
+            }
+            plan = JSON.stringify({ executable: launchExecutable, args: launchArgs, cwd, verbatim, timeoutMs, appContainerSid: this.windowsAppContainerSid });
+            if (plan.length >= 65536)
+                throw new Error('LOCAL_RUNNER_INVALID: Job Runner plan exceeds size limit.');
+            launchExecutable = host;
+            launchArgs = [];
+            launchCwd = path.dirname(host);
+            verbatim = false;
+        }
         return new Promise((resolve, reject) => {
-            const child = (0, child_process_1.spawn)(executable, args, {
-                cwd,
-                env: { ...process.env, ...extraEnv },
+            const child = (0, child_process_1.spawn)(launchExecutable, launchArgs, {
+                cwd: launchCwd,
+                env,
                 shell: false,
-                windowsHide: true
+                windowsHide: true,
+                windowsVerbatimArguments: verbatim
             });
+            let watchdog;
+            let forcedHostStop = false;
+            const requestCancel = () => {
+                if (useJobRunner)
+                    child.stdin?.end();
+            };
+            const cleanup = () => {
+                if (watchdog)
+                    clearTimeout(watchdog);
+                signal?.removeEventListener('abort', requestCancel);
+            };
+            if (useJobRunner) {
+                // The runtime's stdin is its lifetime/cancel channel, not target stdin.
+                child.stdin?.on('error', () => { });
+                child.stdin?.write(plan + '\n');
+                signal?.addEventListener('abort', requestCancel, { once: true });
+                if (signal?.aborted)
+                    requestCancel();
+                watchdog = setTimeout(() => {
+                    // Last-resort stop of our own host handle. Do not claim verified drain.
+                    forcedHostStop = true;
+                    this.executionQuarantined = true;
+                    child.kill();
+                }, timeoutMs + 20_000);
+            }
             let stdoutAcc = '';
+            let outputChars = 0;
+            const maxOutputChars = 256 * 1024;
+            let outputTruncated = false;
+            const appendOutput = (text, stderr) => {
+                const remaining = Math.max(0, maxOutputChars - outputChars);
+                const accepted = text.slice(0, remaining);
+                outputChars += accepted.length;
+                if (!stdoutOnly || !stderr)
+                    stdoutAcc += accepted;
+                if (accepted)
+                    onLog(stderr ? `[STDERR] ${accepted.trim()}` : accepted.trim());
+                if (accepted.length < text.length && !outputTruncated) {
+                    outputTruncated = true;
+                    onLog('[EXECUTOR] Output limit reached; further output discarded.');
+                }
+            };
+            child.stdout?.setEncoding('utf8');
+            child.stderr?.setEncoding('utf8');
             child.stdout?.on('data', (data) => {
-                const text = data.toString();
-                stdoutAcc += text;
-                onLog(text.trim());
+                appendOutput(data, false);
             });
             child.stderr?.on('data', (data) => {
-                const text = data.toString();
-                stdoutAcc += text;
-                onLog(`[STDERR] ${text.trim()}`);
+                appendOutput(data, true);
             });
             child.on('close', (code) => {
+                cleanup();
+                if (useJobRunner) {
+                    if (forcedHostStop || ![0, 1, 124, 125, 126].includes(code)) {
+                        this.executionQuarantined = true;
+                        reject(new Error('LOCAL_PROCESS_TREE_UNCERTAIN: Native runner did not confirm job drain.'));
+                        return;
+                    }
+                    if (code === 124 || code === 125 || code === 126) {
+                        const reason = code === 124 ? 'LOCAL_PROCESS_TIMEOUT' : code === 125 ? 'LOCAL_PROCESS_CANCELLED' : 'LOCAL_RUNNER_REJECTED';
+                        reject(new Error(reason + ': Native runner returned a confirmed terminal outcome.'));
+                        return;
+                    }
+                }
                 if (code === 0) {
-                    resolve({ stdout: stdoutAcc, exitCode: 0 });
+                    resolve({ stdout: stdoutAcc, exitCode: 0, outputTruncated });
                 }
                 else {
                     const err = new Error(`Process failed with exit code ${code}: ${stdoutAcc.slice(-500)}`);
@@ -714,7 +888,15 @@ class TaskExecutor {
                 }
             });
             child.on('error', (err) => {
-                reject(err);
+                cleanup();
+                // A spawn failure before any child PID exists has no contained work.
+                if (useJobRunner && child.pid !== undefined) {
+                    this.executionQuarantined = true;
+                    reject(new Error('LOCAL_PROCESS_TREE_UNCERTAIN: Native runner control failed.'));
+                }
+                else {
+                    reject(err);
+                }
             });
         });
     }

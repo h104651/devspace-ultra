@@ -159,6 +159,8 @@ export class GatewayDurableObject {
             name: att.name || deviceId,
             platform: att.platform || 'windows',
             capabilities: att.capabilities || [],
+            executionPolicyRevision: att.executionPolicyRevision,
+            supportsExecutionCancellation: att.supportsExecutionCancellation === true,
             connectedAt: att.connectedAt || now,
             lastHeartbeatAt: lastHb,
             socket: ws
@@ -1144,6 +1146,9 @@ export class GatewayDurableObject {
         }
         const taskId = decodeURIComponent(url.pathname.slice('/api/tasks/'.length));
         const task = this.taskStore.getTask(taskId);
+        if (task?.capability === 'local:git_read' && !ScopeChecker.hasScope(auth.payload!.scopes, 'local:git:read')) {
+          return Response.json({ error: 'FORBIDDEN' }, { status: 403 });
+        }
         return task ? Response.json(task) : Response.json({ error: 'TASK_NOT_FOUND' }, { status: 404 });
       }
 
@@ -1218,8 +1223,12 @@ export class GatewayDurableObject {
           ? msg.capabilities
           : [...LOCAL_EXECUTABLE_CAPABILITIES];
 
+        const executionPolicyRevision = typeof msg.executionPolicyRevision === 'string' && /^[a-f0-9]{32}$/.test(msg.executionPolicyRevision)
+          ? msg.executionPolicyRevision : undefined;
         const authorizedCaps = requestedCaps.filter(cap => {
           if (!isLocalExecutableCapability(cap)) return false;
+          if (cap === 'local:git_read' && (!Array.isArray(msg.capabilities) || !msg.capabilities.includes(cap) || msg.supportsAttemptFencing !== true)) return false;
+          if ((cap === 'local:run_tests' || cap === 'local:build_project' || cap === 'local:git_read') && !executionPolicyRevision) return false;
           const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
           return ScopeChecker.hasScope(val.payload!.scopes, requiredScope);
         });
@@ -1269,6 +1278,8 @@ export class GatewayDurableObject {
         const attachmentData: AgentSessionAttachment = {
           sessionId: newSessionId,
           supportsAttemptFencing: msg.supportsAttemptFencing === true,
+          supportsExecutionCancellation: msg.supportsAttemptFencing === true && msg.supportsExecutionCancellation === true,
+          executionPolicyRevision,
           ...reconnectIdentity,
           deviceId: authoritativeDeviceId,
           name: msg.name || authoritativeDeviceId,
@@ -1347,6 +1358,7 @@ export class GatewayDurableObject {
       if (!isSessionHealthy(attachment, Date.now(), HEARTBEAT_TTL_MS)) { ws.close(1000, 'Heartbeat timeout'); return; }
 
       if (msg.type === 'AGENT_HEARTBEAT') {
+        const cancellations: Array<{ taskId: string; attemptId: string; requestId: string }> = [];
         const now = Date.now();
         attachment.lastHeartbeatAt = Math.max(attachment.lastHeartbeatAt || 0, now);
         (ws as any).serializeAttachment(attachment);
@@ -1362,13 +1374,18 @@ export class GatewayDurableObject {
             const attemptId = Array.isArray(msg.activeTaskAttempts) ? msg.activeTaskAttempts.find(a => a.taskId === tid)?.attemptId : undefined;
             if (ownsAttempt(tid, attemptId)) {
               this.taskStore.renewLease(tid, authenticatedDeviceId, undefined, currentSessionId);
+              if (attachment.supportsExecutionCancellation && attemptId) {
+                const request = this.taskStore.getPendingExecutionCancellation(tid, authenticatedDeviceId, currentSessionId, attemptId);
+                if (request) cancellations.push(request);
+              }
             }
           }
         }
         ws.send(JSON.stringify({
           type: 'AGENT_HEARTBEAT_ACK',
           messageId: (msg as any).messageId || crypto.randomUUID(),
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          ...(cancellations.length ? { cancellations } : {})
         }));
         return;
       }
@@ -1379,7 +1396,16 @@ export class GatewayDurableObject {
           return;
         }
         this.taskStore.recoverStaleTasks();
-        const task = this.taskStore.claimTask(authenticatedDeviceId, authorizedCapabilities, undefined, currentSessionId, supportsAttemptFencing);
+        // Execution capabilities must be both session-authorized and currently requested by the agent.
+        if (attachment.executionPolicyRevision && msg.executionPolicyRevision !== attachment.executionPolicyRevision) {
+          attachment.executionPolicyRevision = undefined;
+          (ws as any).serializeAttachment(attachment);
+        }
+        const claimCapabilities = authorizedCapabilities.filter(cap => {
+          if (cap !== 'local:run_tests' && cap !== 'local:build_project' && cap !== 'local:git_read') return true;
+          return !!attachment.executionPolicyRevision && Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
+        });
+        const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, currentSessionId, supportsAttemptFencing, attachment.executionPolicyRevision);
         if (task) {
           ws.send(JSON.stringify({
             type: 'TASK_ASSIGNED',
@@ -1421,6 +1447,13 @@ export class GatewayDurableObject {
           return;
         }
         this.taskStore.completeTask(msg.taskId, msg.result, authenticatedDeviceId, currentSessionId);
+        return;
+      }
+
+      if (msg.type === 'TASK_CANCEL_CONFIRMED') {
+        if (attachment.supportsExecutionCancellation && ownsAttempt(msg.taskId, msg.attemptId)) {
+          this.taskStore.confirmExecutionCancellation(msg.taskId, authenticatedDeviceId, currentSessionId, msg.attemptId, msg.requestId);
+        }
         return;
       }
 
@@ -1738,6 +1771,7 @@ export class GatewayDurableObject {
           switch (toolName) {
             case 'remote_task_submit': result = await this.mcpHandlers.handleRemoteTaskSubmit(args, caller); break;
             case 'remote_task_status': result = await this.mcpHandlers.handleRemoteTaskStatus(args, caller); break;
+            case 'task_inventory': result = await this.mcpHandlers.handleTaskInventory(args, caller); break;
             case 'remote_task_wait': result = await handleRemoteTaskWait(this.taskStore, args, caller.scopes); break;
             case 'remote_task_logs': result = await this.mcpHandlers.handleRemoteTaskLogs(args, caller); break;
             case 'remote_task_artifacts': result = await this.mcpHandlers.handleRemoteTaskArtifacts(args, caller); break;
@@ -1769,12 +1803,16 @@ export class GatewayDurableObject {
             case 'local_find_repositories': result = await this.mcpHandlers.handleLocalFindRepositories(args, caller); break;
             case 'local_create_directory': result = await this.mcpHandlers.handleLocalCreateDirectory(args, caller); break;
             case 'local_git_status': result = await this.mcpHandlers.handleLocalGitStatus(args, caller); break;
+            case 'local_git_read': result = await this.mcpHandlers.handleLocalGitRead(args, caller); break;
             case 'local_run_tests': result = await this.mcpHandlers.handleLocalRunTests(args, caller); break;
             case 'local_build_project': result = await this.mcpHandlers.handleLocalBuildProject(args, caller); break;
             case 'swarm_dispatch': result = await this.mcpHandlers.handleSwarmDispatch(args, caller); break;
             case 'swarm_status': result = await this.mcpHandlers.handleSwarmStatus(caller); break;
             case 'chat_swarm_runtime_status': result = await this.mcpHandlers.handleChatSwarmRuntimeStatus(caller); break;
-            case 'device_status': result = await this.mcpHandlers.handleDeviceStatus(caller); break;
+            case 'device_status': result = await this.mcpHandlers.handleDeviceStatus(args, caller); break;
+            case 'device_maintenance_check': result = await this.mcpHandlers.handleDeviceMaintenanceCheck(args, caller); break;
+            case 'device_drain': result = await this.mcpHandlers.handleDeviceAdmissionChange(args, caller, true); break;
+            case 'device_resume': result = await this.mcpHandlers.handleDeviceAdmissionChange(args, caller, false); break;
             case 'kill_switch_trigger': result = await this.mcpHandlers.handleKillSwitchTrigger(args, caller); break;
             default:
               return Response.json(

@@ -62,6 +62,9 @@ class CloudflareSqliteStorageAdapter {
         objectCount INTEGER NOT NULL, classAOperations INTEGER NOT NULL,
         classBOperations INTEGER NOT NULL, updatedAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS device_admission (
+        deviceId TEXT PRIMARY KEY, closed INTEGER NOT NULL CHECK(closed IN (0, 1)), revision TEXT NOT NULL, updatedAt INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS kill_switch_state (
         id TEXT PRIMARY KEY, stateJson TEXT NOT NULL, updatedAt INTEGER NOT NULL
       );
@@ -118,6 +121,17 @@ class CloudflareSqliteStorageAdapter {
             return undefined;
         }
     }
+    getDeviceAdmissionSync(deviceId) {
+        const row = this.sql.exec('SELECT deviceId, closed, revision, updatedAt FROM device_admission WHERE deviceId = ?', deviceId).toArray()[0];
+        if (!row)
+            return undefined;
+        if (row.closed !== 0 && row.closed !== 1)
+            throw new Error('Invalid durable admission state');
+        return { deviceId: row.deviceId, closed: row.closed === 1, revision: row.revision, updatedAt: row.updatedAt };
+    }
+    saveDeviceAdmissionSync(state) {
+        this.sql.exec('INSERT OR REPLACE INTO device_admission (deviceId, closed, revision, updatedAt) VALUES (?, ?, ?, ?)', state.deviceId, state.closed ? 1 : 0, state.revision, state.updatedAt);
+    }
     getTaskSync(taskId) {
         const row = this.getFirstRow('SELECT * FROM tasks WHERE taskId = ?', taskId);
         return row ? this.rowToTask(row) : undefined;
@@ -135,6 +149,17 @@ class CloudflareSqliteStorageAdapter {
         payloadJson, retryPolicyJson, leaseJson, resultJson, errorJson, artifactsJson, logsJson, metadataJson,
         startedAt, completedAt, createdAt, updatedAt, attemptsJson, activeAttemptId, externalRunJson, targetDeviceId
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.taskId, task.taskKey || null, task.idempotencyKey || null, task.clientRequestId || null, task.backend, task.capability, task.requiredScope, task.status, task.priority, JSON.stringify(task.payload), JSON.stringify(task.retryPolicy), task.lease ? JSON.stringify(task.lease) : null, task.result !== undefined ? JSON.stringify(task.result) : null, task.error !== undefined ? JSON.stringify(task.error) : null, JSON.stringify(task.artifacts || []), JSON.stringify(task.logs || []), task.metadata ? JSON.stringify(task.metadata) : null, task.startedAt || null, task.completedAt || null, task.createdAt, task.updatedAt, JSON.stringify(task.attempts || []), task.activeAttemptId || null, task.externalRun ? JSON.stringify(task.externalRun) : null, task.targetDeviceId || null);
+    }
+    readTaskInventorySync(limit) {
+        // Deliberately do not SELECT * or hydrate terminal history into TaskStore.
+        const rows = this.sql.exec("SELECT taskId, backend, capability, status, targetDeviceId, leaseJson, attemptsJson, createdAt, updatedAt, startedAt, completedAt FROM tasks WHERE status IN ('queued','claimed','acknowledged','running','retrying') OR (backend = 'local' AND status = 'stale') ORDER BY taskId LIMIT ?", limit).toArray();
+        return rows.map(row => ({
+            taskId: row.taskId, backend: row.backend, capability: row.capability, status: row.status,
+            targetDeviceId: row.targetDeviceId || undefined, lease: row.leaseJson ? JSON.parse(row.leaseJson) : undefined,
+            attempts: row.attemptsJson ? JSON.parse(row.attemptsJson) : [],
+            createdAt: row.createdAt, updatedAt: row.updatedAt, startedAt: row.startedAt || undefined,
+            completedAt: row.completedAt || undefined
+        }));
     }
     async listActiveTasks() {
         const activeStatuses = ['queued', 'claimed', 'acknowledged', 'running', 'retrying'];

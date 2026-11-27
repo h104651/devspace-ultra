@@ -1,0 +1,488 @@
+import { executeGitNetworkIntent, GitNetworkBroker } from '../../scripts/execute-git-network';
+import { authorizeGitNetworkIntent, parseGitNetworkIntent, validateGitNetworkEndpoint } from '../../scripts/plan-git-network';
+import { createNativeStagedGitAdapter } from '../../scripts/native-staged-git-adapter';
+import { parseGitIndexIntent, runGitIndexMutation } from '../../scripts/execute-git-index-mutations';
+import { collectGitBranchSnapshot } from '../../scripts/git-branch-snapshot';
+import { withDurableGitFence } from '../../scripts/git-mutation-fence';
+import { GitBranchAdapter, runGitBranchMutation } from '../../scripts/execute-git-branch-mutations';
+import { parseGitBranchIntent, checkGitBranchPreflight } from '../../scripts/plan-git-branch-mutations';
+import * as assert from 'assert';
+import { planOfflineRunners, buildGitReadArgs } from '../../scripts/plan-offline-runners';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { execFileSync } from 'child_process';
+import { TaskExecutor } from '../../src/local-agent/task-executor';
+import { validateGitReadProfile, parseGitReadTask } from '../../src/local-agent/git-read-plan';
+
+export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; failed: number }> {
+  let passed = 0, failed = 0;
+  const tools = {
+    flutter: 'C:\\Stage Tools\\flutter\\bin\\flutter.bat',
+    dart: 'C:\\Stage Tools\\flutter\\bin\\dart.bat',
+    gradle: 'C:\\Fixture\\android\\gradlew.bat',
+    npm: 'C:\\Stage Tools\\node\\npm.cmd',
+    node: 'C:\\Stage Tools\\node\\node.exe',
+    python: 'C:\\Fixture\\venv\\Scripts\\python.exe',
+    java: 'C:\\Stage Tools\\java\\bin\\java.exe',
+    adb: 'C:\\Stage Tools\\sdk\\platform-tools\\adb.exe'
+  };
+  const cases: Array<() => void> = [
+    () => {
+      const head = 'a'.repeat(40), targetHead = 'b'.repeat(40);
+      const create = { projectId: 'fixture', operation: 'git_branch_create', expectedBranch: 'main', expectedHead: head, branch: 'feat/fixture' };
+      const snapshot = { currentBranch: 'main', head, clean: true, operationInProgress: false, targetHead: null, targetCheckedOutElsewhere: false };
+      assert.deepStrictEqual(checkGitBranchPreflight(create, ['feat/fixture'], snapshot), create);
+      const change = { ...create, operation: 'git_switch', expectedTargetHead: targetHead };
+      assert.deepStrictEqual(checkGitBranchPreflight(change, ['feat/fixture'], { ...snapshot, targetHead }), change);
+      for (const bad of ['main','master','release/v1','--force','feat/../x','feat/x.lock','feat/x@{1}','feat/CON','feat/con','feat/x\\y','feat//x','feat/x y','feat/x;push']) {
+        assert.throws(() => parseGitBranchIntent({ ...create, branch: bad }));
+      }
+      for (const extra of [{ args: ['push'] }, { force: true }, { remote: 'origin' }, { expectedTargetHead: head }, { env: {} }]) {
+        assert.throws(() => parseGitBranchIntent({ ...create, ...extra }), /FIELDS/);
+      }
+      assert.throws(() => parseGitBranchIntent({ ...create, expectedHead: 'HEAD' }), /OBJECT_ID/);
+      assert.throws(() => parseGitBranchIntent({ ...create, operation: 'git_switch' }), /FIELDS/);
+      assert.throws(() => parseGitBranchIntent({ ...change, expectedTargetHead: 'a'.repeat(64) }), /FORMAT/);
+      assert.throws(() => checkGitBranchPreflight(create, [], snapshot), /POLICY/);
+      for (const state of [{ clean: false }, { head: targetHead }, { currentBranch: '' }, { operationInProgress: true }, { targetCheckedOutElsewhere: true }, { clean: undefined }]) {
+        assert.throws(() => checkGitBranchPreflight(create, ['feat/fixture'], { ...snapshot, ...state }), /STATE/);
+      }
+      assert.throws(() => checkGitBranchPreflight(create, ['feat/fixture'], { ...snapshot, targetHead }), /TARGET_CONFLICT/);
+      assert.throws(() => checkGitBranchPreflight(change, ['feat/fixture'], snapshot), /TARGET_CONFLICT/);
+      assert.throws(() => checkGitBranchPreflight(change, ['feat/fixture'], { ...snapshot, targetHead: head }), /TARGET_CONFLICT/);
+    },
+    () => {
+      const p = planOfflineRunners({ tools, profiles:['flutter_analyze','flutter_test','flutter_build_apk_debug','dart_format_check'], workingRelativePath:'app/mobile' });
+      assert.deepStrictEqual(p.commands.test.flutter_analyze.args,['analyze','--no-pub']);
+      assert.deepStrictEqual(p.commands.build.flutter_build_apk_debug.args,['build','apk','--debug','--no-pub']);
+      assert.strictEqual(p.commands.test.dart_format_check.workingRelativePath,'app/mobile');
+      assert.strictEqual(p.activationAuthorized,false);
+      assert.ok(!('permissions' in p));
+    },
+    () => {
+      const p=planOfflineRunners({tools,profiles:['gradle_test','gradle_assemble_debug','npm_test','npm_build','python_pytest','node_version','java_version','adb_version','dart_analyze','dart_test','python_version']});
+      assert.deepStrictEqual(p.commands.test.gradle_test.args,['--offline','--no-daemon','test']);
+      assert.deepStrictEqual(p.commands.test.python_pytest.args,['-I','-m','pytest']);
+      assert.deepStrictEqual(p.commands.build.npm_build.args,['--offline','--ignore-scripts','run','build']);
+      assert.strictEqual(p.selections.length,11);
+    },
+    () => {
+      assert.throws(()=>planOfflineRunners({tools,profiles:['npm_ci_offline']}),/Dependency mutation/);
+      const p=planOfflineRunners({tools,profiles:['npm_ci_offline','flutter_pub_get_offline'],allowDependencyMutation:true});
+      assert.deepStrictEqual(p.commands.build.npm_ci_offline.args,['ci','--offline','--ignore-scripts','--no-audit','--no-fund']);
+      assert.ok(p.selections.every(s=>s.dependencyMutation));
+    },
+    () => {
+      for(const id of ['__proto__','constructor','git_push','flutter_build_aab','flutter_build_apk_release','adb_shell','pip_install','npm_arbitrary'])
+        assert.throws(()=>planOfflineRunners({tools,profiles:[id]}),/Unknown/);
+      assert.throws(()=>planOfflineRunners({tools,profiles:['node_version','node_version']}),/duplicate/);
+    },
+    () => {
+      for(const bad of ['node.exe','\\\\server\\share\\node.exe','C:\\a\\..\\node.exe','C:\\a&b\\node.exe','C:\\a\\node.exe:stream','C:\\a\\cmd.exe'])
+        assert.throws(()=>planOfflineRunners({tools:{node:bad},profiles:['node_version']}),/explicit local Windows tool path/);
+      assert.throws(()=>planOfflineRunners({tools:{},profiles:['node_version']}),/Missing/);
+    },
+    () => {
+      for(const bad of ['../app','app/../x','C:/app','/app','app//x','app\\x','app./x'])
+        assert.throws(()=>planOfflineRunners({tools,profiles:['node_version'],workingRelativePath:bad}),/normalized/);
+    },
+    () => {
+      for(const field of ['args','env','command','permissions','hostExecution','windowsAppContainerSid'])
+        assert.throws(()=>planOfflineRunners({tools,profiles:['node_version'],[field]:true}),/Unexpected/);
+      assert.throws(()=>planOfflineRunners({tools:{...tools,secret:'fixture-only'},profiles:['node_version']}),/Unexpected/);
+      assert.throws(()=>planOfflineRunners({tools,profiles:['npm_ci_offline'],allowDependencyMutation:'true'}),/boolean/);
+    },
+    () => {
+      const head='a'.repeat(40), base='b'.repeat(40);
+      const gitTools={git:'C:\\Stage Tools\\Git\\cmd\\git.exe'};
+      const p=planOfflineRunners({tools:gitTools,profiles:['git_log','git_diff_commits'],
+        gitSelections:{git_log:{head,limit:2},git_diff_commits:{base,head}}});
+      assert.ok(p.commands.test.git_log.args.includes('--max-count=2'));
+      assert.deepStrictEqual(p.commands.test.git_diff_commits.args.slice(-3),[base,head,'--']);
+      assert.ok(p.commands.test.git_diff_commits.args.includes('--no-ext-diff'));
+      assert.ok(p.commands.test.git_diff_commits.args.includes('--no-textconv'));
+      validateGitReadProfile('git_log',p.commands.test.git_log.args);
+      assert.deepStrictEqual(parseGitReadTask({projectId:'fixture',operation:'git_log',head,limit:2}).args,p.commands.test.git_log.args);
+      assert.deepStrictEqual(parseGitReadTask({projectId:'fixture',operation:'git_diff_commits',head,base}).args,p.commands.test.git_diff_commits.args);
+      for(const extra of [{args:['push']},{base},{workingRelativePath:'.'},{env:{}},{command:'git push'}])
+        assert.throws(()=>parseGitReadTask({projectId:'fixture',operation:'git_log',head,...extra}),/INVALID_ARGUMENT/);
+      assert.throws(()=>parseGitReadTask({projectId:'../other',operation:'git_log',head}),/INVALID_ARGUMENT/);
+      assert.throws(()=>parseGitReadTask({projectId:'fixture',operation:'git_log',head:'HEAD'}),/INVALID_ARGUMENT/);
+      validateGitReadProfile('git_diff_commits',p.commands.test.git_diff_commits.args);
+      for(const changed of [
+        ['push','origin','main'],
+        [...p.commands.test.git_log.args,'--all'],
+        p.commands.test.git_diff_commits.args.filter(arg=>arg!=='--no-ext-diff'),
+        p.commands.test.git_log.args.map(arg=>arg==='--no-show-signature'?'--show-signature':arg)
+      ]) assert.throws(()=>validateGitReadProfile('git_log',changed),/LOCAL_GIT_PROFILE_DENIED/);
+      assert.throws(()=>validateGitReadProfile('git_diff_commits',p.commands.test.git_diff_commits.args.filter(arg=>arg!=='--no-textconv')),/LOCAL_GIT_PROFILE_DENIED/);
+      for(const bad of ['HEAD','HEAD~1','--all','a..b','a'.repeat(39),'0'.repeat(40),'@{upstream}'])
+        assert.throws(()=>buildGitReadArgs('git_log',{head:bad}),/Full lowercase/);
+      assert.throws(()=>buildGitReadArgs('git_log',{head,limit:101}),/limit/);
+      assert.throws(()=>buildGitReadArgs('git_diff_commits',{base:'a'.repeat(64),head}),/lengths/);
+      assert.throws(()=>buildGitReadArgs('git_diff_commits',{base,head,pathspec:'../secret'}),/Unexpected/);
+      assert.throws(()=>planOfflineRunners({tools:gitTools,profiles:['git_log']}),/selection/);
+    },
+    () => {
+      // Real disposable Git repository. The exact generated argument vectors
+      // must work without invoking a configured external diff or textconv.
+      const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-git-read-'));
+      try {
+        const env={...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:os.devNull,
+          GIT_OPTIONAL_LOCKS:'0',GIT_NO_LAZY_FETCH:'1',GIT_TERMINAL_PROMPT:'0'};
+        // Avoid inherited caller GIT_DIR/worktree/index/config injection.
+        for(const key of Object.keys(env)) {
+          if(key.startsWith('GIT_')&&!['GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_OPTIONAL_LOCKS','GIT_NO_LAZY_FETCH','GIT_TERMINAL_PROMPT'].includes(key)) delete env[key];
+        }
+        const git=(args:string[])=>execFileSync('git',args,{cwd:dir,env,encoding:'utf8',timeout:10000,maxBuffer:262144});
+        git(['init','-q','--object-format=sha1']);
+        git(['config','user.name','Synthetic Fixture']);
+        git(['config','user.email','fixture@example.invalid']);
+        git(['config','commit.gpgsign','false']);
+        fs.writeFileSync(path.join(dir,'.gitattributes'),'*.txt diff=fixture\n');
+        fs.writeFileSync(path.join(dir,'sample.txt'),'before\n');
+        git(['add','.']);git(['commit','-qm','first fixture']);
+        const base=git(['rev-parse','HEAD']).trim();
+        fs.writeFileSync(path.join(dir,'sample.txt'),'after\n');
+        git(['add','sample.txt']);git(['commit','-qm','second fixture']);
+        const head=git(['rev-parse','HEAD']).trim();
+        // If Git tries either configured program, the command fails instead
+        // of silently passing a test with a missing marker.
+        git(['config','diff.external','dsu-fixture-must-not-launch']);
+        git(['config','diff.fixture.command','dsu-fixture-must-not-launch']);
+        git(['config','diff.fixture.textconv','dsu-fixture-must-not-launch']);
+        fs.writeFileSync(path.join(dir,'sample.txt'),'UNCOMMITTED_SENTINEL\n');
+        fs.writeFileSync(path.join(dir,'untracked.txt'),'UNTRACKED_SENTINEL\n');
+        const log=git(buildGitReadArgs('git_log',{head,limit:2}));
+        assert.ok(log.includes(head)&&log.includes(base)&&log.includes('second fixture'));
+        const diff=git(buildGitReadArgs('git_diff_commits',{base,head}));
+        assert.ok(diff.includes('-before')&&diff.includes('+after'));
+        assert.ok(!diff.includes('UNCOMMITTED_SENTINEL')&&!diff.includes('UNTRACKED_SENTINEL'));
+        assert.strictEqual(git(['rev-parse','HEAD']).trim(),head);
+        assert.strictEqual(fs.readFileSync(path.join(dir,'sample.txt'),'utf8'),'UNCOMMITTED_SENTINEL\n');
+        assert.strictEqual(git(['diff','--cached','--name-only']),'');
+      } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+    },
+    () => {
+      const p=planOfflineRunners({tools,profiles:['node_version']});
+      p.commands.test.node_version.args[0]='changed';
+      assert.deepStrictEqual(planOfflineRunners({tools,profiles:['node_version']}).commands.test.node_version.args,['--version']);
+    }
+  ];
+  for(const test of cases) {
+    try { test(); passed++; }
+    catch(err) { failed++; console.error('Offline runner planner regression:',err); }
+  }
+  try {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-git-gate-'));
+    try {
+      const executor=new TaskExecutor({projects:[{projectId:'fixture',root:dir,
+        permissions:{read:true,test:true,hostExecution:true},
+        commands:{test:{git_log:{executable:process.execPath,args:['--version']}}}}]});
+      await assert.rejects(()=>executor.executeTask({capability:'local:run_tests',payload:{projectId:'fixture',runnerId:'git_log'}} as any,()=>{}),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+      await assert.rejects(()=>executor.executeTask({capability:'local:git_read',payload:{projectId:'fixture',operation:'git_log',head:'a'.repeat(40)}} as any,()=>{}),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+      passed++;
+    } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+  } catch(err) { failed++; console.error('Git offline execution gate regression:',err); }
+  try {
+    // Real disposable Git fixture: tests the exact candidate argument vectors.
+    // This is not a production AppContainer adapter or a durable lease test.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-git-branch-'));
+    const hooks = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-empty-hooks-'));
+    try {
+      const env = { ...process.env, GIT_CONFIG_NOSYSTEM:'1', GIT_CONFIG_GLOBAL:os.devNull,
+        GIT_OPTIONAL_LOCKS:'0', GIT_NO_LAZY_FETCH:'1', GIT_TERMINAL_PROMPT:'0' };
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('GIT_') && !['GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_OPTIONAL_LOCKS','GIT_NO_LAZY_FETCH','GIT_TERMINAL_PROMPT'].includes(key)) delete env[key];
+      }
+      const git = (args: readonly string[]) => execFileSync('git', [...args], { cwd:dir, env, encoding:'utf8', timeout:10000, maxBuffer:262144 });
+      git(['init','-q','-b','main','--object-format=sha1']);
+      git(['config','user.name','Synthetic Fixture']);
+      git(['config','user.email','fixture@example.invalid']);
+      git(['config','commit.gpgsign','false']);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'one\n');
+      git(['add','fixture.txt']); git(['commit','-qm','first fixture']);
+      const head = git(['rev-parse','HEAD']).trim();
+      const create = { projectId:'fixture', operation:'git_branch_create', expectedBranch:'main', expectedHead:head, branch:'feat/fixture' };
+      let held = false, quarantined = false, failAfterRun = false, raceBeforeRun = false, runs = 0;
+      const adapter: GitBranchAdapter = {
+        async acquire(projectId) {
+          assert.strictEqual(projectId,'fixture');
+          if (held || quarantined) throw new Error('LEASE_BLOCKED');
+          held = true;
+          return {
+            approvedTargets:['feat/fixture','fix/uncertain','fix/race'], emptyHooksDirectory:hooks,
+            async snapshot(intent) {
+              assert.ok(held);
+              return collectGitBranchSnapshot(dir,intent,async args=>git(args));
+            },
+            async run(args) { assert.ok(held); runs++; if (raceBeforeRun) git(['branch','fix/race']); git(args); if (failAfterRun) throw new Error('SIMULATED_UNCERTAIN_EXIT'); },
+            async finish(disposition) { assert.ok(held); held = false; quarantined = disposition === 'quarantine'; }
+          };
+        }
+      };
+      // Snapshot reader rejects unsafe config before executing a status query.
+      git(['config','filter.fixture.clean','dsu-fixture-must-not-launch']);
+      let queries = 0;
+      await assert.rejects(()=>collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>{queries++;return git(args);}),/CONFIG_POLICY_DENIED/);
+      assert.strictEqual(queries,1);
+      git(['config','--remove-section','filter.fixture']);
+      fs.writeFileSync(path.join(dir,'.git','MERGE_HEAD'),head+'\n');
+      const merging = await collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>git(args));
+      assert.strictEqual(merging.operationInProgress,true);
+      fs.unlinkSync(path.join(dir,'.git','MERGE_HEAD'));
+      fs.mkdirSync(path.join(dir,'.git','worktrees'));
+      await assert.rejects(()=>collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>git(args)),/REPOSITORY_DENIED/);
+      fs.rmdirSync(path.join(dir,'.git','worktrees'));
+      const hardlink=path.join(dir,'linked.txt');
+      fs.linkSync(path.join(dir,'fixture.txt'),hardlink);
+      await assert.rejects(()=>collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>git(args)),/LINK_DENIED/);
+      fs.unlinkSync(hardlink);
+      const result = await runGitBranchMutation(create, adapter);
+      assert.strictEqual(result.head,head);
+      assert.strictEqual(git(['symbolic-ref','--short','HEAD']).trim(),'main');
+      assert.strictEqual(git(['rev-parse','refs/heads/feat/fixture']).trim(),head);
+      assert.strictEqual(held,false);
+      await assert.rejects(()=>runGitBranchMutation(create,adapter),/TARGET_CONFLICT/);
+      assert.strictEqual(runs,1);
+      // Advance target in a synthetic fixture to prove checkout of a distinct
+      // commit and actual file contents, not just a symbolic branch change.
+      git(['switch','feat/fixture']);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'two\n');
+      git(['add','fixture.txt']); git(['commit','-qm','target fixture']);
+      const targetHead = git(['rev-parse','HEAD']).trim();
+      assert.notStrictEqual(targetHead,head);
+      git(['switch','main']);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'dirty\n');
+      const change = { ...create, operation:'git_switch', expectedTargetHead:targetHead };
+      await assert.rejects(()=>runGitBranchMutation(change,adapter),/STATE_CONFLICT/);
+      assert.strictEqual(runs,1);
+      fs.writeFileSync(path.join(dir,'fixture.txt'),'one\n');
+      await runGitBranchMutation(change,adapter);
+      assert.strictEqual(git(['symbolic-ref','--short','HEAD']).trim(),'feat/fixture');
+      assert.strictEqual(runs,2);
+      assert.strictEqual(git(['rev-parse','HEAD']).trim(),targetHead);
+      assert.strictEqual(fs.readFileSync(path.join(dir,'fixture.txt'),'utf8'),'two\n');
+      assert.strictEqual(quarantined,false);
+      failAfterRun = true;
+      const uncertain = { ...create, expectedBranch:'feat/fixture', expectedHead:targetHead, branch:'fix/uncertain' };
+      await assert.rejects(()=>runGitBranchMutation(uncertain,adapter),/SIMULATED_UNCERTAIN_EXIT/);
+      assert.strictEqual(quarantined,true);
+      assert.strictEqual(git(['rev-parse','refs/heads/fix/uncertain']).trim(),targetHead);
+      await assert.rejects(()=>runGitBranchMutation(uncertain,adapter),/LEASE_BLOCKED/);
+      assert.strictEqual(runs,3);
+      // Explicit fixture-only reconciliation, never an automatic runtime retry.
+      quarantined = false; failAfterRun = false; raceBeforeRun = true;
+      const race = { ...uncertain, branch:'fix/race' };
+      await assert.rejects(()=>runGitBranchMutation(race,adapter));
+      assert.strictEqual(quarantined,true);
+      assert.strictEqual(git(['rev-parse','refs/heads/fix/race']).trim(),targetHead);
+      assert.strictEqual(runs,4);
+      passed++;
+    } finally { fs.rmSync(dir,{recursive:true,force:true}); fs.rmSync(hooks,{recursive:true,force:true}); }
+  } catch(err) { failed++; console.error('Git branch mutation fixture regression:',err); }
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsu-git-fence-'));
+    try {
+      let finishFails = false, acquires = 0;
+      const inner: GitBranchAdapter = {
+        async acquire() {
+          acquires++;
+          return {
+            approvedTargets: [], emptyHooksDirectory: dir,
+            async snapshot() { throw new Error('unused'); },
+            async run() { throw new Error('unused'); },
+            async finish() { if (finishFails) throw new Error('INNER_FINISH_FAILED'); }
+          };
+        }
+      };
+      const a = withDurableGitFence(dir,inner);
+      const b = withDurableGitFence(dir,inner);
+      const lease = await a.acquire('first');
+      await assert.rejects(()=>b.acquire('alias'),/FENCE_HELD/);
+      assert.strictEqual(acquires,1);
+      await lease.finish('release');
+      await assert.rejects(()=>lease.finish('release'),/LEASE_CLOSED/);
+      const next = await b.acquire('alias');
+      await next.finish('quarantine');
+      await assert.rejects(()=>withDurableGitFence(dir,inner).acquire('first'),/FENCE_HELD/);
+      const lock = path.join(dir,'git-mutation.lock');
+      assert.ok(fs.existsSync(lock));
+      fs.unlinkSync(lock); // fixture-only manual reconciliation
+      finishFails = true;
+      const bad = await a.acquire('first');
+      await assert.rejects(()=>bad.finish('release'),/INNER_FINISH_FAILED/);
+      await assert.rejects(()=>b.acquire('alias'),/FENCE_HELD/);
+      fs.unlinkSync(lock);
+      finishFails = false;
+      const owner = await a.acquire('first');
+      fs.writeFileSync(lock,'different owner');
+      await assert.rejects(()=>owner.finish('release'),/OWNER_UNCERTAIN/);
+      assert.strictEqual(fs.readFileSync(lock,'utf8'),'different owner');
+      fs.unlinkSync(lock);
+      const broken = withDurableGitFence(dir,{async acquire(){throw new Error('INNER_ACQUIRE_FAILED');}});
+      await assert.rejects(()=>broken.acquire('first'),/INNER_ACQUIRE_FAILED/);
+      await assert.rejects(()=>a.acquire('first'),/FENCE_HELD/);
+      passed++;
+    } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+  } catch(err) { failed++; console.error('Git durable fence fixture regression:',err); }
+  try {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-index-'));
+    const hooks=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-index-hooks-'));
+    const locks=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-index-lock-'));
+    try {
+      const env={...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:os.devNull,GIT_OPTIONAL_LOCKS:'0',GIT_NO_LAZY_FETCH:'1',GIT_TERMINAL_PROMPT:'0'};
+      for(const key of Object.keys(env)) if(key.startsWith('GIT_')&&!['GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_OPTIONAL_LOCKS','GIT_NO_LAZY_FETCH','GIT_TERMINAL_PROMPT'].includes(key)) delete env[key];
+      const git=(args:readonly string[])=>execFileSync('git',[...args],{cwd:dir,env,encoding:'utf8',timeout:10000,maxBuffer:262144});
+      git(['init','-q','-b','feat/index','--object-format=sha1']);
+      git(['config','user.name','Synthetic Fixture']);git(['config','user.email','fixture@example.invalid']);
+      git(['config','commit.gpgsign','false']);
+      fs.writeFileSync(path.join(dir,'one.txt'),'before\n');
+      git(['add','one.txt']);git(['commit','-qm','initial']);
+      const head=git(['rev-parse','HEAD']).trim();
+      fs.writeFileSync(path.join(dir,'one.txt'),'after\n');
+      fs.writeFileSync(path.join(dir,'two.txt'),'unselected\n');
+      const sha256=require('crypto').createHash('sha256').update('after\n').digest('hex');
+      const inner: GitBranchAdapter={async acquire(projectId){
+        assert.strictEqual(projectId,'fixture');
+        return {approvedTargets:['feat/index'],emptyHooksDirectory:hooks,indexWorkspace:{root:dir,approvedPaths:['one.txt']},
+          async snapshot(intent){return collectGitBranchSnapshot(dir,intent,async args=>git(args));},
+          async query(args){return git(args);},async run(args){git(args);},async finish(){}};
+      }};
+      const adapter=withDurableGitFence(locks,inner);
+      const stage={projectId:'fixture',operation:'git_stage',branch:'feat/index',expectedHead:head,files:[{path:'one.txt',sha256}]};
+      for(const bad of ['../one.txt','.git/config','C:/one.txt','one.txt:stream','CON.txt','one.txt.','a//b']) assert.throws(()=>parseGitIndexIntent({...stage,files:[{path:bad,sha256}]}));
+      assert.throws(()=>parseGitIndexIntent({...stage,files:[{path:'one.txt',sha256},{path:'ONE.TXT',sha256}]}),/DUPLICATE/);
+      await assert.rejects(()=>runGitIndexMutation({...stage,files:[{path:'one.txt',sha256:'0'.repeat(64)}]},adapter),/CONTENT_CHANGED/);
+      assert.strictEqual(git(['diff','--cached','--name-only']),'');
+      const staged=await runGitIndexMutation(stage,adapter);
+      assert.strictEqual(git(['diff','--cached','--name-only']).trim(),'one.txt');
+      assert.strictEqual(git(['rev-parse','HEAD']).trim(),head);
+      await assert.rejects(()=>runGitIndexMutation(stage,adapter),/NOT_EMPTY/);
+      const commit={projectId:'fixture',operation:'git_commit',branch:'feat/index',expectedHead:head,paths:['one.txt'],expectedTree:staged.tree,message:'fixture update'};
+      const committed=await runGitIndexMutation(commit,adapter);
+      assert.strictEqual(git(['rev-parse','HEAD']).trim(),committed.head);
+      assert.strictEqual(git(['rev-parse','HEAD^']).trim(),head);
+      assert.strictEqual(git(['show','HEAD:one.txt']),'after\n');
+      assert.strictEqual(git(['diff','--cached','--name-only']),'');
+      assert.strictEqual(fs.readFileSync(path.join(dir,'two.txt'),'utf8'),'unselected\n');
+      assert.ok(git(['status','--porcelain']).includes('?? two.txt'));
+      await assert.rejects(()=>runGitIndexMutation(commit,adapter),/STATE_CONFLICT/);
+      passed++;
+    } finally { fs.rmSync(dir,{recursive:true,force:true});fs.rmSync(hooks,{recursive:true,force:true});fs.rmSync(locks,{recursive:true,force:true}); }
+  } catch(err) { failed++; console.error('Git index mutation fixture regression:',err); }
+  try {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-native-git-gate-'));
+    try {
+      const executor=new TaskExecutor({projects:[],hostExecutionBlocked:true});
+      const policy={projectId:'fixture',root:dir,executable:path.join(dir,'git.exe'),emptyHooksDirectory:dir,protectedFenceDirectory:dir,approvedTargets:[],approvedPaths:[],timeoutMs:1000};
+      assert.throws(()=>createNativeStagedGitAdapter(executor,policy),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+      await assert.rejects(()=>executor.runStagedGitCandidate(policy.executable,['status'],dir,1000),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+      passed++;
+    } finally {fs.rmSync(dir,{recursive:true,force:true});}
+  } catch(err) {failed++;console.error('Native staged Git activation gate regression:',err);}
+  try {
+    const a='a'.repeat(40), b='b'.repeat(40);
+    const request={projectId:'fixture',operation:'git_fetch',remoteId:'origin',branch:'feat/network',expectedLocalHead:a,expectedRemoteHead:b};
+    const policy={projectId:'fixture',remotes:[{id:'origin',url:'https://example.invalid/team/repo.git',approvedBranches:['feat/network'],operations:['git_fetch','git_pull_ff','git_push'] as const}]};
+    const state={currentBranch:'feat/network',localHead:a,remoteHead:b,clean:true,operationInProgress:false,localIsAncestorOfRemote:true,remoteIsAncestorOfLocal:false};
+    assert.strictEqual(authorizeGitNetworkIntent(request,policy,state).ref,'refs/heads/feat/network');
+    assert.strictEqual(authorizeGitNetworkIntent({...request,operation:'git_pull_ff'},policy,state).endpoint,policy.remotes[0].url);
+    await assert.rejects(async()=>authorizeGitNetworkIntent({...request,operation:'git_push'},policy,state),/NOT_FAST_FORWARD/);
+    assert.strictEqual(authorizeGitNetworkIntent({...request,operation:'git_push'},policy,{...state,remoteIsAncestorOfLocal:true}).intent.operation,'git_push');
+    for(const extra of [{url:'https://evil.invalid/a/b.git'},{credential:'secret'},{force:true},{args:['--force']},{refspec:'+HEAD:main'}]) assert.throws(()=>parseGitNetworkIntent({...request,...extra}),/INTENT_DENIED/);
+    for(const endpoint of ['http://example.invalid/team/repo.git','https://user:pass@example.invalid/team/repo.git','https://example.invalid:443/team/repo.git','https://example.invalid/team/repo.git?token=x','https://127.0.0.1/team/repo.git','https://example.invalid/team/../repo.git','https://example.invalid/team/%72epo.git','file:///tmp/repo.git']) assert.throws(()=>validateGitNetworkEndpoint(endpoint),/ENDPOINT_DENIED/);
+    assert.throws(()=>authorizeGitNetworkIntent({...request,remoteId:'other'},policy,state),/POLICY_DENIED/);
+    assert.throws(()=>authorizeGitNetworkIntent(request,policy,{...state,remoteHead:a}),/STATE_CONFLICT/);
+    assert.throws(()=>authorizeGitNetworkIntent({...request,operation:'git_pull_ff'},policy,{...state,clean:false}),/NOT_FAST_FORWARD/);
+    passed++;
+  } catch(err) {failed++;console.error('Git network policy regression:',err);}
+  try {
+    // Real disposable bare remote; this fixture models the server CAS using
+    // update-ref rather than granting network or force-push permissions.
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-git-network-'));
+    try {
+      const local=path.join(dir,'local'), remote=path.join(dir,'remote.git'), source=path.join(dir,'source');
+      fs.mkdirSync(local);fs.mkdirSync(remote);fs.mkdirSync(source);
+      const env={...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:os.devNull,GIT_OPTIONAL_LOCKS:'0',GIT_NO_LAZY_FETCH:'1',GIT_TERMINAL_PROMPT:'0'};
+      for(const key of Object.keys(env)) if(key.startsWith('GIT_')&&!['GIT_CONFIG_NOSYSTEM','GIT_CONFIG_GLOBAL','GIT_OPTIONAL_LOCKS','GIT_NO_LAZY_FETCH','GIT_TERMINAL_PROMPT'].includes(key)) delete env[key];
+      const git=(cwd:string,args:readonly string[])=>execFileSync('git',[...args],{cwd,env,encoding:'utf8',timeout:10000,maxBuffer:262144});
+      const branch='feat/network', ref='refs/heads/'+branch;
+      const init=(cwd:string)=>{git(cwd,['init','-q','-b',branch,'--object-format=sha1']);git(cwd,['config','user.name','Fixture']);git(cwd,['config','user.email','fixture@example.invalid']);git(cwd,['config','commit.gpgsign','false']);};
+      init(source);git(remote,['init','--bare','-q','--object-format=sha1']);
+      fs.writeFileSync(path.join(source,'fixture.txt'),'one\n');git(source,['add','fixture.txt']);git(source,['commit','-qm','one']);
+      const a=git(source,['rev-parse','HEAD']).trim();
+      git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
+      init(local);git(local,['-c','protocol.file.allow=always','fetch','--no-tags',remote,ref]);
+      git(local,['checkout','-B',branch,'FETCH_HEAD']); // fixture setup only
+      fs.writeFileSync(path.join(source,'fixture.txt'),'two\n');git(source,['add','fixture.txt']);git(source,['commit','-qm','two']);
+      const b=git(source,['rev-parse','HEAD']).trim();
+      git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
+      const endpoint='https://example.invalid/team/repo.git';
+      const policy={projectId:'fixture',remotes:[{id:'origin',url:endpoint,approvedBranches:[branch],operations:['git_fetch','git_pull_ff','git_push'] as const}]};
+      let held=false, quarantined=false, calls=0, race=false;
+      const ancestor=(cwd:string,old:string,next:string)=>{
+        try {git(cwd,['merge-base','--is-ancestor',old,next]);return true;}catch{return false;}
+      };
+      const broker:GitNetworkBroker={async acquire(id){
+        assert.equal(id,'fixture');
+        if(held||quarantined) throw new Error('NETWORK_FENCE_HELD');
+        held=true;
+        return {policy,
+          async observe(intent,url,target){assert.equal(url,endpoint);assert.equal(target,ref);
+            const localHead=git(local,['rev-parse','HEAD']).trim(), remoteHead=git(remote,['rev-parse',ref]).trim();
+            return {currentBranch:git(local,['symbolic-ref','--short','HEAD']).trim(),localHead,remoteHead,
+              clean:git(local,['status','--porcelain']).trim()==='',operationInProgress:false,
+              localIsAncestorOfRemote:ancestor(local,localHead,remoteHead),remoteIsAncestorOfLocal:ancestor(local,remoteHead,localHead)};
+          },
+          async fetchPinned(url,target,expected){assert.equal(url,endpoint);assert.equal(target,ref);calls++;
+            git(local,['-c','protocol.file.allow=always','fetch','--no-tags','--no-recurse-submodules',remote,ref]);
+            assert.equal(git(local,['rev-parse','FETCH_HEAD']).trim(),expected);
+          },
+          async hasFetchedObject(head){try{git(local,['cat-file','-e',head+'^{commit}']);return true;}catch{return false;}},
+          async fastForward(old,next){assert.equal(git(local,['rev-parse','HEAD']).trim(),old);git(local,['merge','--ff-only',next]);},
+          async pushFastForwardCas(url,target,expected,next){
+            assert.equal(url,endpoint);assert.equal(target,ref);calls++;
+            // Transfer objects without moving destination branch, then perform
+            // the server-side exact ref CAS. No force-push in this fixture.
+            git(remote,['-c','protocol.file.allow=always','fetch','--no-tags',local,ref]);
+            assert.equal(git(remote,['rev-parse','FETCH_HEAD']).trim(),next);
+            assert.ok(ancestor(remote,expected,next));
+            if(race) git(remote,['update-ref',ref,next,expected]);
+            git(remote,['update-ref','--no-deref',ref,next,expected]);
+          },
+          async finish(disposition){assert.ok(held);held=false;quarantined=disposition==='quarantine';}
+        };
+      }};
+      const request={projectId:'fixture',operation:'git_fetch',remoteId:'origin',branch,expectedLocalHead:a,expectedRemoteHead:b};
+      await assert.rejects(()=>executeGitNetworkIntent({...request,remoteId:'unapproved'},broker),/POLICY_DENIED/);
+      assert.equal(calls,0);
+      await executeGitNetworkIntent(request,broker);
+      assert.equal(git(local,['rev-parse','HEAD']).trim(),a);
+      await executeGitNetworkIntent({...request,operation:'git_pull_ff'},broker);
+      assert.equal(git(local,['rev-parse','HEAD']).trim(),b);
+      assert.equal(fs.readFileSync(path.join(local,'fixture.txt'),'utf8'),'two\n');
+      // Direct pull of a previously unknown remote object must prove ancestry
+      // after pinned fetch, not require a separate caller fetch operation.
+      fs.writeFileSync(path.join(source,'fixture.txt'),'remote third\n');git(source,['add','fixture.txt']);git(source,['commit','-qm','remote third']);
+      const b2=git(source,['rev-parse','HEAD']).trim();
+      git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
+      await executeGitNetworkIntent({...request,operation:'git_pull_ff',expectedLocalHead:b,expectedRemoteHead:b2},broker);
+      assert.equal(git(local,['rev-parse','HEAD']).trim(),b2);
+      assert.equal(fs.readFileSync(path.join(local,'fixture.txt'),'utf8'),'remote third\n');
+      fs.writeFileSync(path.join(local,'fixture.txt'),'three\n');git(local,['add','fixture.txt']);git(local,['commit','-qm','three']);
+      const c=git(local,['rev-parse','HEAD']).trim();
+      await executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:c,expectedRemoteHead:b2},broker);
+      assert.equal(git(remote,['rev-parse',ref]).trim(),c);
+      fs.writeFileSync(path.join(local,'fixture.txt'),'four\n');git(local,['add','fixture.txt']);git(local,['commit','-qm','four']);
+      const d=git(local,['rev-parse','HEAD']).trim();
+      race=true;
+      await assert.rejects(()=>executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:d,expectedRemoteHead:c},broker));
+      assert.equal(quarantined,true);
+      await assert.rejects(()=>executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:d,expectedRemoteHead:c},broker),/FENCE_HELD/);
+      passed++;
+    } finally {fs.rmSync(dir,{recursive:true,force:true});}
+  } catch(err) {failed++;console.error('Git network broker fixture regression:',err);}
+  return {passed,failed};
+}

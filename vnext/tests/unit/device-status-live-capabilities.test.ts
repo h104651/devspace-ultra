@@ -53,6 +53,48 @@ export async function runDeviceStatusLiveCapabilitiesUnitTests(): Promise<{ pass
 
     const handlers = new McpHandlers(gatewayMock);
 
+    const maintenanceCaller = { subjectId: 'maintenance-reader', scopes: ['local:read', 'tasks:read', 'tasks:inventory'] };
+    await assert.rejects(() => handlers.handleDeviceMaintenanceCheck({ targetDeviceId: deviceId }, { subjectId: 'limited', scopes: ['local:read', 'tasks:read'] }), /AUTH_FORBIDDEN/);
+    await assert.rejects(() => handlers.handleDeviceMaintenanceCheck({}, maintenanceCaller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleDeviceMaintenanceCheck({ targetDeviceId: 'not-registered' }, maintenanceCaller), /DEVICE_NOT_FOUND/);
+    const maintenanceOffline = await handlers.handleDeviceMaintenanceCheck({ targetDeviceId: deviceId }, maintenanceCaller);
+    assert.strictEqual(maintenanceOffline.observation, 'BLOCKED');
+    assert.strictEqual(maintenanceOffline.maintenanceAuthorized, false);
+    assert.strictEqual(maintenanceOffline.admissionClosed, false);
+    assert.ok(maintenanceOffline.blockers.includes('SINGLE_HEALTHY_SESSION_NOT_OBSERVED'));
+    mockConnectedAgents = [{ deviceId, connectedAt: Date.now() }];
+    const idle = await handlers.handleDeviceMaintenanceCheck({ targetDeviceId: deviceId }, maintenanceCaller);
+    assert.strictEqual(idle.observation, 'IDLE_OBSERVED');
+    assert.strictEqual(idle.maintenanceAuthorized, false);
+    const work = taskStore.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: deviceId, payload: {} });
+    const busy = await handlers.handleDeviceMaintenanceCheck({ targetDeviceId: deviceId }, maintenanceCaller);
+    assert.strictEqual(busy.targetActiveCount, 1);
+    assert.ok(busy.blockers.includes('TARGET_ACTIVE_TASKS'));
+    assert.ok(taskStore.cancelTask(work.taskId, 'fixture cleanup'));
+    mockConnectedAgents.push({ deviceId, connectedAt: Date.now() });
+    assert.ok((await handlers.handleDeviceMaintenanceCheck({ targetDeviceId: deviceId }, maintenanceCaller)).blockers.includes('MULTIPLE_SESSIONS'));
+    mockConnectedAgents = [];
+    passed++;
+
+    // Admission changes require a separate scope even for inventory readers.
+    const maintainer = { ...maintenanceCaller, scopes: [...maintenanceCaller.scopes, 'devices:maintenance'] };
+    await assert.rejects(() => handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: 'initial' }, maintenanceCaller, true), /AUTH_FORBIDDEN/);
+    const closed = await handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: 'initial' }, maintainer, true);
+    assert.strictEqual(closed.admissionClosed, true);
+    assert.strictEqual(closed.maintenanceAuthorized, false);
+    const observedClosed = await handlers.handleDeviceMaintenanceCheck({ targetDeviceId: deviceId }, maintenanceCaller);
+    assert.strictEqual(observedClosed.admissionRevision, closed.admissionRevision);
+    assert.strictEqual(observedClosed.admissionClosed, true);
+    await assert.rejects(() => handlers.handleRemoteTaskSubmit({ backend: 'local', capability: 'local:git_status', targetDeviceId: deviceId, payload: {} }, callerAdmin), /DEVICE_ADMISSION_CLOSED/);
+    await assert.rejects(() => handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: closed.admissionRevision }, maintainer, false), /DEVICE_RESUME_BLOCKED/);
+    mockConnectedAgents = [{ deviceId, sessionId: 'maintenance-fixture', connectedAt: Date.now() }];
+    const reopened = await handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: closed.admissionRevision }, maintainer, false);
+    assert.strictEqual(reopened.admissionClosed, false);
+    assert.notStrictEqual(reopened.admissionRevision, closed.admissionRevision);
+    await assert.rejects(() => handlers.handleDeviceAdmissionChange({ targetDeviceId: deviceId, expectedRevision: closed.admissionRevision }, maintainer, true), /REVISION_CONFLICT/);
+    mockConnectedAgents = [];
+    passed++;
+
     const offlineStatus = await handlers.handleDeviceStatus(callerAdmin);
     assert.strictEqual(offlineStatus.totalOnline, 0);
     assert.strictEqual(offlineStatus.totalConnections, 0);

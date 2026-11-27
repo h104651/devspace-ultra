@@ -35,8 +35,14 @@ async function handleRemoteTaskWait(taskStore, args, callerScopes) {
         throw new Error('TASK_WAIT_INVALID: timeoutMs must be a number between 0 and 120000');
     }
     const timeoutMs = Math.floor(rawTimeout);
+    if (taskStore.getTask(args.taskId)?.capability === 'local:git_read' && !scope_checker_1.ScopeChecker.hasScope(callerScopes, 'local:git:read')) {
+        throw new Error("AUTH_FORBIDDEN: Required scope 'local:git:read' not granted");
+    }
     const waited = await taskStore.waitForTask(args.taskId, { timeoutMs });
     const task = waited.task;
+    if (task.capability === 'local:git_read' && !scope_checker_1.ScopeChecker.hasScope(callerScopes, 'local:git:read')) {
+        throw new Error("AUTH_FORBIDDEN: Required scope 'local:git:read' not granted");
+    }
     return {
         taskId: task.taskId,
         backend: task.backend,

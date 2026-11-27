@@ -10,6 +10,8 @@ export interface AgentRegisterMessage {
   capabilities: string[];
   token: string;
   supportsAttemptFencing?: boolean;
+  supportsExecutionCancellation?: boolean;
+  executionPolicyRevision?: string;
   reconnectProof?: string;
   reconnectSequence?: number;
 }
@@ -31,10 +33,17 @@ export interface AgentHeartbeatMessage {
   activeTaskAttempts?: Array<{ taskId: string; attemptId: string }>;
 }
 
+export interface ExecutionCancellationRequest {
+  taskId: string;
+  attemptId: string;
+  requestId: string;
+}
+
 export interface AgentHeartbeatAckMessage {
   type: 'AGENT_HEARTBEAT_ACK';
   messageId: string;
   timestamp: number;
+  cancellations?: ExecutionCancellationRequest[];
 }
 
 export interface TaskClaimPollMessage {
@@ -43,6 +52,7 @@ export interface TaskClaimPollMessage {
   timestamp: number;
   deviceId: string;
   supportedCapabilities: string[];
+  executionPolicyRevision?: string;
   maxTasks?: number;
 }
 
@@ -108,6 +118,13 @@ export interface TaskFailMessage {
   retryable?: boolean;
 }
 
+export interface TaskCancelConfirmedMessage extends ExecutionCancellationRequest {
+  type: 'TASK_CANCEL_CONFIRMED';
+  messageId: string;
+  timestamp: number;
+  deviceId: string;
+}
+
 export interface GenericErrorMessage {
   type: 'ERROR';
   messageId: string;
@@ -127,4 +144,5 @@ export type GatewayMessage =
   | TaskLogAppendMessage
   | TaskCompleteMessage
   | TaskFailMessage
+  | TaskCancelConfirmedMessage
   | GenericErrorMessage;

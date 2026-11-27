@@ -149,6 +149,7 @@ class GatewayServer {
         switch (name) {
             case 'remote_task_submit': return this.mcpHandlers.handleRemoteTaskSubmit(args, caller);
             case 'remote_task_status': return this.mcpHandlers.handleRemoteTaskStatus(args, caller);
+            case 'task_inventory': return this.mcpHandlers.handleTaskInventory(args, caller);
             case 'remote_task_wait': return (0, reliability_tools_1.handleRemoteTaskWait)(this.taskStore, args, caller.scopes);
             case 'remote_task_logs': return this.mcpHandlers.handleRemoteTaskLogs(args, caller);
             case 'remote_task_artifacts': return this.mcpHandlers.handleRemoteTaskArtifacts(args, caller);
@@ -180,6 +181,7 @@ class GatewayServer {
             case 'local_find_repositories': return this.mcpHandlers.handleLocalFindRepositories(args, caller);
             case 'local_create_directory': return this.mcpHandlers.handleLocalCreateDirectory(args, caller);
             case 'local_git_status': return this.mcpHandlers.handleLocalGitStatus(args, caller);
+            case 'local_git_read': return this.mcpHandlers.handleLocalGitRead(args, caller);
             case 'local_run_tests': return this.mcpHandlers.handleLocalRunTests(args, caller);
             case 'local_build_project': return this.mcpHandlers.handleLocalBuildProject(args, caller);
             case 'swarm_dispatch': return this.mcpHandlers.handleSwarmDispatch(args, caller);
@@ -192,7 +194,10 @@ class GatewayServer {
             case 'chat_swarm_cancel': return this.mcpHandlers.handleChatSwarmCancel(args, caller);
             case 'chat_swarm_wake_bridge': return this.mcpHandlers.handleChatSwarmWakeBridge(args, caller);
             case 'chat_swarm_runtime_status': return this.mcpHandlers.handleChatSwarmRuntimeStatus(caller);
-            case 'device_status': return this.mcpHandlers.handleDeviceStatus(caller);
+            case 'device_status': return this.mcpHandlers.handleDeviceStatus(args, caller);
+            case 'device_maintenance_check': return this.mcpHandlers.handleDeviceMaintenanceCheck(args, caller);
+            case 'device_drain': return this.mcpHandlers.handleDeviceAdmissionChange(args, caller, true);
+            case 'device_resume': return this.mcpHandlers.handleDeviceAdmissionChange(args, caller, false);
             case 'kill_switch_trigger': return this.mcpHandlers.handleKillSwitchTrigger(args, caller);
             default: throw Object.assign(new Error(`Tool '${name}' not found`), { mcpNotFound: true });
         }
@@ -428,6 +433,8 @@ class GatewayServer {
             const task = this.taskStore.getTask(req.params.taskId);
             if (!task)
                 return res.status(404).json({ error: 'TASK_NOT_FOUND' });
+            if (task.capability === 'local:git_read' && !scope_checker_1.ScopeChecker.hasScope(req.auth.scopes, 'local:git:read'))
+                return res.status(403).json({ error: 'FORBIDDEN' });
             res.json(task);
         });
         this.app.post('/api/tasks/:taskId/cancel', this.authenticate('tasks:cancel'), (req, res) => {
@@ -444,6 +451,8 @@ class GatewayServer {
             const task = this.taskStore.getTask(req.params.taskId);
             if (!task)
                 return res.status(404).json({ error: 'TASK_NOT_FOUND' });
+            if (task.capability === 'local:git_read' && !scope_checker_1.ScopeChecker.hasScope(req.auth.scopes, 'local:git:read'))
+                return res.status(403).json({ error: 'FORBIDDEN' });
             const limit = parseInt(req.query.limit) || 1000;
             res.json({ taskId: task.taskId, logs: task.logs.slice(-limit) });
         });
@@ -451,6 +460,8 @@ class GatewayServer {
             const task = this.taskStore.getTask(req.params.taskId);
             if (!task)
                 return res.status(404).json({ error: 'TASK_NOT_FOUND' });
+            if (task.capability === 'local:git_read' && !scope_checker_1.ScopeChecker.hasScope(req.auth.scopes, 'local:git:read'))
+                return res.status(403).json({ error: 'FORBIDDEN' });
             res.json({ taskId: task.taskId, artifacts: task.artifacts.map(id => this.artifactStore.getArtifactMetadata(id)).filter(Boolean) });
         });
         this.app.get('/api/artifacts/:artifactId', this.authenticate('artifacts:read'), (req, res) => {

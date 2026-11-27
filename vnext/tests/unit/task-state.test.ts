@@ -14,6 +14,30 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
   try {
     const store = new TaskStore(testDir, 1000); // 1 sec default lease for fast testing
 
+    // Real file-backed admission state is retained on gateway restart.
+    const fenceDir = testDir + '/fence-fixture';
+    const fenced = new TaskStore(fenceDir);
+    const queued = fenced.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'paused', payload: {} });
+    const closure = fenced.setDeviceAdmission('paused', true, 'initial');
+    const reloaded = new TaskStore(fenceDir);
+    assert.deepStrictEqual(reloaded.getDeviceAdmission('paused'), closure);
+    assert.strictEqual(reloaded.claimTask('paused', ['local:read_file']), undefined);
+    assert.strictEqual(reloaded.claimTaskById(queued.taskId, 'paused'), undefined);
+    assert.throws(() => reloaded.setDeviceAdmission('paused', false, closure.revision), /DEVICE_RESUME_BLOCKED/);
+    assert.ok(reloaded.cancelTask(queued.taskId, 'fixture cleanup'));
+    const open = reloaded.setDeviceAdmission('paused', false, closure.revision);
+    assert.strictEqual(open.closed, false);
+    assert.deepStrictEqual(new TaskStore(fenceDir).getDeviceAdmission('paused'), open);
+    assert.throws(() => reloaded.setDeviceAdmission('paused', true, closure.revision), /REVISION_CONFLICT/);
+    const unrelated = reloaded.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'other', payload: {} });
+    assert.ok(reloaded.claimTaskById(unrelated.taskId, 'other'));
+    const stateDir = fenceDir + '/device-admission';
+    const stateFile = fs.readdirSync(stateDir).find(name => name.endsWith('.json'))!;
+    fs.writeFileSync(stateDir + '/' + stateFile, 'null');
+    assert.throws(() => reloaded.getDeviceAdmission('paused'), /LOCAL_TASK_PERSISTENCE_UNAVAILABLE/);
+    assert.throws(() => reloaded.claimTask('other', ['local:read_file']), /LOCAL_TASK_PERSISTENCE_UNAVAILABLE/);
+    passed++;
+
     // Test 1: Task creation
     const task = store.createTask({
       backend: 'local',
@@ -188,6 +212,46 @@ export async function runTaskStateUnitTests(): Promise<{ passed: number; failed:
     assert.strictEqual(recoveredAttemptTask.attempts[0].errorCode, 'TASK_LEASE_EXPIRED');
     assert.ok(recoveredAttemptTask.attempts[0].completedAt);
     passed++;
+
+    // A stale mutation remains terminal and cannot be hidden by cancellation.
+    const mutation = store.createTask({
+      backend: 'local', capability: 'local:write_file',
+      payload: { path: 'fixture.txt', content: 'fixture' }, targetDeviceId: 'device-stale-mutation'
+    });
+    assert.ok(store.claimTaskById(mutation.taskId, 'device-stale-mutation', 1000, 'old-session'));
+    assert.strictEqual(store.failTasksForSupersededSession('device-stale-mutation', 'old-session'), 1);
+    assert.strictEqual(store.cancelTask(mutation.taskId, 'must not hide stale'), false);
+    assert.strictEqual(store.getTask(mutation.taskId)?.status, 'stale');
+    assert.strictEqual(store.getTask(mutation.taskId)?.error?.code, 'SESSION_SUPERSEDED_MUTATION_UNCERTAIN');
+    passed++;
+
+    // Queued execution is cancellable; a dispatched execution requires real drain acknowledgement.
+    for (const capability of ['local:run_tests', 'local:build_project']) {
+      const options = { backend: 'local' as const, capability, payload: { projectId: 'fixture' }, targetDeviceId: 'device-exec-cancel', metadata: { executionAdmission: { sessionId: 'cancel-session', policyRevision: 'a'.repeat(32) } } };
+      const queuedExecution = store.createTask(options);
+      assert.strictEqual(store.cancelTask(queuedExecution.taskId, 'not dispatched'), true);
+      const runningExecution = store.createTask(options);
+      assert.ok(store.claimTaskById(runningExecution.taskId, 'device-exec-cancel', 1000, 'cancel-session', 'a'.repeat(32)));
+      assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'claimed');
+      assert.strictEqual(store.acknowledgeTask(runningExecution.taskId, 'device-exec-cancel'), true);
+      assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
+      assert.strictEqual(store.startTask(runningExecution.taskId, 'device-exec-cancel'), true);
+      assert.strictEqual(store.cancelTask(runningExecution.taskId, 'no drain proof'), false);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'running');
+      const attempt = runningExecution.activeAttemptId!;
+      assert.throws(() => store.requestExecutionCancellation(runningExecution.taskId, 'wrong-device', 'cancel-session', attempt), /EXECUTION_CANCEL_NOT_ACTIVE/);
+      const requestId = store.requestExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt);
+      assert.strictEqual(store.requestExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt), requestId);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'running');
+      assert.strictEqual(store.getPendingExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'wrong-session', attempt), undefined);
+      assert.strictEqual(store.confirmExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt, 'wrong-request'), false);
+      assert.strictEqual(store.getPendingExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt)?.requestId, requestId);
+      assert.strictEqual(store.confirmExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt, requestId), true);
+      assert.strictEqual(store.getTask(runningExecution.taskId)?.status, 'cancelled');
+      assert.strictEqual(store.confirmExecutionCancellation(runningExecution.taskId, 'device-exec-cancel', 'cancel-session', attempt, requestId), false);
+      passed++;
+    }
 
     // Test 13: Event-driven wait resolves on task change and reports bounded timeout without polling.
     const task8 = store.createTask({

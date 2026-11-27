@@ -13,6 +13,8 @@ export interface ConfiguredCommand {
   executable: string;
   args: string[];
   env?: Record<string, string>;
+  workingRelativePath?: string;
+  timeoutMs?: number;
 }
 
 export interface LocalProjectCommands {
@@ -444,10 +446,10 @@ export class ProjectRegistry {
       if (p.permissions.write) {
         availableCapabilities.push('local:write_file', 'local:patch_file');
       }
-      if (p.permissions.test && p.permissions.hostExecution) {
+      if (p.permissions.test && p.permissions.hostExecution && Object.keys(p.commands?.test || {}).length > 0) {
         availableCapabilities.push('local:run_tests');
       }
-      if (p.permissions.build && p.permissions.hostExecution) {
+      if (p.permissions.build && p.permissions.hostExecution && Object.keys(p.commands?.build || {}).length > 0) {
         availableCapabilities.push('local:build_project');
       }
 

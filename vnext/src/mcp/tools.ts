@@ -15,7 +15,7 @@ export const REMOTE_TASK_SUBMIT_SCHEMA = {
 export const REMOTE_TASK_STATUS_SCHEMA = { type: 'object', properties: { taskId: { type: 'string', description: 'ID of the task to query' } }, required: ['taskId'], additionalProperties: false };
 export const REMOTE_TASK_LOGS_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' }, limit: { type: 'number', description: 'Maximum number of recent log lines to retrieve' } }, required: ['taskId'], additionalProperties: false };
 export const REMOTE_TASK_ARTIFACTS_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'], additionalProperties: false };
-export const REMOTE_TASK_CANCEL_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' } }, required: ['taskId'], additionalProperties: false };
+export const REMOTE_TASK_CANCEL_SCHEMA = { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' }, targetDeviceId: { type: 'string', description: 'Required for active local Build/Test cancellation' }, attemptId: { type: 'string', description: 'Exact active attempt for Build/Test cancellation' } }, required: ['taskId'], additionalProperties: false };
 
 export const KAGGLE_RUN_SCHEMA = {
   type: 'object',
@@ -641,6 +641,21 @@ export const LOCAL_GIT_STATUS_SCHEMA = {
   additionalProperties: false
 };
 
+const LOCAL_GIT_READ_SCHEMA = {
+  type: 'object',
+  properties: {
+    targetDeviceId: { type: 'string', description: 'Explicit registered device ID' },
+    projectId: { type: 'string', description: 'Normalized locally approved project ID' },
+    clientRequestId: { type: 'string', description: 'Stable request ID for idempotency' },
+    operation: { type: 'string', enum: ['git_log', 'git_diff_commits'] },
+    head: { type: 'string', description: 'Full lowercase Git object ID' },
+    base: { type: 'string', description: 'Required only for git_diff_commits' },
+    limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Only for git_log, default 30' }
+  },
+  required: ['targetDeviceId', 'projectId', 'clientRequestId', 'operation', 'head'],
+  additionalProperties: false
+};
+
 export const LOCAL_RUN_TESTS_SCHEMA = {
   type: 'object',
   properties: {
@@ -702,13 +717,47 @@ const LOCAL_CREATE_ANNOTATIONS: McpToolAnnotations = {
   openWorldHint: false
 };
 
+const DEVICE_ADMISSION_CHANGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    targetDeviceId: { type: 'string', description: 'Exact registered device ID' },
+    expectedRevision: { type: 'string', description: 'Admission revision from device_maintenance_check' }
+  },
+  required: ['targetDeviceId', 'expectedRevision'],
+  additionalProperties: false
+};
+
+const DEVICE_MAINTENANCE_CHECK_SCHEMA = {
+  type: 'object',
+  properties: { targetDeviceId: { type: 'string', description: 'Exact registered device ID' } },
+  required: ['targetDeviceId'],
+  additionalProperties: false
+};
+
+const TASK_INVENTORY_SCHEMA = {
+  type: 'object',
+  properties: {
+    backend: { type: 'string', enum: ['all', 'local', 'kaggle', 'browser', 'swarm'] },
+    status: { type: 'string', enum: ['all', 'active', 'stale', 'quarantined'] },
+    targetDeviceId: { type: 'string', description: 'Filter local records to one explicit target device; global counts remain unchanged' },
+    limit: { type: 'integer', minimum: 1, maximum: 100 },
+    offset: { type: 'integer', minimum: 0, maximum: 10000 },
+    snapshotRevision: { type: 'string', description: 'Exact revision returned by first page; required for offset > 0' }
+  },
+  additionalProperties: false
+};
+
 export function getCanonicalToolsList(): McpToolDefinition[] {
   return [
     { name: 'remote_task_submit', description: 'Submit durable task to local agent, Kaggle, browser, or swarm backend', inputSchema: REMOTE_TASK_SUBMIT_SCHEMA },
     { name: 'remote_task_status', description: 'Query durable task status', inputSchema: REMOTE_TASK_STATUS_SCHEMA },
+    { name: 'task_inventory', description: 'Read active tasks and local stale records; revision-checked pagination, minimal metadata, requires explicit tasks:inventory scope', inputSchema: TASK_INVENTORY_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'device_maintenance_check', description: 'Observe target device tasks and session health; requires local:read and tasks:inventory; never authorizes maintenance', inputSchema: DEVICE_MAINTENANCE_CHECK_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'device_drain', description: 'Persistently close one device admission to new local work; requires explicit devices:maintenance scope and current revision; does not stop processes', inputSchema: DEVICE_ADMISSION_CHANGE_SCHEMA, annotations: LOCAL_WRITE_ANNOTATIONS },
+    { name: 'device_resume', description: 'Reopen one device admission after reviewed reconciliation; requires devices:maintenance scope, exact revision and healthy target', inputSchema: DEVICE_ADMISSION_CHANGE_SCHEMA, annotations: LOCAL_WRITE_ANNOTATIONS },
     { name: 'remote_task_logs', description: 'Fetch task execution logs', inputSchema: REMOTE_TASK_LOGS_SCHEMA },
     { name: 'remote_task_artifacts', description: 'List task artifacts', inputSchema: REMOTE_TASK_ARTIFACTS_SCHEMA },
-    { name: 'remote_task_cancel', description: 'Cancel active task', inputSchema: REMOTE_TASK_CANCEL_SCHEMA },
+    { name: 'remote_task_cancel', description: 'Cancel queued task or request confirmed active Build/Test cancellation; inspect status for terminal outcome', inputSchema: REMOTE_TASK_CANCEL_SCHEMA },
     { name: 'kaggle_run', description: 'Run code on Kaggle backend', inputSchema: KAGGLE_RUN_SCHEMA },
     { name: 'kaggle_status', description: 'Check Kaggle execution status', inputSchema: KAGGLE_STATUS_SCHEMA },
     { name: 'kaggle_logs', description: 'Fetch Kaggle execution logs', inputSchema: KAGGLE_LOGS_SCHEMA },
@@ -738,6 +787,7 @@ export function getCanonicalToolsList(): McpToolDefinition[] {
     { name: 'local_find_repositories', description: 'Recursively discover Git repositories and project types within an authorized workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_FIND_REPOSITORIES_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
     { name: 'local_create_directory', description: 'Create directory within an authorized local workspace root. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_CREATE_DIRECTORY_SCHEMA, annotations: LOCAL_CREATE_ANNOTATIONS },
     { name: 'local_git_status', description: 'Get git status of an authorized local workspace or nested subproject repository. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: LOCAL_GIT_STATUS_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'local_git_read', description: 'Submit isolated committed Git log or diff for an explicit device and approved project; requires local:git:read and tasks:submit', inputSchema: LOCAL_GIT_READ_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
     { name: 'local_run_tests', description: 'Run test suite inside an authorized local project or subproject root', inputSchema: LOCAL_RUN_TESTS_SCHEMA },
     { name: 'local_build_project', description: 'Execute build command inside an authorized local project or subproject root', inputSchema: LOCAL_BUILD_PROJECT_SCHEMA },
 

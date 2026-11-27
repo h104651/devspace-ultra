@@ -315,7 +315,118 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
     });
 
     // ----------------------------------------------------
-    // PART 2: Full Gateway + LocalAgent Client E2E Flow & local:exec scope check
+    await test('TaskExecutor: child env excludes Agent credentials and output is bounded', async () => {
+      const previous = process.env.AGENT_TOKEN;
+      process.env.AGENT_TOKEN = 'fixture-not-a-production-token';
+      try {
+        const res = await (executor as any).executeProcessWithoutShell(process.execPath,
+          ['-e', 'process.stdout.write(String(Boolean(process.env.AGENT_TOKEN)) + ":" + "x".repeat(400000))'],
+          rootA, undefined, () => {});
+        assert.ok(res.stdout.startsWith('false:'));
+        assert.strictEqual(res.stdout.length, 256 * 1024);
+        assert.strictEqual(res.outputTruncated, true);
+        await assert.rejects(async () => (executor as any).executeProcessWithoutShell(
+          process.execPath, ['-e', ''], rootA, { agent_token: 'fixture' }, () => {}), /LOCAL_RUNNER_ENV_DENIED/);
+        await assert.rejects(async () => (executor as any).executeProcessWithoutShell(
+          process.execPath, [123], rootA, undefined, () => {}), /LOCAL_RUNNER_INVALID/);
+      } finally {
+        if (previous === undefined) delete process.env.AGENT_TOKEN;
+        else process.env.AGENT_TOKEN = previous;
+      }
+    });
+
+    await test('TaskExecutor: legacy hostExecution does not authorize implicit runner', async () => {
+      await assert.rejects(
+        () => executor.executeTask(makeTask('local:run_tests', { projectId: 'project-a', runnerId: 'npm' }), () => {}),
+        /LOCAL_RUNNER_NOT_ALLOWED/
+      );
+      await assert.rejects(
+        () => executor.executeTask(makeTask('local:build_project', { projectId: 'project-a', commandId: 'flutter' }), () => {}),
+        /LOCAL_RUNNER_NOT_ALLOWED/
+      );
+    });
+
+    await test('TaskExecutor: explicit runner and pinned working directory required', async () => {
+      fs.mkdirSync(path.join(rootA, 'nested'), { recursive: true });
+      registry.registerProject({
+        projectId: 'project-a', root: rootA,
+        permissions: { read: true, test: true, hostExecution: true },
+        commands: { test: {
+          fixture: { executable: process.execPath, args: ['-e', 'console.log("fixture-ok")'], workingRelativePath: 'nested' },
+          relative: { executable: 'node', args: ['--version'] }
+        } }
+      });
+      await assert.rejects(() => executor.executeTask(makeTask('local:run_tests', {
+        projectId: 'project-a', runnerId: 'fixture'
+      }), () => {}), /LOCAL_RUNNER_WORKDIR_DENIED/);
+      await assert.rejects(() => executor.executeTask(makeTask('local:run_tests', {
+        projectId: 'project-a', runnerId: 'relative'
+      }), () => {}), /LOCAL_RUNNER_INVALID/);
+      const result = await executor.executeTask(makeTask('local:run_tests', {
+        projectId: 'project-a', runnerId: 'fixture', workingRelativePath: 'nested'
+      }), () => {});
+      assert.strictEqual(result.exitCode, 0);
+      assert.ok(result.stdout.includes('fixture-ok'));
+    });
+
+    await test('Agent: uncertain runner tree fences connection and retains in-flight task for audit', async () => {
+      let rejected = '';
+      let terminated = false;
+      const messages: any[] = [];
+      const local = new LocalAgentClient({
+        gatewayUrl: 'ws://127.0.0.1:1/ws/agent', deviceId: 'fixture-quarantine', token: 'fixture',
+        projects: [{
+          projectId: 'project-a', root: rootA,
+          permissions: { read: true, test: true, hostExecution: true },
+          commands: { test: { fixture: { executable: process.execPath, args: ['--version'] } } }
+        }],
+        onPolicyRejected: reason => { rejected = reason; }
+      });
+      const internal = local as any;
+      const task = makeTask('local:run_tests', { projectId: 'project-a', runnerId: 'fixture' });
+      const socket = { terminate: () => { terminated = true; } };
+      internal.ws = socket;
+      internal.registeredSocket = socket;
+      internal.registeredSessionId = 'fixture-session';
+      internal.executionPolicyFingerprint = internal.computeExecutionPolicyFingerprint();
+      internal.executionPolicyRevision = 'a'.repeat(32);
+      task.metadata = { executionAdmission: { sessionId: 'fixture-session', policyRevision: 'a'.repeat(32) } };
+      internal.isRunning = true;
+      internal.activeTasks.set(task.taskId, task);
+      internal.taskSockets.set(task.taskId, socket);
+      internal.send = (msg: any) => messages.push(msg);
+      internal.executor.executeTask = async () => { throw new Error('LOCAL_PROCESS_TREE_UNCERTAIN: fixture'); };
+      await internal.runAssignedTask(task, socket);
+      assert.ok(terminated && rejected.includes('LOCAL_PROCESS_TREE_UNCERTAIN'));
+      assert.strictEqual(internal.isRunning, false);
+      assert.strictEqual(local.hasInFlightTasks(), true);
+      assert.strictEqual(local.getInFlightTasks()[0].taskId, task.taskId);
+      assert.ok(!messages.some(msg => msg.type === 'TASK_COMPLETE' || msg.type === 'TASK_FAIL'));
+      local.start();
+      assert.strictEqual(internal.isRunning, false, 'Uncertain attempt prevents reconnect');
+    });
+
+    await test('Execution policy generation is invalidated by a changed local runner and cannot revive in the same session', () => {
+      const local = new LocalAgentClient({
+        gatewayUrl: 'ws://127.0.0.1:1/ws/agent', deviceId: 'policy-fixture', token: 'fixture',
+        projects: [{
+          projectId: 'fixture', root: rootA,
+          permissions: { read: true, test: true, hostExecution: true },
+          commands: { test: { npm: { executable: process.execPath, args: ['--version'] } } }
+        }]
+      });
+      const internal = local as any;
+      const project = internal.executor.getRegistry().getProject('fixture');
+      internal.executionPolicyFingerprint = internal.computeExecutionPolicyFingerprint();
+      internal.executionPolicyRevision = 'b'.repeat(32);
+      assert.strictEqual(internal.currentExecutionPolicyRevision(), 'b'.repeat(32));
+      project.commands.test.npm.args = ['-e', 'console.log("changed")'];
+      assert.strictEqual(internal.currentExecutionPolicyRevision(), undefined);
+      project.commands.test.npm.args = ['--version'];
+      assert.strictEqual(internal.currentExecutionPolicyRevision(), undefined);
+    });
+
+    // PART 2: Full Gateway + LocalAgent Client E2E Flow & execution scope check
     // ----------------------------------------------------
     const testStorageDir = path.join(tmpBase, '.devspace-storage-gateway');
     const port = 27100 + Math.floor(Math.random() * 2000);
@@ -334,7 +445,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       const { deviceId, token: deviceToken } = server.authManager.registerDevice(
         'Multi-Project Worker',
         'windows',
-        ['local:list_projects', 'local:project_status', 'local:read', 'local:write', 'local:git_status', 'local:run_tests']
+        ['local:list_projects', 'local:project_status', 'local:read', 'local:write', 'local:git_status', 'local:execute:test']
       );
 
       agent = new LocalAgentClient({
@@ -342,7 +453,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         deviceId,
         token: deviceToken,
         projects: [
-          { projectId: 'project-a', displayName: 'Project Alpha', root: rootA, permissions: { read: true, write: true, test: true, build: true, hostExecution: true } },
+          { projectId: 'project-a', displayName: 'Project Alpha', root: rootA, permissions: { read: true, write: true, test: true, build: true, hostExecution: true }, commands: { test: { npm: { executable: process.execPath, args: ['-e', 'console.log("fixture test")'] } } } },
           { projectId: 'project-b', displayName: 'Project Beta', root: rootB, permissions: { read: true, write: true, test: true, build: true, hostExecution: true } }
         ],
         pollIntervalMs: 50,
@@ -355,6 +466,23 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
         if (server.connectionManager.getConnectedAgents().length > 0) break;
       }
       assert.strictEqual(server.connectionManager.getConnectedAgents().length, 1);
+      await test('Execution advertisement requires local runner and authenticated scope', () => {
+        const connected = server.connectionManager.getConnectedAgents()[0];
+        assert.ok(connected.capabilities.includes('local:run_tests'));
+        assert.ok(!connected.capabilities.includes('local:build_project'));
+        const agentInternal = agent as any;
+        const registry = agentInternal.executor.getRegistry();
+        registry.registerProject({
+          projectId: 'project-a', root: rootA,
+          permissions: { read: true, write: true, test: true, build: true, hostExecution: true }
+        });
+        assert.deepStrictEqual(agentInternal.currentExecutionCapabilities(['local:read_file', 'local:run_tests', 'local:build_project']), ['local:read_file']);
+        registry.registerProject({
+          projectId: 'project-a', root: rootA,
+          permissions: { read: true, write: true, test: true, build: true, hostExecution: true },
+          commands: { test: { npm: { executable: process.execPath, args: ['-e', 'console.log("fixture test")'] } } }
+        });
+      });
 
       const mcpHandlers = new McpHandlers(server);
 
@@ -367,7 +495,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
       await test('MCP Handlers: local_run_tests requires local:exec scope (rejected without local:exec)', async () => {
         await assert.rejects(
           async () => mcpHandlers.handleLocalRunTests({ projectId: 'project-a' }, callerWithoutExec),
-          /AUTH_FORBIDDEN: Required one of scopes: local:exec/
+          /AUTH_FORBIDDEN: Required one of scopes: local:execute:test/
         );
       });
 
@@ -425,7 +553,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
             capability: 'local:run_tests',
             payload: { projectId: 'project-a' }
           }, callerTestNoExec),
-          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:exec'/
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:execute:test'/
         );
       });
 
@@ -449,7 +577,7 @@ export async function runLocalProjectRoutingIntegrationTests(): Promise<{ passed
             capability: 'local:run_tests',
             payload: { projectId: 'project-a' }
           }, callerExecOnly),
-          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:exec'/
+          /AUTH_FORBIDDEN: Local task submission requires both 'tasks:submit' and 'local:execute:test'/
         );
       });
 

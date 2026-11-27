@@ -30,6 +30,31 @@ export async function runScopesUnitTests(): Promise<{ passed: number; failed: nu
     assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:write_file'), 'local:write');
     assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:raw_shell'), 'raw_shell:run');
     passed++;
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:run_tests'), 'local:execute:test');
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:build_project'), 'local:execute:build');
+    for (const scope of ['local:read', 'local:write', 'local:test', 'local:run_tests', 'local:build_project']) {
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:execute:test'), false);
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:execute:build'), false);
+    }
+    assert.strictEqual(ScopeChecker.hasScope(['local:execute:test'], 'local:execute:build'), false);
+    assert.strictEqual(ScopeChecker.hasScope(['local:execute:build'], 'local:execute:test'), false);
+    assert.strictEqual(ScopeChecker.hasScope(['local:exec'], 'local:execute:test'), true);
+    assert.strictEqual(ScopeChecker.hasScope(['local:exec'], 'local:execute:build'), true);
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:git_read'), 'local:git:read');
+    for (const scope of ['local:read', 'local:write', 'local:test', 'local:exec', 'local:execute:test', 'local:execute:build']) {
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:git:read'), false);
+    }
+    assert.strictEqual(ScopeChecker.hasScope(['local:git:read'], 'local:execute:test'), false);
+    assert.strictEqual(ScopeChecker.hasScope(['local:git:read'], 'local:write'), false);
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:git_write'), 'local:git:write');
+    assert.strictEqual(ScopeChecker.getRequiredScopeForCapability('local:git_network'), 'local:git:network');
+    for (const scope of ['local:read','local:write','local:test','local:exec','local:execute:test','local:execute:build','local:git:read','tasks:submit']) {
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:git:write'), false);
+      assert.strictEqual(ScopeChecker.hasScope([scope], 'local:git:network'), false);
+    }
+    assert.strictEqual(ScopeChecker.hasScope(['local:git:write'], 'local:git:network'), false);
+    assert.strictEqual(ScopeChecker.hasScope(['local:git:network'], 'local:git:write'), false);
+    passed++;
   } catch (err: any) {
     console.error('Scopes test failed:', err);
     failed++;

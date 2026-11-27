@@ -133,12 +133,20 @@ class McpHandlers {
             message: 'Task successfully submitted and queued in durable storage'
         };
     }
+    async handleTaskInventory(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'tasks:read');
+        this.requireScope(auth, 'tasks:inventory');
+        return this.gateway.taskStore.taskInventory(args);
+    }
     async handleRemoteTaskStatus(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'tasks:read');
         const task = this.gateway.taskStore.getTask(args.taskId);
         if (!task)
             throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
+        if (task.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
         return {
             taskId: task.taskId,
             backend: task.backend,
@@ -150,6 +158,12 @@ class McpHandlers {
             result: (0, redactor_1.redactObject)(task.result),
             error: task.error,
             artifactsCount: task.artifacts.length,
+            targetDeviceId: task.targetDeviceId,
+            activeAttemptId: task.backend === 'local' ? task.activeAttemptId : undefined,
+            cancellation: task.metadata?.executionCancellation ? {
+                requestedAt: task.metadata.executionCancellation.requestedAt,
+                confirmedAt: task.metadata.executionCancellation.confirmedAt
+            } : undefined,
             logsCount: task.logs.length
         };
     }
@@ -159,6 +173,8 @@ class McpHandlers {
         const task = this.gateway.taskStore.getTask(args.taskId);
         if (!task)
             throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
+        if (task.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
         const limit = args.limit || 100;
         return {
             taskId: task.taskId,
@@ -169,6 +185,9 @@ class McpHandlers {
     async handleRemoteTaskArtifacts(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'artifacts:read', 'tasks:read');
+        const task = this.gateway.taskStore.getTask(args.taskId);
+        if (task?.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
         const artifacts = this.gateway.artifactStore.getTaskArtifacts(args.taskId);
         return {
             taskId: args.taskId,
@@ -187,6 +206,24 @@ class McpHandlers {
     async handleRemoteTaskCancel(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'tasks:submit');
+        const task = this.gateway.taskStore.getTask(args.taskId);
+        if (task?.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
+        if (task?.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project')) {
+            this.requireScope(auth, scope_checker_1.ScopeChecker.getRequiredScopeForCapability(task.capability));
+            if (['claimed', 'acknowledged', 'running'].includes(task.status)) {
+                if (args.targetDeviceId !== task.targetDeviceId || !args.attemptId || args.attemptId !== task.activeAttemptId || !task.lease?.claimedSessionId) {
+                    throw new Error('EXECUTION_CANCEL_FENCE_REQUIRED: Supply exact targetDeviceId and active attemptId.');
+                }
+                const sessions = this.gateway.connectionManager?.getConnectedAgents?.({ healthyOnly: true }) || [];
+                const live = sessions.filter(agent => agent.deviceId === task.targetDeviceId && agent.sessionId === task.lease.claimedSessionId &&
+                    agent.supportsExecutionCancellation === true && (0, connection_health_policy_1.isSessionHealthy)(agent));
+                if (live.length !== 1)
+                    throw new Error('EXECUTION_CANCEL_UNAVAILABLE: Current session does not support confirmed cancellation.');
+                this.gateway.taskStore.requestExecutionCancellation(task.taskId, task.targetDeviceId, task.lease.claimedSessionId, task.activeAttemptId);
+                return { taskId: task.taskId, status: task.status, cancelRequested: true, cancelConfirmed: false };
+            }
+        }
         const success = this.gateway.taskStore.cancelTask(args.taskId, args.reason || 'Cancelled by MCP caller');
         if (!success)
             throw new Error(`TASK_CANCEL_FAILED: Task '${args.taskId}' could not be cancelled`);
@@ -1131,6 +1168,91 @@ class McpHandlers {
             }))
         };
     }
+    async handleDeviceAdmissionChange(args, caller, closed) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:read');
+        this.requireScope(auth, 'tasks:read');
+        this.requireScope(auth, 'tasks:inventory');
+        this.requireScope(auth, 'devices:maintenance');
+        if (!args || typeof args !== 'object' || Array.isArray(args) ||
+            Object.keys(args).some(key => !['targetDeviceId', 'expectedRevision'].includes(key)) ||
+            typeof args.targetDeviceId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(args.targetDeviceId) ||
+            typeof args.expectedRevision !== 'string' || !/^(initial|[a-f0-9-]{36})$/.test(args.expectedRevision)) {
+            throw new Error('INVALID_ARGUMENT: Exact device ID and expected admission revision required.');
+        }
+        const deviceId = args.targetDeviceId;
+        const registered = this.gateway.authManager.getDevice(deviceId);
+        if (!registered)
+            throw new Error('DEVICE_NOT_FOUND: Target device is not registered.');
+        if (!closed) {
+            const sessions = this.gateway.connectionManager?.getConnectedAgents?.() || [];
+            const target = sessions.filter(agent => agent.deviceId === deviceId);
+            if (registered.status === 'revoked' || this.gateway.killSwitch?.isDeviceRevoked?.(deviceId) ||
+                target.length !== 1 || !target[0].sessionId || !(0, connection_health_policy_1.isSessionHealthy)(target[0])) {
+                throw new Error('DEVICE_RESUME_BLOCKED: Exactly one healthy, non-revoked target session is required.');
+            }
+        }
+        // No await between the final admission check and the durable transition.
+        const state = this.gateway.taskStore.setDeviceAdmission(deviceId, closed, args.expectedRevision);
+        this.gateway.auditLogger.log({
+            actor: auth.subjectId, actorType: 'client', action: closed ? 'DEVICE_DRAIN' : 'DEVICE_RESUME',
+            resource: deviceId, scopeUsed: 'devices:maintenance', result: 'SUCCESS',
+            details: { revision: state.revision, closed: state.closed }
+        });
+        return { ok: true, targetDeviceId: deviceId, admissionClosed: state.closed,
+            admissionRevision: state.revision, updatedAt: state.updatedAt, maintenanceAuthorized: false,
+            note: 'Gateway admission changed only. No local process, service, token or project permission was changed.' };
+    }
+    async handleDeviceMaintenanceCheck(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:read');
+        this.requireScope(auth, 'tasks:read');
+        this.requireScope(auth, 'tasks:inventory');
+        if (!args || typeof args !== 'object' || Array.isArray(args) ||
+            Object.keys(args).some(key => key !== 'targetDeviceId') ||
+            typeof args.targetDeviceId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(args.targetDeviceId)) {
+            throw new Error('INVALID_ARGUMENT: Explicit targetDeviceId is required.');
+        }
+        const deviceId = args.targetDeviceId;
+        const registered = this.gateway.authManager.getDevice(deviceId);
+        if (!registered)
+            throw new Error('DEVICE_NOT_FOUND: Target device is not registered.');
+        const admission = this.gateway.taskStore.getDeviceAdmission(deviceId);
+        const inventory = this.gateway.taskStore.taskInventory({ backend: 'local', targetDeviceId: deviceId, status: 'active', limit: 20 });
+        const now = Date.now();
+        if (typeof this.gateway.connectionManager?.getConnectedAgents !== 'function') {
+            throw new Error('MAINTENANCE_OBSERVATION_UNAVAILABLE: Session inventory unavailable.');
+        }
+        const sessions = this.gateway.connectionManager.getConnectedAgents().filter(agent => agent.deviceId === deviceId);
+        const healthy = sessions.filter(agent => (0, connection_health_policy_1.isSessionHealthy)(agent, now));
+        const revoked = registered.status === 'revoked' || !!this.gateway.killSwitch?.isDeviceRevoked?.(deviceId);
+        const blockers = [];
+        if (revoked)
+            blockers.push('DEVICE_REVOKED');
+        if (sessions.length > 1)
+            blockers.push('MULTIPLE_SESSIONS');
+        if (sessions.length !== 1 || healthy.length !== 1)
+            blockers.push('SINGLE_HEALTHY_SESSION_NOT_OBSERVED');
+        if (inventory.total > 0)
+            blockers.push('TARGET_ACTIVE_TASKS');
+        // An unassigned task or uncertain local mutation may have touched this
+        // host in an earlier session. Keep the global conservative blocker.
+        if (inventory.summary.quarantinedLocalCount > 0)
+            blockers.push('GLOBAL_LOCAL_QUARANTINE');
+        if (inventory.summary.staleLocalCount > 0)
+            blockers.push('GLOBAL_LOCAL_STALE');
+        return {
+            ok: true, checkedAt: now, targetDeviceId: deviceId,
+            connection: { state: revoked ? 'revoked' : healthy.length > 0 ? 'online' : 'offline',
+                connectionCount: sessions.length, healthyCount: healthy.length },
+            targetActiveCount: inventory.total, globalSummary: inventory.summary,
+            snapshotRevision: inventory.snapshotRevision, snapshotComplete: inventory.snapshotComplete,
+            tasks: inventory.tasks, hasMore: inventory.hasMore,
+            observation: blockers.length === 0 ? 'IDLE_OBSERVED' : 'BLOCKED',
+            blockers, admissionClosed: admission.closed, admissionRevision: admission.revision, maintenanceAuthorized: false,
+            note: 'Gateway admission state and point-in-time task observation; no local process drain proof or shutdown authorization.'
+        };
+    }
     async handleDeviceStatus(args, caller) {
         if (!caller && args && (args.scopes || args.subjectId)) {
             caller = args;
@@ -2014,10 +2136,10 @@ class McpHandlers {
                     directResult: true
                 };
             }
-            if (currentTask.status === 'cancelled') {
+            if (currentTask.status === 'cancelled' || currentTask.status === 'stale') {
                 return {
                     taskId,
-                    status: 'cancelled',
+                    status: currentTask.status,
                     error: currentTask.error,
                     completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
                     directResult: true
@@ -2054,10 +2176,10 @@ class McpHandlers {
                     directResult: true
                 };
             }
-            if (currentTask.status === 'cancelled') {
+            if (currentTask.status === 'cancelled' || currentTask.status === 'stale') {
                 return {
                     taskId,
-                    status: 'cancelled',
+                    status: currentTask.status,
                     error: currentTask.error,
                     completedAt: currentTask.completedAt ? new Date(currentTask.completedAt).toISOString() : undefined,
                     directResult: true
@@ -2320,10 +2442,22 @@ class McpHandlers {
             targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
     }
+    async handleLocalGitRead(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:git:read');
+        this.requireScope(auth, 'tasks:submit');
+        if (!args || typeof args !== 'object' || Array.isArray(args)) {
+            throw new Error('INVALID_ARGUMENT: Git read request object required.');
+        }
+        const { targetDeviceId, clientRequestId, ...payload } = args;
+        return this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local', capability: 'local:git_read', payload, targetDeviceId, clientRequestId
+        }, auth.scopes, auth.subjectId);
+    }
     async handleLocalRunTests(args, caller) {
         const auth = this.requireCaller(caller);
-        this.requireScope(auth, 'local:exec');
-        this.requireScope(auth, 'local:test', 'tasks:submit');
+        this.requireScope(auth, 'local:execute:test');
+        this.requireScope(auth, 'tasks:submit');
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_run_tests');
         }
@@ -2341,8 +2475,8 @@ class McpHandlers {
     }
     async handleLocalBuildProject(args, caller) {
         const auth = this.requireCaller(caller);
-        this.requireScope(auth, 'local:exec');
-        this.requireScope(auth, 'local:test', 'tasks:submit');
+        this.requireScope(auth, 'local:execute:build');
+        this.requireScope(auth, 'tasks:submit');
         if (!args?.projectId) {
             throw new Error('INVALID_ARGUMENT: projectId is required for local_build_project');
         }

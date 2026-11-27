@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TaskRouter = void 0;
 const scope_checker_1 = require("../security/scope-checker");
 const capabilities_1 = require("../local-agent/capabilities");
+const git_read_plan_1 = require("../local-agent/git-read-plan");
 class TaskRouter {
     taskStore;
     idempotencyStore;
@@ -40,7 +41,17 @@ class TaskRouter {
             this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { reason: killCheck.reason, capability: options.capability } });
             throw new Error(`KILL_SWITCH_ACTIVE: ${killCheck.reason}`);
         }
-        const requiredScope = options.requiredScope || scope_checker_1.ScopeChecker.getRequiredScopeForCapability(options.capability);
+        // Reserved mutation/network names remain closed on every backend until
+        // the isolated runtime and credential broker have independent acceptance.
+        if (options.capability === 'local:git_write' || options.capability === 'local:git_network') {
+            throw new Error('LOCAL_GIT_ACTIVATION_HELD: Git mutation and network routing are not enabled.');
+        }
+        if (options.capability === 'local:git_read' && options.backend !== 'local') {
+            throw new Error('INVALID_ARGUMENT: Git read requires local backend.');
+        }
+        const requiredScope = options.backend === 'local'
+            ? scope_checker_1.ScopeChecker.getRequiredScopeForCapability(options.capability)
+            : options.requiredScope || scope_checker_1.ScopeChecker.getRequiredScopeForCapability(options.capability);
         const hasCapabilityScope = scope_checker_1.ScopeChecker.hasScope(callerScopes, requiredScope);
         const hasGenericSubmitScope = scope_checker_1.ScopeChecker.hasScope(callerScopes, 'tasks:submit');
         if (options.backend === 'local') {
@@ -76,6 +87,14 @@ class TaskRouter {
                     details: { reason: 'UNSUPPORTED_LOCAL_CAPABILITY', capability: options.capability }
                 });
                 throw new Error(`UNSUPPORTED_LOCAL_CAPABILITY: '${options.capability}' is not a recognized local executable capability. Supported: ${capabilities_1.LOCAL_EXECUTABLE_CAPABILITIES.join(', ')}`);
+            }
+            if (options.capability === 'local:git_read') {
+                if (typeof options.targetDeviceId !== 'string' || !/^[a-z0-9_.-]{3,64}$/.test(options.targetDeviceId) ||
+                    typeof options.clientRequestId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(options.clientRequestId) ||
+                    (options.idempotencyKey !== undefined && options.idempotencyKey !== options.clientRequestId)) {
+                    throw new Error('INVALID_ARGUMENT: Explicit Git targetDeviceId and clientRequestId required.');
+                }
+                (0, git_read_plan_1.parseGitReadTask)(options.payload);
             }
             // Multi-device targeted routing enforcement: only consider healthy, unrevoked connected sessions
             const connected = (this.connectionManager && typeof this.connectionManager.getConnectedAgents === 'function')
@@ -173,10 +192,24 @@ class TaskRouter {
                         throw new Error(`IDEMPOTENCY_CONFLICT: Idempotency key '${idempKey}' payload mismatch.`);
                     }
                 }
-                return { taskId: cached.taskId, status: cached.status, task: cached, isReplay: true };
+                const latest = this.taskStore.getTask(cached.taskId) || cached;
+                return { taskId: latest.taskId, status: latest.status, task: latest, isReplay: true };
             }
         }
-        const task = this.taskStore.createTask(options);
+        // Execution tasks must not become latent work on an ineligible or offline device.
+        // Existing read-only bounded wait and legacy file-task routing remain unchanged.
+        if (options.backend === 'local' && (options.capability === 'local:run_tests' || options.capability === 'local:build_project' || options.capability === 'local:git_read')) {
+            const agents = this.connectionManager?.getConnectedAgents?.({ healthyOnly: true }) || [];
+            const eligible = agents.find((agent) => agent.deviceId === options.targetDeviceId && agent.capabilities?.includes(options.capability) &&
+                typeof agent.sessionId === 'string' && !!agent.sessionId && /^[a-f0-9]{32}$/.test(agent.executionPolicyRevision || ''));
+            if (!eligible) {
+                this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT_DENIED', result: 'DENY', details: { reason: 'EXECUTION_TARGET_NOT_ELIGIBLE', capability: options.capability, targetDeviceId: options.targetDeviceId } });
+                throw new Error('EXECUTION_TARGET_NOT_ELIGIBLE: Execution requires a healthy target advertising the requested capability.');
+            }
+            // Server-owned binding: caller metadata cannot select a session or generation.
+            options.metadata = { ...options.metadata, executionAdmission: { sessionId: eligible.sessionId, policyRevision: eligible.executionPolicyRevision } };
+        }
+        const task = this.taskStore.createTask({ ...options, requiredScope });
         this.auditLogger.log({ actor: actorId, actorType: 'client', action: 'TASK_SUBMIT', taskId: task.taskId, resource: options.capability, scopeUsed: hasCapabilityScope ? requiredScope : 'tasks:submit', result: 'SUCCESS' });
         if (task.backend === 'kaggle') {
             await this.kaggleBackend.submitKaggleTask(task);

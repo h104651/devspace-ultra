@@ -4,6 +4,7 @@ import { TaskStore } from '../../src/storage/task-store';
 
 class DurableTaskSqlMock implements SqlStorage {
   private taskRows = new Map<string, Record<string, any>>();
+  private admissionRows = new Map<string, Record<string, any>>();
   public alters: string[] = [];
 
   exec(query: string, ...params: any[]): { toArray(): any[]; one(): any; raw(): any } {
@@ -20,6 +21,16 @@ class DurableTaskSqlMock implements SqlStorage {
       return empty;
     }
 
+    if (upper.startsWith('INSERT OR REPLACE INTO DEVICE_ADMISSION')) {
+      const [deviceId, closed, revision, updatedAt] = params;
+      this.admissionRows.set(deviceId, { deviceId, closed, revision, updatedAt });
+      return empty;
+    }
+    if (upper.startsWith('SELECT DEVICEID, CLOSED, REVISION, UPDATEDAT FROM DEVICE_ADMISSION')) {
+      const row = this.admissionRows.get(params[0]);
+      return { toArray: () => row ? [row] : [], one: () => row, raw: () => row };
+    }
+
     if (upper.startsWith('INSERT OR REPLACE INTO TASKS')) {
       const columnMatch = normalized.match(/INSERT OR REPLACE INTO tasks\s*\(([\s\S]*?)\)\s*VALUES/i);
       if (!columnMatch) throw new Error('Unable to parse task INSERT columns');
@@ -33,6 +44,15 @@ class DurableTaskSqlMock implements SqlStorage {
     if (upper.startsWith('SELECT * FROM TASKS WHERE TASKID = ?')) {
       const row = this.taskRows.get(String(params[0]));
       const rows = row ? [row] : [];
+      return { toArray: () => rows, one: () => rows[0] || null, raw: () => rows[0] || null };
+    }
+
+    if (upper.startsWith('SELECT TASKID, BACKEND, CAPABILITY, STATUS, TARGETDEVICEID, LEASEJSON, ATTEMPTSJSON')) {
+      assert.ok(!/payloadJson|resultJson|logsJson|errorJson|metadataJson/i.test(query));
+      const active = new Set(['queued','claimed','acknowledged','running','retrying']);
+      const rows = Array.from(this.taskRows.values()).filter(row =>
+        active.has(row.status) || (row.backend === 'local' && row.status === 'stale'))
+        .sort((a,b) => String(a.taskId).localeCompare(String(b.taskId))).slice(0, Number(params[0]));
       return { toArray: () => rows, one: () => rows[0] || null, raw: () => rows[0] || null };
     }
 
@@ -82,6 +102,49 @@ export async function runTaskDurablePersistenceTests(): Promise<{ passed: number
     const recovery = restoredStore.recoverStaleTasks();
     assert.strictEqual(recovery.recoveredCount, 0, 'Externally-running Kaggle task must not be stale-requeued after restart');
     assert.strictEqual(restoredStore.getTask(task.taskId)?.status, 'running');
+
+    const local = store.createTask({ backend: 'local', capability: 'local:write_file', targetDeviceId: 'fixture-device', payload: { content: 'do-not-expose' } });
+    assert.ok(store.claimTaskById(local.taskId, 'fixture-device', 1000, 'old-session'));
+    assert.strictEqual(store.failTasksForSupersededSession('fixture-device', 'old-session'), 1);
+    const cold = new TaskStore(undefined, 1, storage);
+    cold.hydrate(await storage.listActiveTasks());
+    assert.strictEqual(cold.listTasks().some(t => t.taskId === local.taskId), false, 'Cold-start working set excludes stale history');
+    const inventory = cold.taskInventory({});
+    assert.strictEqual(inventory.summary.allActiveCount, 1);
+    assert.strictEqual(inventory.summary.staleLocalCount, 1);
+    assert.ok(inventory.tasks.some(t => t.taskId === local.taskId && t.status === 'stale'));
+    assert.ok(!JSON.stringify(inventory).includes('do-not-expose'));
+    assert.strictEqual(inventory.maintenanceAuthorized, false);
+    passed++;
+
+    // A pending cancellation survives DO working-set rehydration but never
+    // transfers to a new attempt/session or overwrites stale.
+    const execution = store.createTask({ backend: 'local', capability: 'local:build_project', targetDeviceId: 'cancel-fixture', payload: {}, metadata: { executionAdmission: { sessionId: 'cancel-session', policyRevision: 'a'.repeat(32) }, executionCancellation: { requestId: 'caller-forged' } } });
+    assert.strictEqual(execution.metadata?.executionCancellation, undefined);
+    assert.ok(store.claimTaskById(execution.taskId, 'cancel-fixture', 60000, 'cancel-session', 'a'.repeat(32)));
+    const attempt = execution.activeAttemptId!;
+    const requestId = store.requestExecutionCancellation(execution.taskId, 'cancel-fixture', 'cancel-session', attempt);
+    const restarted = new TaskStore(undefined, 60000, storage);
+    restarted.hydrate(await storage.listActiveTasks());
+    assert.strictEqual(restarted.getPendingExecutionCancellation(execution.taskId, 'cancel-fixture', 'cancel-session', attempt)?.requestId, requestId);
+    assert.strictEqual(restarted.confirmExecutionCancellation(execution.taskId, 'cancel-fixture', 'new-session', attempt, requestId), false);
+    assert.strictEqual(restarted.failTasksForSupersededSession('cancel-fixture', 'cancel-session'), 1);
+    assert.strictEqual(restarted.confirmExecutionCancellation(execution.taskId, 'cancel-fixture', 'cancel-session', attempt, requestId), false);
+    assert.strictEqual((await storage.getTask(execution.taskId))?.status, 'stale');
+    passed++;
+
+    const before = store.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'drain-device', payload: {} });
+    const fence = store.setDeviceAdmission('drain-device', true, 'initial');
+    const afterRestart = new TaskStore(undefined, 60000, storage);
+    afterRestart.hydrate(await storage.listActiveTasks());
+    assert.deepStrictEqual(afterRestart.getDeviceAdmission('drain-device'), fence);
+    assert.strictEqual(afterRestart.claimTaskById(before.taskId, 'drain-device'), undefined);
+    assert.strictEqual(afterRestart.claimTask('drain-device', ['local:read_file']), undefined);
+    assert.throws(() => afterRestart.createTask({ backend: 'local', capability: 'local:read_file', targetDeviceId: 'drain-device', payload: {} }), /DEVICE_ADMISSION_CLOSED/);
+    assert.throws(() => afterRestart.setDeviceAdmission('drain-device', false, 'initial'), /REVISION_CONFLICT/);
+    assert.throws(() => afterRestart.setDeviceAdmission('drain-device', false, fence.revision), /DEVICE_RESUME_BLOCKED/);
+    assert.strictEqual(afterRestart.getDeviceAdmission('unrelated-device').closed, false);
+    passed++;
 
     assert.ok(sql.alters.some(sqlText => /ALTER TABLE tasks ADD COLUMN attemptsJson/i.test(sqlText)), 'Existing Durable Object DBs need an additive attemptsJson migration');
     assert.ok(sql.alters.some(sqlText => /ALTER TABLE tasks ADD COLUMN activeAttemptId/i.test(sqlText)), 'Existing Durable Object DBs need an additive activeAttemptId migration');

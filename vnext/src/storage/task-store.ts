@@ -13,7 +13,7 @@ import {
 } from '../types/task';
 import { ScopeChecker } from '../security/scope-checker';
 import { isSideEffectCapability } from '../local-agent/capabilities';
-import { IStorageAdapter } from './storage-adapter.interface';
+import { IStorageAdapter, TaskInventorySource, DeviceAdmissionState } from './storage-adapter.interface';
 
 const ACTIVE_ATTEMPT_STATUSES = new Set<TaskAttemptStatus>(['claimed', 'acknowledged', 'running']);
 const TASK_LOG_MAX_LINES = 2000;
@@ -30,11 +30,14 @@ export interface TaskWaitResult {
 
 export class TaskStore {
   private tasksDir?: string;
+  private admissionDir?: string;
+  private memoryAdmissions = new Map<string, DeviceAdmissionState>();
   private tasks: Map<string, DurableTask> = new Map();
   private defaultLeaseDurationMs: number;
   private storageAdapter?: IStorageAdapter;
   // Never resume local dispatch in a process that has lost durable state.
   private localPersistenceFailed = false;
+  private inventoryPersistenceUnconfirmed = false;
   private taskWaiters: Map<string, Set<TaskWaitListener>> = new Map();
 
   constructor(storageDir?: string, defaultLeaseDurationMs = 60000, storageAdapter?: IStorageAdapter) {
@@ -42,10 +45,12 @@ export class TaskStore {
     this.storageAdapter = storageAdapter;
     if (storageDir && storageDir !== ':memory:') {
       this.tasksDir = path.join(storageDir, 'tasks');
+      this.admissionDir = path.join(storageDir, 'device-admission');
       try {
         if (!fs.existsSync(this.tasksDir)) {
           fs.mkdirSync(this.tasksDir, { recursive: true });
         }
+        fs.mkdirSync(this.admissionDir, { recursive: true });
         this.loadAll();
       } catch { this.blockLocalDispatch(); }
     }
@@ -197,11 +202,12 @@ export class TaskStore {
         }
         const taskPath = path.join(this.tasksDir, `${task.taskId}.json`);
         fs.writeFileSync(taskPath, JSON.stringify(task, null, 2), 'utf-8');
-      } catch {}
+      } catch { this.inventoryPersistenceUnconfirmed = true; }
     }
 
     if (this.storageAdapter) {
       void this.storageAdapter.saveTask(task).catch(err => {
+        this.inventoryPersistenceUnconfirmed = true;
         console.error(`Failed to persist task ${task.taskId} through storage adapter:`, err);
       });
     }
@@ -290,10 +296,86 @@ export class TaskStore {
     task.activeAttemptId = undefined;
   }
 
+  /** A persistent admission fence, not proof that a host process has stopped. */
+  public getDeviceAdmission(deviceId: string): DeviceAdmissionState {
+    if (this.localPersistenceFailed) throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked.');
+    if (!deviceId || typeof deviceId !== 'string') throw new Error('INVALID_ARGUMENT: Device ID required.');
+    try {
+      let state: DeviceAdmissionState | undefined;
+      if (this.storageAdapter) {
+        if (!this.storageAdapter.getDeviceAdmissionSync || !this.storageAdapter.saveDeviceAdmissionSync) {
+          throw new Error('Device admission persistence unavailable');
+        }
+        state = this.storageAdapter.getDeviceAdmissionSync(deviceId);
+      } else if (this.admissionDir) {
+        // Absence of the directory is a storage failure, not an open device.
+        if (!fs.statSync(this.admissionDir).isDirectory()) throw new Error('Admission directory unavailable');
+        const file = path.join(this.admissionDir, crypto.createHash('sha256').update(deviceId).digest('hex') + '.json');
+        try { state = JSON.parse(fs.readFileSync(file, 'utf8')); }
+        catch (err: any) { if (err.code !== 'ENOENT') throw err; }
+      } else {
+        state = this.memoryAdmissions.get(deviceId);
+      }
+      if (state === undefined) return { deviceId, closed: false, revision: 'initial', updatedAt: 0 };
+      if (state.deviceId !== deviceId || typeof state.closed !== 'boolean' ||
+          !/^[a-f0-9-]{36}$/.test(state.revision) || !Number.isSafeInteger(state.updatedAt) || state.updatedAt <= 0) {
+        throw new Error('Invalid admission state');
+      }
+      return { ...state };
+    } catch {
+      this.blockLocalDispatch();
+      throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Device admission state could not be confirmed.');
+    }
+  }
+
+  public setDeviceAdmission(deviceId: string, closed: boolean, expectedRevision: string): DeviceAdmissionState {
+    const current = this.getDeviceAdmission(deviceId);
+    if (expectedRevision !== current.revision) throw new Error('DEVICE_ADMISSION_REVISION_CONFLICT: Read current state and retry explicitly.');
+    if (current.closed === closed) return current;
+    if (!closed) {
+      const inventory = this.taskInventory({ backend: 'local', targetDeviceId: deviceId, status: 'active', limit: 1 });
+      if (inventory.total || inventory.summary.staleLocalCount || inventory.summary.quarantinedLocalCount) {
+        throw new Error('DEVICE_RESUME_BLOCKED: Reconcile active, stale and quarantined work first.');
+      }
+    }
+    const state = { deviceId, closed, revision: crypto.randomUUID(), updatedAt: Date.now() };
+    try {
+      if (this.storageAdapter) {
+        this.storageAdapter.saveDeviceAdmissionSync!(state);
+      } else if (this.admissionDir) {
+        const file = path.join(this.admissionDir, crypto.createHash('sha256').update(deviceId).digest('hex') + '.json');
+        const tmp = file + '.' + crypto.randomUUID() + '.tmp';
+        try {
+          const fd = fs.openSync(tmp, 'wx', 0o600);
+          try { fs.writeFileSync(fd, JSON.stringify(state), 'utf8'); fs.fsyncSync(fd); }
+          finally { fs.closeSync(fd); }
+          fs.renameSync(tmp, file);
+          if (process.platform !== 'win32') {
+            const dir = fs.openSync(this.admissionDir, 'r');
+            try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+          }
+        } finally { try { fs.unlinkSync(tmp); } catch {} }
+      } else {
+        this.memoryAdmissions.set(deviceId, state);
+      }
+      const persisted = this.getDeviceAdmission(deviceId);
+      if (persisted.revision !== state.revision || persisted.closed !== closed) throw new Error('Admission write unconfirmed');
+      return persisted;
+    } catch {
+      this.blockLocalDispatch();
+      throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Device admission transition unconfirmed; dispatch blocked.');
+    }
+  }
+
   public createTask<TPayload = any>(options: CreateTaskOptions<TPayload>): DurableTask<TPayload> {
+    if (options.backend === 'local' && options.targetDeviceId && this.getDeviceAdmission(options.targetDeviceId.trim()).closed) {
+      throw new Error('DEVICE_ADMISSION_CLOSED: Device is draining; no new local task accepted.');
+    }
     const taskId = options.taskId || `task-${crypto.randomBytes(8).toString('hex')}`;
     const requiredScope = options.requiredScope || ScopeChecker.getRequiredScopeForCapability(options.capability);
 
+    const metadata = options.metadata ? { ...options.metadata } : undefined;
+    if (metadata) delete metadata.executionCancellation;
     const task: DurableTask<TPayload> = {
       taskId,
       taskKey: options.taskKey,
@@ -317,7 +399,7 @@ export class TaskStore {
       targetDeviceId: options.targetDeviceId ? options.targetDeviceId.trim() : undefined,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      metadata: options.metadata
+      metadata
     };
 
     this.tasks.set(taskId, task);
@@ -408,16 +490,30 @@ export class TaskStore {
     });
   }
 
+  private executionAdmissionMatches(task: DurableTask, sessionId?: string, policyRevision?: string): boolean {
+    if (task.backend !== 'local' || (task.capability !== 'local:run_tests' && task.capability !== 'local:build_project' && task.capability !== 'local:git_read')) return true;
+    const admission = task.metadata?.executionAdmission;
+    return !!sessionId && !!policyRevision && admission?.sessionId === sessionId && admission?.policyRevision === policyRevision;
+  }
+
   public claimTask(
     deviceId: string,
     supportedCapabilities: string[],
     leaseDurationMs?: number,
     sessionId?: string,
-    supportsAttemptFencing = true
+    supportsAttemptFencing = true,
+    executionPolicyRevision?: string
   ): DurableTask | undefined {
     if (this.localPersistenceFailed) throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked until reconciliation.');
+    if (this.getDeviceAdmission(deviceId).closed) return undefined;
     this.recoverStaleTasks();
 
+    // Queued execution may never inherit a later session or more permissive policy.
+    for (const task of this.tasks.values()) {
+      if (task.status === 'queued' && task.targetDeviceId === deviceId && !this.executionAdmissionMatches(task, sessionId, executionPolicyRevision)) {
+        this.failTaskTerminal(task.taskId, { code: 'EXECUTION_ADMISSION_EXPIRED', message: 'Execution session or policy changed before dispatch; submit a new reviewed request.' });
+      }
+    }
     const eligibleTasks = Array.from(this.tasks.values())
       .filter(t => {
         if (t.status !== 'queued') return false;
@@ -432,17 +528,20 @@ export class TaskStore {
       .sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
 
     if (eligibleTasks.length === 0) return undefined;
-    return this.claimTaskById(eligibleTasks[0].taskId, deviceId, leaseDurationMs, sessionId);
+    return this.claimTaskById(eligibleTasks[0].taskId, deviceId, leaseDurationMs, sessionId, executionPolicyRevision);
   }
 
   public claimTaskById(
     taskId: string,
     deviceId: string,
     leaseDurationMs?: number,
-    sessionId?: string
+    sessionId?: string,
+    executionPolicyRevision?: string
   ): DurableTask | undefined {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'queued') return undefined;
+    if (!this.executionAdmissionMatches(task, sessionId, executionPolicyRevision)) return undefined;
+    if (task.backend === 'local' && this.getDeviceAdmission(deviceId).closed) return undefined;
     if (task.backend === 'local' && (!task.targetDeviceId || task.targetDeviceId !== deviceId)) return undefined;
     if (task.backend === 'local' && this.localPersistenceFailed) throw new Error('LOCAL_TASK_PERSISTENCE_UNAVAILABLE: Local dispatch is blocked until reconciliation.');
 
@@ -517,6 +616,7 @@ export class TaskStore {
     if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
       return { assigned: 0, taskIds: [] };
     }
+    if (this.getDeviceAdmission(targetDeviceId).closed) throw new Error('DEVICE_ADMISSION_CLOSED: Cannot assign quarantined work to a draining device.');
     const targetSet = new Set(taskIds);
     const now = Date.now();
 
@@ -774,11 +874,64 @@ export class TaskStore {
     return this.failTask(taskId, error, { retryable: false });
   }
 
+  private isExecutionTask(task: DurableTask): boolean {
+    return task.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project');
+  }
+
+  public requestExecutionCancellation(taskId: string, deviceId: string, sessionId: string, attemptId: string) {
+    const task = this.tasks.get(taskId);
+    if (!task || !this.isExecutionTask(task) || !attemptId || !this.ownsLocalAttempt(taskId, deviceId, sessionId, attemptId, true)) {
+      throw new Error('EXECUTION_CANCEL_NOT_ACTIVE: Exact live execution attempt required.');
+    }
+    const previous = task.metadata?.executionCancellation;
+    if (previous) {
+      if (previous.sessionId !== sessionId || previous.attemptId !== attemptId || previous.confirmedAt) {
+        throw new Error('EXECUTION_CANCEL_CONFLICT: Existing request is not current.');
+      }
+      return previous.requestId as string;
+    }
+    const requestId = crypto.randomUUID();
+    task.metadata = { ...task.metadata, executionCancellation: { requestId, sessionId, attemptId, requestedAt: Date.now() } };
+    this.saveTask(task);
+    return requestId;
+  }
+
+  public getPendingExecutionCancellation(taskId: string, deviceId: string, sessionId: string, attemptId: string) {
+    const task = this.tasks.get(taskId);
+    const request = task?.metadata?.executionCancellation;
+    if (!task || !this.isExecutionTask(task) || !request || request.confirmedAt ||
+        request.sessionId !== sessionId || request.attemptId !== attemptId ||
+        !this.ownsLocalAttempt(taskId, deviceId, sessionId, attemptId, true)) return undefined;
+    return { taskId, attemptId, requestId: request.requestId as string };
+  }
+
+  public confirmExecutionCancellation(taskId: string, deviceId: string, sessionId: string, attemptId: string, requestId: string): boolean {
+    const pending = this.getPendingExecutionCancellation(taskId, deviceId, sessionId, attemptId);
+    if (!pending || !requestId || pending.requestId !== requestId) return false;
+    const task = this.tasks.get(taskId)!;
+    const error = { code: 'TASK_CANCELLED', message: 'Agent confirmed native process-tree cancellation.' };
+    task.metadata!.executionCancellation.confirmedAt = Date.now();
+    this.finishActiveAttempt(task, 'cancelled', error);
+    task.status = 'cancelled';
+    task.error = error;
+    task.completedAt = Date.now();
+    task.lease = undefined;
+    this.saveTask(task);
+    return true;
+  }
+
   public cancelTask(taskId: string, reason = 'User requested cancellation'): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
-    if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'cancelled') {
+    if (TERMINAL_TASK_STATUSES.has(task.status)) {
+      return false;
+    }
+
+    // Generic cancellation has no agent acknowledgement or process-tree drain proof.
+    // Queued execution can be cancelled; dispatched execution must remain auditable.
+    if (task.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project' || task.capability === 'local:git_read') &&
+      (task.status === 'claimed' || task.status === 'acknowledged' || task.status === 'running')) {
       return false;
     }
 
@@ -866,6 +1019,95 @@ export class TaskStore {
     }
 
     return { recoveredCount, failedCount };
+  }
+
+  /**
+   * Read-only, bounded, revision-checked observation. Not a maintenance lock.
+   * A filter never narrows the global counts used to evaluate gateway inventory.
+   */
+  public taskInventory(args: any = {}) {
+    if (!args || typeof args !== 'object' || Array.isArray(args) ||
+        Object.keys(args).some(key => !['backend', 'status', 'targetDeviceId', 'offset', 'limit', 'snapshotRevision'].includes(key))) {
+      throw new Error('INVALID_ARGUMENT: Invalid task inventory filter.');
+    }
+    const backend = args.backend ?? 'all';
+    const status = args.status ?? 'all';
+    const targetDeviceId = args.targetDeviceId;
+    const offset = args.offset ?? 0;
+    const limit = args.limit ?? 50;
+    const validId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
+    if (!['all', 'local', 'kaggle', 'browser', 'swarm'].includes(backend) ||
+        !['all', 'active', 'stale', 'quarantined'].includes(status) ||
+        (targetDeviceId !== undefined && (!validId(targetDeviceId) || (backend !== 'all' && backend !== 'local'))) ||
+        !Number.isInteger(offset) || offset < 0 || offset > 10000 ||
+        !Number.isInteger(limit) || limit < 1 || limit > 100 ||
+        (args.snapshotRevision !== undefined && (typeof args.snapshotRevision !== 'string' || !/^[a-f0-9]{64}$/.test(args.snapshotRevision))) ||
+        (offset > 0 && !args.snapshotRevision)) {
+      throw new Error('INVALID_ARGUMENT: Inventory requires bounded filters and a revision for subsequent pages.');
+    }
+    if (this.localPersistenceFailed || this.inventoryPersistenceUnconfirmed) {
+      throw new Error('INVENTORY_UNAVAILABLE: Durable task persistence is unconfirmed.');
+    }
+    const cap = 10000;
+    const included = (task: TaskInventorySource) => ACTIVE_TASK_STATUSES.has(task.status) ||
+      (task.backend === 'local' && task.status === 'stale');
+    let source: TaskInventorySource[] = [];
+    if (this.storageAdapter) {
+      if (!this.storageAdapter.readTaskInventorySync) throw new Error('INVENTORY_UNAVAILABLE: Durable snapshot not supported.');
+      source = this.storageAdapter.readTaskInventorySync(cap + 1);
+    } else {
+      for (const task of this.tasks.values()) {
+        if (included(task)) source.push(task);
+        if (source.length > cap) break;
+      }
+    }
+    if (source.length > cap) throw new Error('INVENTORY_LIMIT_EXCEEDED: No complete observation is available; use operator inventory.');
+    if (this.storageAdapter) {
+      // Refuse false emptiness if an in-memory active task has not reached durable storage.
+      const persisted = new Map(source.map(task => [task.taskId, task]));
+      for (const task of this.tasks.values()) {
+        if (included(task) && persisted.get(task.taskId)?.status !== task.status) {
+          throw new Error('INVENTORY_UNAVAILABLE: In-memory and durable task states differ.');
+        }
+      }
+    }
+    const rows = source.map(task => {
+      if (!validId(task.taskId) || !['local', 'kaggle', 'browser', 'swarm'].includes(task.backend) ||
+          !included(task) || (task.targetDeviceId !== undefined && !validId(task.targetDeviceId))) {
+        throw new Error('INVENTORY_UNAVAILABLE: Unexpected stored task metadata.');
+      }
+      const priorClaimant = task.lease?.claimedBy || [...(task.attempts || [])].reverse().find(attempt => attempt.claimedBy)?.claimedBy;
+      return {
+        taskId: task.taskId, backend: task.backend, capability: validId(task.capability) ? task.capability : 'unknown',
+        status: task.status, targetDeviceId: task.targetDeviceId || null, priorClaimant: validId(priorClaimant) ? priorClaimant : null,
+        isQuarantined: task.backend === 'local' && !task.targetDeviceId && ACTIVE_TASK_STATUSES.has(task.status),
+        attemptCount: (task.attempts || []).length, leaseExpiresAt: task.lease?.leaseExpiresAt ?? null,
+        createdAt: task.createdAt, updatedAt: task.updatedAt, startedAt: task.startedAt ?? null, completedAt: task.completedAt ?? null
+      };
+    }).sort((a, b) => a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0);
+    const summary = {
+      allActiveCount: rows.filter(task => ACTIVE_TASK_STATUSES.has(task.status)).length,
+      activeLocalCount: rows.filter(task => task.backend === 'local' && ACTIVE_TASK_STATUSES.has(task.status)).length,
+      quarantinedLocalCount: rows.filter(task => task.isQuarantined).length,
+      staleLocalCount: rows.filter(task => task.backend === 'local' && task.status === 'stale').length
+    };
+    const snapshotRevision = crypto.createHash('sha256').update(JSON.stringify({ backend, status, targetDeviceId, rows })).digest('hex');
+    if (args.snapshotRevision && args.snapshotRevision !== snapshotRevision) {
+      throw new Error('INVENTORY_SNAPSHOT_CHANGED: Restart pagination at offset zero.');
+    }
+    const selected = rows.filter(task => (backend === 'all' || task.backend === backend) &&
+      (targetDeviceId === undefined || task.targetDeviceId === targetDeviceId) &&
+      (status === 'all' || (status === 'active' && ACTIVE_TASK_STATUSES.has(task.status)) ||
+        (status === 'stale' && task.status === 'stale') || (status === 'quarantined' && task.isQuarantined)));
+    if (offset > selected.length) throw new Error('INVALID_ARGUMENT: Inventory offset exceeds snapshot.');
+    const hasMore = offset + limit < selected.length;
+    return {
+      ok: true, checkedAt: Date.now(), snapshotRevision, total: selected.length, offset, limit, hasMore,
+      snapshotComplete: true, pageComplete: offset === 0 && !hasMore,
+      coverage: 'ALL_ACTIVE_BACKENDS_AND_LOCAL_STALE', summary,
+      observedEmpty: summary.allActiveCount === 0 && summary.staleLocalCount === 0,
+      maintenanceAuthorized: false, tasks: selected.slice(offset, offset + limit)
+    };
   }
 
   public listTasks(filter?: {
