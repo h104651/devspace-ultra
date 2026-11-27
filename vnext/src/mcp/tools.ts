@@ -702,6 +702,13 @@ const LOCAL_CREATE_ANNOTATIONS: McpToolAnnotations = {
   openWorldHint: false
 };
 
+const DEVICE_MAINTENANCE_CHECK_SCHEMA = {
+  type: 'object',
+  properties: { targetDeviceId: { type: 'string', description: 'Exact registered device ID' } },
+  required: ['targetDeviceId'],
+  additionalProperties: false
+};
+
 const TASK_INVENTORY_SCHEMA = {
   type: 'object',
   properties: {
@@ -719,7 +726,8 @@ export function getCanonicalToolsList(): McpToolDefinition[] {
   return [
     { name: 'remote_task_submit', description: 'Submit durable task to local agent, Kaggle, browser, or swarm backend', inputSchema: REMOTE_TASK_SUBMIT_SCHEMA },
     { name: 'remote_task_status', description: 'Query durable task status', inputSchema: REMOTE_TASK_STATUS_SCHEMA },
-    { name: 'task_inventory', description: 'Read active tasks and local stale records; revision-checked pagination, minimal metadata, requires explicit tasks:inventory scope', inputSchema: TASK_INVENTORY_SCHEMA },
+    { name: 'task_inventory', description: 'Read active tasks and local stale records; revision-checked pagination, minimal metadata, requires explicit tasks:inventory scope', inputSchema: TASK_INVENTORY_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+    { name: 'device_maintenance_check', description: 'Observe target device tasks and session health; requires local:read and tasks:inventory; never authorizes maintenance', inputSchema: DEVICE_MAINTENANCE_CHECK_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
     { name: 'remote_task_logs', description: 'Fetch task execution logs', inputSchema: REMOTE_TASK_LOGS_SCHEMA },
     { name: 'remote_task_artifacts', description: 'List task artifacts', inputSchema: REMOTE_TASK_ARTIFACTS_SCHEMA },
     { name: 'remote_task_cancel', description: 'Cancel active task', inputSchema: REMOTE_TASK_CANCEL_SCHEMA },

@@ -1805,7 +1805,10 @@ class GatewayDurableObject {
                             result = await this.mcpHandlers.handleChatSwarmRuntimeStatus(caller);
                             break;
                         case 'device_status':
-                            result = await this.mcpHandlers.handleDeviceStatus(caller);
+                            result = await this.mcpHandlers.handleDeviceStatus(args, caller);
+                            break;
+                        case 'device_maintenance_check':
+                            result = await this.mcpHandlers.handleDeviceMaintenanceCheck(args, caller);
                             break;
                         case 'kill_switch_trigger':
                             result = await this.mcpHandlers.handleKillSwitchTrigger(args, caller);

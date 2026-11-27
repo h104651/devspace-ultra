@@ -1277,6 +1277,49 @@ export class McpHandlers {
     };
   }
 
+  public async handleDeviceMaintenanceCheck(args: any, caller?: McpCallerContext) {
+    const auth = this.requireCaller(caller);
+    this.requireScope(auth, 'local:read');
+    this.requireScope(auth, 'tasks:read');
+    this.requireScope(auth, 'tasks:inventory');
+    if (!args || typeof args !== 'object' || Array.isArray(args) ||
+        Object.keys(args).some(key => key !== 'targetDeviceId') ||
+        typeof args.targetDeviceId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(args.targetDeviceId)) {
+      throw new Error('INVALID_ARGUMENT: Explicit targetDeviceId is required.');
+    }
+    const deviceId = args.targetDeviceId;
+    const registered = this.gateway.authManager.getDevice(deviceId);
+    if (!registered) throw new Error('DEVICE_NOT_FOUND: Target device is not registered.');
+    const inventory = this.gateway.taskStore.taskInventory({ backend: 'local', targetDeviceId: deviceId, status: 'active', limit: 20 });
+    const now = Date.now();
+    if (typeof this.gateway.connectionManager?.getConnectedAgents !== 'function') {
+      throw new Error('MAINTENANCE_OBSERVATION_UNAVAILABLE: Session inventory unavailable.');
+    }
+    const sessions = this.gateway.connectionManager.getConnectedAgents().filter(agent => agent.deviceId === deviceId);
+    const healthy = sessions.filter(agent => isSessionHealthy(agent, now));
+    const revoked = registered.status === 'revoked' || !!this.gateway.killSwitch?.isDeviceRevoked?.(deviceId);
+    const blockers: string[] = [];
+    if (revoked) blockers.push('DEVICE_REVOKED');
+    if (sessions.length > 1) blockers.push('MULTIPLE_SESSIONS');
+    if (sessions.length !== 1 || healthy.length !== 1) blockers.push('SINGLE_HEALTHY_SESSION_NOT_OBSERVED');
+    if (inventory.total > 0) blockers.push('TARGET_ACTIVE_TASKS');
+    // An unassigned task or uncertain local mutation may have touched this
+    // host in an earlier session. Keep the global conservative blocker.
+    if (inventory.summary.quarantinedLocalCount > 0) blockers.push('GLOBAL_LOCAL_QUARANTINE');
+    if (inventory.summary.staleLocalCount > 0) blockers.push('GLOBAL_LOCAL_STALE');
+    return {
+      ok: true, checkedAt: now, targetDeviceId: deviceId,
+      connection: { state: revoked ? 'revoked' : healthy.length > 0 ? 'online' : 'offline',
+        connectionCount: sessions.length, healthyCount: healthy.length },
+      targetActiveCount: inventory.total, globalSummary: inventory.summary,
+      snapshotRevision: inventory.snapshotRevision, snapshotComplete: inventory.snapshotComplete,
+      tasks: inventory.tasks, hasMore: inventory.hasMore,
+      observation: blockers.length === 0 ? 'IDLE_OBSERVED' : 'BLOCKED',
+      blockers, admissionClosed: false, maintenanceAuthorized: false,
+      note: 'Point-in-time observation only; no admission lock, process drain proof or shutdown authorization.'
+    };
+  }
+
   public async handleDeviceStatus(args?: any, caller?: McpCallerContext) {
     if (!caller && args && (args.scopes || args.subjectId)) {
       caller = args;

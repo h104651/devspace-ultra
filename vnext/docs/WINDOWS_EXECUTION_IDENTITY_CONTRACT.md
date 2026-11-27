@@ -52,3 +52,6 @@ Added original .NET Win32 primitives and hosted-only test in `tests/windows-appc
 
 ### Native AppContainer compatibility diagnostic
 Both x64 and ARM64 verified kernel AppContainer SID, zero capability count, low integrity and creation-time Job membership. Initial Node script launch failed in the default main module realpath lookup (`EPERM` on the drive root); cleanup succeeded. Candidate uses the documented `--preserve-symlinks-main` option only for the trusted fixed staged fixture script, without granting ancestor or drive-root ACL access. This does not imply compatibility with arbitrary Node/npm dependency resolution, Flutter/Gradle, or production toolchains. Reference: https://nodejs.org/api/cli.html#--preserve-symlinks-main. CI pending.
+
+### Hosted fixture evidence
+CI 45912897160 at ec338802897c2356b3a41d1917971e99f225c1f5: x64 and ARM64 both report APPCONTAINER_KERNEL_TOKEN PASS, APPCONTAINER_OFFLINE_FIXTURE PASS (10 checks each), APPCONTAINER_FIXTURE_CLEANUP PASS; native runner integration and cross-user IPC/ACL also pass. This is evidence for the fixed staged Node fixture, not a production runner identity grant or external-network/toolchain compatibility proof.

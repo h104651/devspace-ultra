@@ -193,7 +193,8 @@ class GatewayServer {
             case 'chat_swarm_cancel': return this.mcpHandlers.handleChatSwarmCancel(args, caller);
             case 'chat_swarm_wake_bridge': return this.mcpHandlers.handleChatSwarmWakeBridge(args, caller);
             case 'chat_swarm_runtime_status': return this.mcpHandlers.handleChatSwarmRuntimeStatus(caller);
-            case 'device_status': return this.mcpHandlers.handleDeviceStatus(caller);
+            case 'device_status': return this.mcpHandlers.handleDeviceStatus(args, caller);
+            case 'device_maintenance_check': return this.mcpHandlers.handleDeviceMaintenanceCheck(args, caller);
             case 'kill_switch_trigger': return this.mcpHandlers.handleKillSwitchTrigger(args, caller);
             default: throw Object.assign(new Error(`Tool '${name}' not found`), { mcpNotFound: true });
         }
