@@ -151,7 +151,8 @@ export class ConnectionManager {
         ? msg.executionPolicyRevision : undefined;
       const authorizedCaps = requestedCaps.filter(cap => {
         if (!isLocalExecutableCapability(cap)) return false;
-        if ((cap === 'local:run_tests' || cap === 'local:build_project') && !executionPolicyRevision) return false;
+        if (cap === 'local:git_read' && (!Array.isArray(msg.capabilities) || !msg.capabilities.includes(cap) || msg.supportsAttemptFencing !== true)) return false;
+        if ((cap === 'local:run_tests' || cap === 'local:build_project' || cap === 'local:git_read') && !executionPolicyRevision) return false;
         const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
         return ScopeChecker.hasScope(auth.payload!.scopes, requiredScope);
       });
@@ -301,7 +302,7 @@ export class ConnectionManager {
         agent.executionPolicyRevision = undefined;
       }
       const claimCapabilities = agent.capabilities.filter(cap => {
-        if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
+        if (cap !== 'local:run_tests' && cap !== 'local:build_project' && cap !== 'local:git_read') return true;
         return !!agent.executionPolicyRevision && Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
       });
       const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, sessionId, supportsAttemptFencing, agent.executionPolicyRevision);

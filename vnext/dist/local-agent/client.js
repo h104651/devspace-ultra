@@ -230,6 +230,12 @@ class LocalAgentClient {
             (!!this.executorConfigRevision && this.computeExecutorConfigRevision() === this.executorConfigRevision);
         const projects = executionPolicyReadable && !this.executor.isHostExecutionBlocked() ? this.executor.getRegistry().listProjects().filter(p => p.enabled) : [];
         return capabilities.filter(cap => {
+            if (cap === 'local:git_read') {
+                return process.platform === 'win32' && !!this.executorConfig.windowsJobRunnerPath &&
+                    /^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$/.test(this.executorConfig.windowsAppContainerSid || '') &&
+                    projects.some(project => project.permissions.read && project.availableCapabilities.includes('local:run_tests') &&
+                        project.configuredTestRunners?.some(id => id === 'git_log' || id === 'git_diff_commits'));
+            }
             if (cap !== 'local:run_tests' && cap !== 'local:build_project')
                 return true;
             return projects.some(project => project.availableCapabilities.includes(cap));
@@ -241,7 +247,7 @@ class LocalAgentClient {
         try {
             if (this.executor.isHostExecutionBlocked())
                 return undefined;
-            if (!this.currentExecutionCapabilities(['local:run_tests', 'local:build_project']).length)
+            if (!this.currentExecutionCapabilities(['local:run_tests', 'local:build_project', 'local:git_read']).length)
                 return undefined;
             const registry = this.executor.getRegistry();
             const projects = registry.listProjects().filter(p => p.enabled)
@@ -267,6 +273,7 @@ class LocalAgentClient {
         if (!this.isRunning)
             return;
         const probe = environment_probe_1.EnvironmentProbe.probe({ allowRawShell: this.config.allowRawShell });
+        probe.capabilities.push('local:git_read');
         const WSClass = ws_1.WebSocket.WebSocket || ws_1.WebSocket;
         const socket = new WSClass(this.config.gatewayUrl);
         this.ws = socket;
@@ -505,7 +512,7 @@ class LocalAgentClient {
                     });
                 }
             };
-            if (task.capability === 'local:run_tests' || task.capability === 'local:build_project') {
+            if (task.capability === 'local:run_tests' || task.capability === 'local:build_project' || task.capability === 'local:git_read') {
                 // Policy may have changed since the claim poll. Never execute with stale config.
                 const admission = task.metadata?.executionAdmission;
                 const revision = this.currentExecutionPolicyRevision();

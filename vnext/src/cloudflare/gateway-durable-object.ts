@@ -1146,6 +1146,9 @@ export class GatewayDurableObject {
         }
         const taskId = decodeURIComponent(url.pathname.slice('/api/tasks/'.length));
         const task = this.taskStore.getTask(taskId);
+        if (task?.capability === 'local:git_read' && !ScopeChecker.hasScope(auth.payload!.scopes, 'local:git:read')) {
+          return Response.json({ error: 'FORBIDDEN' }, { status: 403 });
+        }
         return task ? Response.json(task) : Response.json({ error: 'TASK_NOT_FOUND' }, { status: 404 });
       }
 
@@ -1224,7 +1227,8 @@ export class GatewayDurableObject {
           ? msg.executionPolicyRevision : undefined;
         const authorizedCaps = requestedCaps.filter(cap => {
           if (!isLocalExecutableCapability(cap)) return false;
-          if ((cap === 'local:run_tests' || cap === 'local:build_project') && !executionPolicyRevision) return false;
+          if (cap === 'local:git_read' && (!Array.isArray(msg.capabilities) || !msg.capabilities.includes(cap) || msg.supportsAttemptFencing !== true)) return false;
+          if ((cap === 'local:run_tests' || cap === 'local:build_project' || cap === 'local:git_read') && !executionPolicyRevision) return false;
           const requiredScope = ScopeChecker.getRequiredScopeForCapability(cap);
           return ScopeChecker.hasScope(val.payload!.scopes, requiredScope);
         });
@@ -1398,7 +1402,7 @@ export class GatewayDurableObject {
           (ws as any).serializeAttachment(attachment);
         }
         const claimCapabilities = authorizedCapabilities.filter(cap => {
-          if (cap !== 'local:run_tests' && cap !== 'local:build_project') return true;
+          if (cap !== 'local:run_tests' && cap !== 'local:build_project' && cap !== 'local:git_read') return true;
           return !!attachment.executionPolicyRevision && Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
         });
         const task = this.taskStore.claimTask(authenticatedDeviceId, claimCapabilities, undefined, currentSessionId, supportsAttemptFencing, attachment.executionPolicyRevision);
@@ -1799,6 +1803,7 @@ export class GatewayDurableObject {
             case 'local_find_repositories': result = await this.mcpHandlers.handleLocalFindRepositories(args, caller); break;
             case 'local_create_directory': result = await this.mcpHandlers.handleLocalCreateDirectory(args, caller); break;
             case 'local_git_status': result = await this.mcpHandlers.handleLocalGitStatus(args, caller); break;
+            case 'local_git_read': result = await this.mcpHandlers.handleLocalGitRead(args, caller); break;
             case 'local_run_tests': result = await this.mcpHandlers.handleLocalRunTests(args, caller); break;
             case 'local_build_project': result = await this.mcpHandlers.handleLocalBuildProject(args, caller); break;
             case 'swarm_dispatch': result = await this.mcpHandlers.handleSwarmDispatch(args, caller); break;

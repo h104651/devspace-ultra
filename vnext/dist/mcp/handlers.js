@@ -145,6 +145,8 @@ class McpHandlers {
         const task = this.gateway.taskStore.getTask(args.taskId);
         if (!task)
             throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
+        if (task.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
         return {
             taskId: task.taskId,
             backend: task.backend,
@@ -171,6 +173,8 @@ class McpHandlers {
         const task = this.gateway.taskStore.getTask(args.taskId);
         if (!task)
             throw new Error(`TASK_NOT_FOUND: Task '${args.taskId}' does not exist`);
+        if (task.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
         const limit = args.limit || 100;
         return {
             taskId: task.taskId,
@@ -181,6 +185,9 @@ class McpHandlers {
     async handleRemoteTaskArtifacts(args, caller) {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'artifacts:read', 'tasks:read');
+        const task = this.gateway.taskStore.getTask(args.taskId);
+        if (task?.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
         const artifacts = this.gateway.artifactStore.getTaskArtifacts(args.taskId);
         return {
             taskId: args.taskId,
@@ -200,6 +207,8 @@ class McpHandlers {
         const auth = this.requireCaller(caller);
         this.requireScope(auth, 'tasks:submit');
         const task = this.gateway.taskStore.getTask(args.taskId);
+        if (task?.capability === 'local:git_read')
+            this.requireScope(auth, 'local:git:read');
         if (task?.backend === 'local' && (task.capability === 'local:run_tests' || task.capability === 'local:build_project')) {
             this.requireScope(auth, scope_checker_1.ScopeChecker.getRequiredScopeForCapability(task.capability));
             if (['claimed', 'acknowledged', 'running'].includes(task.status)) {
@@ -2432,6 +2441,18 @@ class McpHandlers {
             clientRequestId: args?.clientRequestId,
             targetDeviceId: args?.targetDeviceId
         }, auth, args?.waitMs);
+    }
+    async handleLocalGitRead(args, caller) {
+        const auth = this.requireCaller(caller);
+        this.requireScope(auth, 'local:git:read');
+        this.requireScope(auth, 'tasks:submit');
+        if (!args || typeof args !== 'object' || Array.isArray(args)) {
+            throw new Error('INVALID_ARGUMENT: Git read request object required.');
+        }
+        const { targetDeviceId, clientRequestId, ...payload } = args;
+        return this.gateway.taskRouter.routeTaskSubmit({
+            backend: 'local', capability: 'local:git_read', payload, targetDeviceId, clientRequestId
+        }, auth.scopes, auth.subjectId);
     }
     async handleLocalRunTests(args, caller) {
         const auth = this.requireCaller(caller);

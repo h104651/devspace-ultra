@@ -603,6 +603,20 @@ exports.LOCAL_GIT_STATUS_SCHEMA = {
     required: ['projectId'],
     additionalProperties: false
 };
+const LOCAL_GIT_READ_SCHEMA = {
+    type: 'object',
+    properties: {
+        targetDeviceId: { type: 'string', description: 'Explicit registered device ID' },
+        projectId: { type: 'string', description: 'Normalized locally approved project ID' },
+        clientRequestId: { type: 'string', description: 'Stable request ID for idempotency' },
+        operation: { type: 'string', enum: ['git_log', 'git_diff_commits'] },
+        head: { type: 'string', description: 'Full lowercase Git object ID' },
+        base: { type: 'string', description: 'Required only for git_diff_commits' },
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Only for git_log, default 30' }
+    },
+    required: ['targetDeviceId', 'projectId', 'clientRequestId', 'operation', 'head'],
+    additionalProperties: false
+};
 exports.LOCAL_RUN_TESTS_SCHEMA = {
     type: 'object',
     properties: {
@@ -710,6 +724,7 @@ function getCanonicalToolsList() {
         { name: 'local_find_repositories', description: 'Recursively discover Git repositories and project types within an authorized workspace. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: exports.LOCAL_FIND_REPOSITORIES_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
         { name: 'local_create_directory', description: 'Create directory within an authorized local workspace root. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: exports.LOCAL_CREATE_DIRECTORY_SCHEMA, annotations: LOCAL_CREATE_ANNOTATIONS },
         { name: 'local_git_status', description: 'Get git status of an authorized local workspace or nested subproject repository. Returns direct result on fast execution, or pending task if waiting for device.', inputSchema: exports.LOCAL_GIT_STATUS_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
+        { name: 'local_git_read', description: 'Submit isolated committed Git log or diff for an explicit device and approved project; requires local:git:read and tasks:submit', inputSchema: LOCAL_GIT_READ_SCHEMA, annotations: LOCAL_READ_ONLY_ANNOTATIONS },
         { name: 'local_run_tests', description: 'Run test suite inside an authorized local project or subproject root', inputSchema: exports.LOCAL_RUN_TESTS_SCHEMA },
         { name: 'local_build_project', description: 'Execute build command inside an authorized local project or subproject root', inputSchema: exports.LOCAL_BUILD_PROJECT_SCHEMA },
         { name: 'chat_swarm_create', description: 'Create a durable Chat Swarm and return an invite code plus private orchestrator token', inputSchema: exports.CHAT_SWARM_CREATE_SCHEMA },

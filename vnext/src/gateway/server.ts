@@ -158,6 +158,7 @@ export class GatewayServer {
       case 'local_find_repositories': return this.mcpHandlers.handleLocalFindRepositories(args, caller);
       case 'local_create_directory': return this.mcpHandlers.handleLocalCreateDirectory(args, caller);
       case 'local_git_status': return this.mcpHandlers.handleLocalGitStatus(args, caller);
+      case 'local_git_read': return this.mcpHandlers.handleLocalGitRead(args, caller);
       case 'local_run_tests': return this.mcpHandlers.handleLocalRunTests(args, caller);
       case 'local_build_project': return this.mcpHandlers.handleLocalBuildProject(args, caller);
       case 'swarm_dispatch': return this.mcpHandlers.handleSwarmDispatch(args, caller);
@@ -407,6 +408,7 @@ export class GatewayServer {
     this.app.get('/api/tasks/:taskId', this.authenticate('tasks:read'), (req, res) => {
       const task = this.taskStore.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: 'TASK_NOT_FOUND' });
+      if (task.capability === 'local:git_read' && !ScopeChecker.hasScope((req as any).auth.scopes, 'local:git:read')) return res.status(403).json({ error: 'FORBIDDEN' });
       res.json(task);
     });
 
@@ -423,6 +425,7 @@ export class GatewayServer {
     this.app.get('/api/tasks/:taskId/logs', this.authenticate('tasks:read'), (req, res) => {
       const task = this.taskStore.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: 'TASK_NOT_FOUND' });
+      if (task.capability === 'local:git_read' && !ScopeChecker.hasScope((req as any).auth.scopes, 'local:git:read')) return res.status(403).json({ error: 'FORBIDDEN' });
       const limit = parseInt(req.query.limit as string) || 1000;
       res.json({ taskId: task.taskId, logs: task.logs.slice(-limit) });
     });
@@ -430,6 +433,7 @@ export class GatewayServer {
     this.app.get('/api/tasks/:taskId/artifacts', this.authenticate('artifacts:read'), (req, res) => {
       const task = this.taskStore.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: 'TASK_NOT_FOUND' });
+      if (task.capability === 'local:git_read' && !ScopeChecker.hasScope((req as any).auth.scopes, 'local:git:read')) return res.status(403).json({ error: 'FORBIDDEN' });
       res.json({ taskId: task.taskId, artifacts: task.artifacts.map(id => this.artifactStore.getArtifactMetadata(id)).filter(Boolean) });
     });
 

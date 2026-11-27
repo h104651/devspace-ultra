@@ -1109,6 +1109,9 @@ class GatewayDurableObject {
                 }
                 const taskId = decodeURIComponent(url.pathname.slice('/api/tasks/'.length));
                 const task = this.taskStore.getTask(taskId);
+                if (task?.capability === 'local:git_read' && !scope_checker_1.ScopeChecker.hasScope(auth.payload.scopes, 'local:git:read')) {
+                    return Response.json({ error: 'FORBIDDEN' }, { status: 403 });
+                }
                 return task ? Response.json(task) : Response.json({ error: 'TASK_NOT_FOUND' }, { status: 404 });
             }
             if (url.pathname.startsWith('/api/artifacts/') && request.method === 'GET') {
@@ -1183,7 +1186,9 @@ class GatewayDurableObject {
                 const authorizedCaps = requestedCaps.filter(cap => {
                     if (!(0, capabilities_1.isLocalExecutableCapability)(cap))
                         return false;
-                    if ((cap === 'local:run_tests' || cap === 'local:build_project') && !executionPolicyRevision)
+                    if (cap === 'local:git_read' && (!Array.isArray(msg.capabilities) || !msg.capabilities.includes(cap) || msg.supportsAttemptFencing !== true))
+                        return false;
+                    if ((cap === 'local:run_tests' || cap === 'local:build_project' || cap === 'local:git_read') && !executionPolicyRevision)
                         return false;
                     const requiredScope = scope_checker_1.ScopeChecker.getRequiredScopeForCapability(cap);
                     return scope_checker_1.ScopeChecker.hasScope(val.payload.scopes, requiredScope);
@@ -1360,7 +1365,7 @@ class GatewayDurableObject {
                     ws.serializeAttachment(attachment);
                 }
                 const claimCapabilities = authorizedCapabilities.filter(cap => {
-                    if (cap !== 'local:run_tests' && cap !== 'local:build_project')
+                    if (cap !== 'local:run_tests' && cap !== 'local:build_project' && cap !== 'local:git_read')
                         return true;
                     return !!attachment.executionPolicyRevision && Array.isArray(msg.supportedCapabilities) && msg.supportedCapabilities.includes(cap);
                 });
@@ -1803,6 +1808,9 @@ class GatewayDurableObject {
                             break;
                         case 'local_git_status':
                             result = await this.mcpHandlers.handleLocalGitStatus(args, caller);
+                            break;
+                        case 'local_git_read':
+                            result = await this.mcpHandlers.handleLocalGitRead(args, caller);
                             break;
                         case 'local_run_tests':
                             result = await this.mcpHandlers.handleLocalRunTests(args, caller);

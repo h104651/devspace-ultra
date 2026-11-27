@@ -413,6 +413,30 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     assert.strictEqual(replay.status, 'failed');
     passed++;
 
+    // Separate Git API requires explicit routing, payload and scope, including
+    // generic submit bypass and task result retrieval. No production device used.
+    const gitCaller = { subjectId: 'fixture-git', scopes: ['tasks:submit', 'local:git:read'] };
+    const oldCaller = { subjectId: 'fixture-old', scopes: ['tasks:submit', 'local:exec', 'local:read'] };
+    const gitArgs = { projectId: 'astor-tuneup', operation: 'git_log', head: 'a'.repeat(40), targetDeviceId: deviceId, clientRequestId: 'git-read-fixture' };
+    await assert.rejects(() => handlers.handleLocalGitRead(gitArgs, oldCaller), /AUTH_FORBIDDEN/);
+    await assert.rejects(() => handlers.handleLocalGitRead({...gitArgs, targetDeviceId: undefined}, gitCaller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleLocalGitRead({...gitArgs, head: 'HEAD'}, gitCaller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleLocalGitRead({...gitArgs, args: ['push']}, gitCaller), /INVALID_ARGUMENT/);
+    await assert.rejects(() => handlers.handleLocalGitRead(gitArgs, gitCaller), /EXECUTION_TARGET_NOT_ELIGIBLE/);
+    await assert.rejects(() => handlers.handleRemoteTaskSubmit({ backend:'local', capability:'local:git_read', targetDeviceId:deviceId, clientRequestId:'git-bypass', payload:{projectId:'astor-tuneup',operation:'git_log',head:'a'.repeat(40)} }, oldCaller), /AUTH_FORBIDDEN/);
+    mockConnectedAgents[0].capabilities.push('local:git_read');
+    const git = await handlers.handleLocalGitRead(gitArgs, gitCaller);
+    assert.strictEqual(git.status, 'queued');
+    assert.strictEqual(git.task.requiredScope, 'local:git:read');
+    assert.strictEqual(git.task.metadata.executionAdmission.sessionId, 'fixture-session');
+    assert.strictEqual((await handlers.handleLocalGitRead(gitArgs, gitCaller)).taskId, git.taskId);
+    await assert.rejects(() => handlers.handleRemoteTaskStatus({taskId:git.taskId}, oldCaller), /AUTH_FORBIDDEN/);
+    await assert.rejects(() => handlers.handleRemoteTaskLogs({taskId:git.taskId}, oldCaller), /AUTH_FORBIDDEN/);
+    assert.strictEqual((await handlers.handleRemoteTaskStatus({taskId:git.taskId}, gitCaller)).status,'queued');
+    assert.strictEqual(taskStore.claimTask(deviceId,['local:git_read'],undefined,'new-session',true,'b'.repeat(32)),undefined);
+    assert.strictEqual(taskStore.getTask(git.taskId)?.error?.code,'EXECUTION_ADMISSION_EXPIRED');
+    passed++;
+
     // c. remote_task_submit
     const remoteSubmitRes = await handlers.handleRemoteTaskSubmit({
       backend: 'local',
