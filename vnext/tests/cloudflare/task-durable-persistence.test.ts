@@ -106,6 +106,22 @@ export async function runTaskDurablePersistenceTests(): Promise<{ passed: number
     assert.strictEqual(inventory.maintenanceAuthorized, false);
     passed++;
 
+    // A pending cancellation survives DO working-set rehydration but never
+    // transfers to a new attempt/session or overwrites stale.
+    const execution = store.createTask({ backend: 'local', capability: 'local:build_project', targetDeviceId: 'cancel-fixture', payload: {}, metadata: { executionAdmission: { sessionId: 'cancel-session', policyRevision: 'a'.repeat(32) }, executionCancellation: { requestId: 'caller-forged' } } });
+    assert.strictEqual(execution.metadata?.executionCancellation, undefined);
+    assert.ok(store.claimTaskById(execution.taskId, 'cancel-fixture', 60000, 'cancel-session', 'a'.repeat(32)));
+    const attempt = execution.activeAttemptId!;
+    const requestId = store.requestExecutionCancellation(execution.taskId, 'cancel-fixture', 'cancel-session', attempt);
+    const restarted = new TaskStore(undefined, 60000, storage);
+    restarted.hydrate(await storage.listActiveTasks());
+    assert.strictEqual(restarted.getPendingExecutionCancellation(execution.taskId, 'cancel-fixture', 'cancel-session', attempt)?.requestId, requestId);
+    assert.strictEqual(restarted.confirmExecutionCancellation(execution.taskId, 'cancel-fixture', 'new-session', attempt, requestId), false);
+    assert.strictEqual(restarted.failTasksForSupersededSession('cancel-fixture', 'cancel-session'), 1);
+    assert.strictEqual(restarted.confirmExecutionCancellation(execution.taskId, 'cancel-fixture', 'cancel-session', attempt, requestId), false);
+    assert.strictEqual((await storage.getTask(execution.taskId))?.status, 'stale');
+    passed++;
+
     assert.ok(sql.alters.some(sqlText => /ALTER TABLE tasks ADD COLUMN attemptsJson/i.test(sqlText)), 'Existing Durable Object DBs need an additive attemptsJson migration');
     assert.ok(sql.alters.some(sqlText => /ALTER TABLE tasks ADD COLUMN activeAttemptId/i.test(sqlText)), 'Existing Durable Object DBs need an additive activeAttemptId migration');
     assert.ok(sql.alters.some(sqlText => /ALTER TABLE tasks ADD COLUMN externalRunJson/i.test(sqlText)), 'Existing Durable Object DBs need an additive externalRunJson migration');

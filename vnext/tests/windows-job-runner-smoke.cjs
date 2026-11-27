@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { TaskExecutor } = require('../dist/local-agent/task-executor');
+const { LocalAgentClient } = require('../dist/local-agent/client');
+const { TaskStore } = require('../dist/storage/task-store');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function dead(pid) {
@@ -65,6 +67,47 @@ async function main() {
     assert.equal((await run('good')).exitCode, 0);
     const blocked = new TaskExecutor({ projects, windowsJobRunnerPath:host, hostExecutionBlocked:true });
     await assert.rejects(() => blocked.executeTask(task('good'), () => {}), /LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+    // Native wire-boundary fixture: actual compiled Agent and Job Runner,
+    // synthetic registered socket (no gateway network or production token).
+    fs.rmSync(marker);
+    const agent = new LocalAgentClient({ gatewayUrl:'ws://127.0.0.1:1/ws/agent',deviceId:'wire-fixture',token:'fixture-only',projects,windowsJobRunnerPath:host });
+    const store = new TaskStore(':memory:');
+    const sent = [];
+    const socket = { readyState:1, send: data => sent.push(JSON.parse(data)) };
+    agent.ws = socket;
+    agent.registeredSocket = socket;
+    agent.registeredSessionId = 'wire-session';
+    agent.isRunning = true;
+    agent.executionPolicyFingerprint = agent.computeExecutionPolicyFingerprint();
+    agent.executionPolicyRevision = 'a'.repeat(32);
+    assert.equal(agent.currentExecutionPolicyRevision(),'a'.repeat(32));
+    const wire = store.createTask({backend:'local',capability:'local:run_tests',targetDeviceId:'wire-fixture',payload:{projectId:'fixture',runnerId:'cancel'},metadata:{executionAdmission:{sessionId:'wire-session',policyRevision:'a'.repeat(32)}}});
+    assert.ok(store.claimTaskById(wire.taskId,'wire-fixture',60000,'wire-session','a'.repeat(32)));
+    // Go through the actual Agent assignment message handler, not the executor
+    // API alone. Clone to model the JSON serialization boundary.
+    agent.handleGatewayMessage({type:'TASK_ASSIGNED',task:JSON.parse(JSON.stringify(wire))},socket);
+    const wirePids = await waitMarker(marker);
+    const requestId = store.requestExecutionCancellation(wire.taskId,'wire-fixture','wire-session',wire.activeAttemptId);
+    const pending = store.getPendingExecutionCancellation(wire.taskId,'wire-fixture','wire-session',wire.activeAttemptId);
+    assert.ok(pending);
+    agent.handleGatewayMessage({type:'AGENT_HEARTBEAT_ACK',cancellations:[{...pending,attemptId:'wrong-attempt'}]},socket);
+    await sleep(150);
+    assert.ok(!dead(wirePids.parent) && !dead(wirePids.child));
+    assert.ok(!sent.some(msg=>msg.type==='TASK_CANCEL_CONFIRMED'));
+    agent.handleGatewayMessage({type:'AGENT_HEARTBEAT_ACK',cancellations:[pending]},socket);
+    const until = Date.now()+10000;
+    while (!sent.some(msg=>msg.type==='TASK_CANCEL_CONFIRMED') && Date.now()<until) await sleep(25);
+    const confirmed = sent.find(msg=>msg.type==='TASK_CANCEL_CONFIRMED');
+    assert.ok(confirmed,'No native cancellation confirmation');
+    assert.equal(confirmed.requestId,requestId);
+    assert.equal(confirmed.attemptId,wire.activeAttemptId);
+    assert.ok(dead(wirePids.parent) && dead(wirePids.child),'Confirmed wire cancellation requires dead parent and child');
+    assert.ok(!sent.some(msg=>msg.type==='TASK_COMPLETE'||msg.type==='TASK_FAIL'));
+    assert.equal(store.getTask(wire.taskId).status,'claimed','Request alone is not terminal');
+    assert.ok(store.confirmExecutionCancellation(wire.taskId,'wire-fixture','wire-session',confirmed.attemptId,confirmed.requestId));
+    assert.equal(store.getTask(wire.taskId).status,'cancelled');
+    assert.equal(agent.hasInFlightTasks(),false);
+    console.log('NATIVE_AGENT_CANCELLATION_WIRE_FIXTURE PASS',process.arch);
     console.log('Native runner integration PASS',process.arch);
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
 }
