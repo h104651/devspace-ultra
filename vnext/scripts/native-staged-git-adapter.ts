@@ -34,6 +34,7 @@ export function createNativeStagedGitAdapter(executor: TaskExecutor, policy: Sta
   if (process.platform!=='win32' || executor.isHostExecutionBlocked()) throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Native staged Git adapter requires an unblocked Windows candidate.');
   if (!/^[a-z0-9_.-]{1,128}$/.test(policy.projectId) || !Number.isInteger(policy.timeoutMs) ||
       policy.timeoutMs<100 || policy.timeoutMs>30000) throw new Error('GIT_STAGED_POLICY_DENIED');
+  const projectId=policy.projectId, timeoutMs=policy.timeoutMs;
   const root=canonical(policy.root,true), executable=canonical(policy.executable,false);
   const hooks=canonical(policy.emptyHooksDirectory,true), fence=canonical(policy.protectedFenceDirectory,true);
   if (path.basename(executable).toLowerCase()!=='git.exe' || fs.readdirSync(hooks).length ||
@@ -44,10 +45,10 @@ export function createNativeStagedGitAdapter(executor: TaskExecutor, policy: Sta
   const query=async (args: readonly string[])=>{
     if (fs.readdirSync(hooks).length || canonical(hooks,true)!==hooks || canonical(root,true)!==root ||
         canonical(executable,false)!==executable) throw new Error('GIT_STAGED_POLICY_CHANGED');
-    return executor.runStagedGitCandidate(executable,args,root,policy.timeoutMs,signal);
+    return executor.runStagedGitCandidate(executable,args,root,timeoutMs,signal);
   };
-  const inner: GitBranchAdapter={async acquire(projectId){
-    if (projectId!==policy.projectId || executor.isHostExecutionBlocked()) throw new Error('GIT_STAGED_POLICY_DENIED');
+  const inner: GitBranchAdapter={async acquire(requestedProjectId){
+    if (requestedProjectId!==projectId || executor.isHostExecutionBlocked()) throw new Error('GIT_STAGED_POLICY_DENIED');
     return {
       approvedTargets, emptyHooksDirectory:hooks,indexWorkspace:{root,approvedPaths},
       snapshot(intent){return collectGitBranchSnapshot(root,intent,query);},
@@ -57,8 +58,8 @@ export function createNativeStagedGitAdapter(executor: TaskExecutor, policy: Sta
   // Policy must be validated before creating a durable fence; otherwise a
   // malformed project ID can poison the lock directory without execution.
   const fenced=withDurableGitFence(fence,inner);
-  return {async acquire(projectId){
-    if (projectId!==policy.projectId || executor.isHostExecutionBlocked()) throw new Error('GIT_STAGED_POLICY_DENIED');
-    return fenced.acquire(projectId);
+  return {async acquire(requestedProjectId){
+    if (requestedProjectId!==projectId || executor.isHostExecutionBlocked()) throw new Error('GIT_STAGED_POLICY_DENIED');
+    return fenced.acquire(requestedProjectId);
   }};
 }

@@ -234,6 +234,10 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       fs.mkdirSync(path.join(dir,'.git','worktrees'));
       await assert.rejects(()=>collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>git(args)),/REPOSITORY_DENIED/);
       fs.rmdirSync(path.join(dir,'.git','worktrees'));
+      const hardlink=path.join(dir,'linked.txt');
+      fs.linkSync(path.join(dir,'fixture.txt'),hardlink);
+      await assert.rejects(()=>collectGitBranchSnapshot(dir,parseGitBranchIntent(create),async args=>git(args)),/LINK_DENIED/);
+      fs.unlinkSync(hardlink);
       const result = await runGitBranchMutation(create, adapter);
       assert.strictEqual(result.head,head);
       assert.strictEqual(git(['symbolic-ref','--short','HEAD']).trim(),'main');

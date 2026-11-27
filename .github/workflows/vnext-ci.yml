@@ -131,14 +131,18 @@ jobs:
       - name: Native runner integration (deadline, cancel, descendant drain)
         timeout-minutes: 3
         run: node tests/windows-job-runner-smoke.cjs native/windows-job-runner/bin/Release/net8.0/WindowsJobRunner.exe
-      - name: Zero-capability AppContainer offline boundary fixture
-        timeout-minutes: 4
+      - name: Zero-capability AppContainer offline boundary and real Git fixture
+        timeout-minutes: 6
         shell: pwsh
         run: |
           $node = (Get-Command node.exe -ErrorAction Stop).Source
           $hostPath = (Resolve-Path native/windows-job-runner/bin/Release/net8.0/WindowsJobRunner.exe).Path
           $integration = (Resolve-Path tests/windows-offline-executor-smoke.cjs).Path
-          dotnet run --project tests/windows-appcontainer-fixture/WindowsAppContainerFixture.csproj --configuration Release -- "$node" "$hostPath" "$integration"
+          $gitExecPath = (& git --exec-path).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $gitExecPath) { throw 'Hosted Git exec path unavailable' }
+          $gitBin = Join-Path (Split-Path (Split-Path $gitExecPath -Parent) -Parent) 'bin'
+          $git = (Resolve-Path (Join-Path $gitBin 'git.exe') -ErrorAction Stop).Path
+          dotnet run --project tests/windows-appcontainer-fixture/WindowsAppContainerFixture.csproj --configuration Release -- "$node" "$hostPath" "$integration" "$git"
           if ($LASTEXITCODE -ne 0) { throw 'AppContainer boundary fixture failed' }
 
   verify-windows-identity:

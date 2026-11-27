@@ -40,6 +40,47 @@ function assertDirectDirectory(dir: string): void {
   }
 }
 
+// The staged filesystem must be privately owned and ACL-isolated. This scan
+// supplements that boundary; it is not a substitute for exclusive ownership.
+export function validateStagedGitTree(root: string): void {
+  assertDirectDirectory(root);
+  const stack: {dir:string; depth:number}[] = [{dir:root,depth:0}];
+  let count=0;
+  while(stack.length) {
+    const {dir,depth}=stack.pop()!;
+    if(depth>32) throw new Error('GIT_STAGED_TREE_LIMIT');
+    const handle=fs.opendirSync(dir);
+    try {
+      let entry: fs.Dirent | null;
+      while((entry=handle.readSync())!==null) {
+        if(++count>20000) throw new Error('GIT_STAGED_TREE_LIMIT');
+        const file=path.join(dir,entry.name);
+        const stat=fs.lstatSync(file);
+        if(stat.isSymbolicLink() || path.relative(file,fs.realpathSync(file))!=='') throw new Error('GIT_STAGED_LINK_DENIED');
+        if(stat.isDirectory()) stack.push({dir:file,depth:depth+1});
+        else if(!stat.isFile() || stat.nlink!==1) throw new Error('GIT_STAGED_LINK_DENIED');
+      }
+    } finally {handle.closeSync();}
+  }
+}
+
+async function validateCommitTree(head:string, query:(args:string[])=>Promise<string>):Promise<void> {
+  const raw=await query(['ls-tree','-r','-z',head,'--']);
+  if(raw==='') return;
+  if(!raw.endsWith('\0')) throw new Error('GIT_STAGED_TREE_INVALID');
+  const names=new Set<string>();
+  for(const line of raw.slice(0,-1).split('\0')) {
+    const match=/^(100644|100755) blob [a-f0-9]{40}\t([^\r\n]+)$/.exec(line);
+    if(!match) throw new Error('GIT_STAGED_TREE_ENTRY_DENIED');
+    const name=match[2], parts=name.split('/');
+    if(parts.some(part=>!part || part==='.' || part==='..' || /[\\:*?"<>|\u0000-\u001f\u007f\ufffd]/.test(part) ||
+       /[. ]$/.test(part) || /^(?:\.git|git~[0-9]+|con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(part))) throw new Error('GIT_STAGED_TREE_ENTRY_DENIED');
+    const folded=name.toLowerCase();
+    if(names.has(folded)) throw new Error('GIT_STAGED_TREE_COLLISION');
+    names.add(folded);
+  }
+}
+
 export async function collectGitBranchSnapshot(root: string, intent: GitBranchIntent, read: GitSnapshotReader): Promise<GitBranchSnapshot> {
   const checked = parseGitBranchIntent(intent);
   return collectStagedGitSnapshot(root, checked.expectedHead, checked.branch, read);
@@ -49,12 +90,12 @@ export async function collectStagedGitSnapshot(root: string, expectedHead: strin
   if (!/^[a-f0-9]{40}$/.test(expectedHead) || !/^[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)*$/.test(targetBranch)) {
     throw new Error('GIT_STAGED_OBJECT_FORMAT_DENIED');
   }
-  assertDirectDirectory(root);
+  validateStagedGitTree(root);
   const gitDir = path.join(root, '.git');
   assertDirectDirectory(gitDir);
   // Linked worktrees, alternate stores, shallow/partial repositories and
   // shared state are intentionally outside this first staging contract.
-  for (const rel of ['commondir','gitdir','worktrees','shallow','objects/info/alternates','objects/info/http-alternates','info/grafts']) {
+  for (const rel of ['commondir','gitdir','worktrees','modules','shallow','objects/info/alternates','objects/info/http-alternates','info/grafts']) {
     if (existsEntry(path.join(gitDir,rel))) throw new Error('GIT_STAGED_REPOSITORY_DENIED');
   }
   const config = path.join(gitDir,'config');
@@ -91,6 +132,8 @@ export async function collectStagedGitSnapshot(root: string, expectedHead: strin
     }
   }
   if (!currentFound) throw new Error('GIT_STAGED_HEAD_DENIED');
+  await validateCommitTree(head,query);
+  if(targetHead && targetHead!==head) await validateCommitTree(targetHead,query);
   const status = await query(['status','--porcelain=v1','-z','--untracked-files=all','--ignored=matching','--ignore-submodules=none']);
   return { currentBranch:currentRef.slice('refs/heads/'.length), head, clean:status === '',
     operationInProgress, targetHead, targetCheckedOutElsewhere:false };

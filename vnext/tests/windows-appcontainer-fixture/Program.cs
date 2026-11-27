@@ -163,10 +163,11 @@ internal static class Program {
         if(!OperatingSystem.IsWindows()||Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||
            Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")
             throw new InvalidOperationException("Disposable GitHub-hosted Windows runner required.");
-        Require(args.Length==3 && Path.IsPathFullyQualified(args[0]) &&
+        Require(args.Length==4 && Path.IsPathFullyQualified(args[0]) &&
             Path.GetFileName(args[0]).Equals("node.exe",StringComparison.OrdinalIgnoreCase) && File.Exists(args[0]),"CI Node executable required");
         Require(Path.IsPathFullyQualified(args[1]) && File.Exists(args[1]) && Path.GetFileName(args[1]).Equals("WindowsJobRunner.exe",StringComparison.OrdinalIgnoreCase),"Native runner required");
         Require(Path.IsPathFullyQualified(args[2]) && File.Exists(args[2]) && Path.GetFileName(args[2]).Equals("windows-offline-executor-smoke.cjs",StringComparison.OrdinalIgnoreCase),"Fixed integration script required");
+        Require(Path.IsPathFullyQualified(args[3]) && File.Exists(args[3]) && Path.GetFileName(args[3]).Equals("git.exe",StringComparison.OrdinalIgnoreCase),"Hosted Git executable required");
         var owner=WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("Missing owner SID");
         string root=Directory.CreateTempSubdirectory("dsu-ac-").FullName;
         string name="DevSpace.CI."+Guid.NewGuid().ToString("N");
@@ -189,6 +190,17 @@ internal static class Program {
             LowIntegrity(work);
             File.Copy(args[0],node);
             File.Copy(Path.Combine(AppContext.BaseDirectory,"Probe.cjs"),script);
+            // Stage only the trusted hosted Git binary and adjacent DLLs.
+            // No host installation changes, downloads or credential access.
+            string gitBin=Path.Combine(root,"tool","git-bin");
+            Directory.CreateDirectory(gitBin);
+            Directory.CreateDirectory(Path.Combine(root,"tool","empty-hooks"));
+            string sourceBin=Path.GetDirectoryName(args[3])!;
+            NoReparse(sourceBin);
+            foreach(string source in Directory.EnumerateFiles(sourceBin,"*.dll").Append(args[3])) {
+                Require((File.GetAttributes(source)&FileAttributes.ReparsePoint)==0,"Git distribution reparse point denied");
+                File.Copy(source,Path.Combine(gitBin,Path.GetFileName(source)));
+            }
             Environment.SetEnvironmentVariable("DSU_SYNTHETIC_PRIVATE_ENV","synthetic-only");
             server.Start();
             Run(root,node,script,sid,((IPEndPoint)server.LocalEndpoint).Port,ref safeToRemove);
@@ -200,12 +212,12 @@ internal static class Program {
             safeToRemove=false;
             var psi=new ProcessStartInfo(args[0]) { UseShellExecute=false, CreateNoWindow=true,
                 RedirectStandardOutput=true, RedirectStandardError=true };
-            foreach(var arg in new[]{args[2],args[1],root,package.Value,((IPEndPoint)server.LocalEndpoint).Port.ToString()})
+            foreach(var arg in new[]{args[2],args[1],root,package.Value,((IPEndPoint)server.LocalEndpoint).Port.ToString(),args[3]})
                 psi.ArgumentList.Add(arg);
             using(var integration=Process.Start(psi) ?? throw new InvalidOperationException("Integration start")) {
                 var output=integration.StandardOutput.ReadToEndAsync();
                 var error=integration.StandardError.ReadToEndAsync();
-                if(!integration.WaitForExit(60000)) {
+                if(!integration.WaitForExit(180000)) {
                     integration.Kill();
                     Require(integration.WaitForExit(5000),"Integration host exit unknown");
                     throw new TimeoutException("Integration host timeout; retain fixture");
