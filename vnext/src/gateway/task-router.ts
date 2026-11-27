@@ -49,6 +49,12 @@ export class TaskRouter {
       throw new Error(`KILL_SWITCH_ACTIVE: ${killCheck.reason}`);
     }
 
+    // Reserved mutation/network names remain closed on every backend until
+    // the isolated runtime and credential broker have independent acceptance.
+    if (options.capability === 'local:git_write' || options.capability === 'local:git_network') {
+      throw new Error('LOCAL_GIT_ACTIVATION_HELD: Git mutation and network routing are not enabled.');
+    }
+
     if (options.capability === 'local:git_read' && options.backend !== 'local') {
       throw new Error('INVALID_ARGUMENT: Git read requires local backend.');
     }

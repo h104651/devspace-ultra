@@ -58,6 +58,10 @@ class ScopeChecker {
                 return 'raw_shell:run';
             if (capability === 'local:git_read')
                 return 'local:git:read';
+            if (capability === 'local:git_write')
+                return 'local:git:write';
+            if (capability === 'local:git_network')
+                return 'local:git:network';
             if (capability === 'local:run_tests')
                 return 'local:execute:test';
             if (capability === 'local:build_project')

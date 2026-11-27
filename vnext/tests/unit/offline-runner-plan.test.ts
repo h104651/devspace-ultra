@@ -1,3 +1,4 @@
+import { authorizeGitNetworkIntent, parseGitNetworkIntent, validateGitNetworkEndpoint } from '../../scripts/plan-git-network';
 import { createNativeStagedGitAdapter } from '../../scripts/native-staged-git-adapter';
 import { parseGitIndexIntent, runGitIndexMutation } from '../../scripts/execute-git-index-mutations';
 import { collectGitBranchSnapshot } from '../../scripts/git-branch-snapshot';
@@ -376,5 +377,21 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       passed++;
     } finally {fs.rmSync(dir,{recursive:true,force:true});}
   } catch(err) {failed++;console.error('Native staged Git activation gate regression:',err);}
+  try {
+    const a='a'.repeat(40), b='b'.repeat(40);
+    const request={projectId:'fixture',operation:'git_fetch',remoteId:'origin',branch:'feat/network',expectedLocalHead:a,expectedRemoteHead:b};
+    const policy={projectId:'fixture',remotes:[{id:'origin',url:'https://example.invalid/team/repo.git',approvedBranches:['feat/network'],operations:['git_fetch','git_pull_ff','git_push'] as const}]};
+    const state={currentBranch:'feat/network',localHead:a,remoteHead:b,clean:true,operationInProgress:false,localIsAncestorOfRemote:true,remoteIsAncestorOfLocal:false};
+    assert.strictEqual(authorizeGitNetworkIntent(request,policy,state).ref,'refs/heads/feat/network');
+    assert.strictEqual(authorizeGitNetworkIntent({...request,operation:'git_pull_ff'},policy,state).endpoint,policy.remotes[0].url);
+    await assert.rejects(async()=>authorizeGitNetworkIntent({...request,operation:'git_push'},policy,state),/NOT_FAST_FORWARD/);
+    assert.strictEqual(authorizeGitNetworkIntent({...request,operation:'git_push'},policy,{...state,remoteIsAncestorOfLocal:true}).intent.operation,'git_push');
+    for(const extra of [{url:'https://evil.invalid/a/b.git'},{credential:'secret'},{force:true},{args:['--force']},{refspec:'+HEAD:main'}]) assert.throws(()=>parseGitNetworkIntent({...request,...extra}),/INTENT_DENIED/);
+    for(const endpoint of ['http://example.invalid/team/repo.git','https://user:pass@example.invalid/team/repo.git','https://example.invalid:443/team/repo.git','https://example.invalid/team/repo.git?token=x','https://127.0.0.1/team/repo.git','https://example.invalid/team/../repo.git','https://example.invalid/team/%72epo.git','file:///tmp/repo.git']) assert.throws(()=>validateGitNetworkEndpoint(endpoint),/ENDPOINT_DENIED/);
+    assert.throws(()=>authorizeGitNetworkIntent({...request,remoteId:'other'},policy,state),/POLICY_DENIED/);
+    assert.throws(()=>authorizeGitNetworkIntent(request,policy,{...state,remoteHead:a}),/STATE_CONFLICT/);
+    assert.throws(()=>authorizeGitNetworkIntent({...request,operation:'git_pull_ff'},policy,{...state,clean:false}),/NOT_FAST_FORWARD/);
+    passed++;
+  } catch(err) {failed++;console.error('Git network policy regression:',err);}
   return {passed,failed};
 }

@@ -13,6 +13,8 @@ export type StandardScope =
   | 'local:test'
   | 'local:exec'
   | 'local:git:read'
+  | 'local:git:write'
+  | 'local:git:network'
   | 'local:execute:test'
   | 'local:execute:build'
   | 'browser:run'

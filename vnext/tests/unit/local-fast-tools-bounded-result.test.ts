@@ -424,6 +424,11 @@ export async function runLocalFastToolsBoundedResultTests(): Promise<{ passed: n
     await assert.rejects(() => handlers.handleLocalGitRead({...gitArgs, args: ['push']}, gitCaller), /INVALID_ARGUMENT/);
     await assert.rejects(() => handlers.handleLocalGitRead(gitArgs, gitCaller), /EXECUTION_TARGET_NOT_ELIGIBLE/);
     await assert.rejects(() => handlers.handleRemoteTaskSubmit({ backend:'local', capability:'local:git_read', targetDeviceId:deviceId, clientRequestId:'git-bypass', payload:{projectId:'astor-tuneup',operation:'git_log',head:'a'.repeat(40)} }, oldCaller), /AUTH_FORBIDDEN/);
+    for (const capability of ['local:git_write','local:git_network']) {
+      for (const backend of ['local','kaggle']) {
+        await assert.rejects(() => handlers.handleRemoteTaskSubmit({backend, capability, targetDeviceId:deviceId, clientRequestId:'held-'+backend+'-'+capability, payload:{projectId:'astor-tuneup'}},callerAdmin), /LOCAL_GIT_ACTIVATION_HELD/);
+      }
+    }
     mockConnectedAgents[0].capabilities.push('local:git_read');
     const git = await handlers.handleLocalGitRead(gitArgs, gitCaller);
     assert.strictEqual(git.status, 'queued');
