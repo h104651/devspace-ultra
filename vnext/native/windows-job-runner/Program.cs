@@ -4,13 +4,15 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using static JobNative;
+using static AppContainerNative;
+using System.Security.Principal;
 
-// Same-user containment candidate. NOT an OS identity sandbox, not installed by
-// the service scripts, and never a remote shell. The caller supplies a resolved
+// Containment and pre-provisioned offline AppContainer candidate. Not installed
+// by the service scripts; never a remote shell. ACL provisioning is external. The caller supplies a resolved
 // locally configured launch plan on a private stdin pipe; closing it cancels.
 internal static class Program
 {
-    sealed record Plan(string Executable, string[] Args, string Cwd, bool Verbatim, int TimeoutMs);
+    sealed record Plan(string Executable, string[] Args, string Cwd, bool Verbatim, int TimeoutMs, string? AppContainerSid = null);
     const int Failed = 1, Timeout = 124, Cancelled = 125, Rejected = 126, Uncertain = 127;
     static void Win(bool ok, string operation) {
         if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error(), operation);
@@ -41,6 +43,11 @@ internal static class Program
             plan.Args == null || plan.Args.Length > 256 || plan.Args.Any(a => a == null || a.Contains('\0')) ||
             plan.TimeoutMs < 100 || plan.TimeoutMs > 7_200_000)
             throw new InvalidDataException("Invalid resolved launch plan");
+        if (plan.AppContainerSid != null) {
+            if (!System.Text.RegularExpressions.Regex.IsMatch(plan.AppContainerSid, "^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$"))
+                throw new InvalidDataException("Invalid package SID");
+            _ = new SecurityIdentifier(plan.AppContainerSid);
+        }
         if (plan.Verbatim) {
             var systemCmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
             if (!Path.GetFullPath(plan.Executable).Equals(systemCmd, StringComparison.OrdinalIgnoreCase) ||
@@ -85,6 +92,7 @@ internal static class Program
     static int Run(Plan plan, Task<int> cancel) {
         IntPtr job = IntPtr.Zero, input = IntPtr.Zero, output = IntPtr.Zero, error = IntPtr.Zero;
         IntPtr attrs = IntPtr.Zero, handles = IntPtr.Zero, jobHandles = IntPtr.Zero;
+        IntPtr packageSid = IntPtr.Zero, securityCaps = IntPtr.Zero, environment = IntPtr.Zero;
         bool attrsInitialized = false, assigned = false, resumed = false;
         ProcessInfo pi = default;
         try {
@@ -101,10 +109,11 @@ internal static class Program
             output = InheritOutput(-11);
             error = InheritOutput(-12);
             UIntPtr size = UIntPtr.Zero;
-            InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref size);
+            int attributeCount = plan.AppContainerSid == null ? 2 : 3;
+            InitializeProcThreadAttributeList(IntPtr.Zero, attributeCount, 0, ref size);
             Win(size != UIntPtr.Zero, "Attribute list size");
             attrs = Marshal.AllocHGlobal(checked((int)size.ToUInt64()));
-            Win(InitializeProcThreadAttributeList(attrs, 2, 0, ref size), "Initialize attribute list");
+            Win(InitializeProcThreadAttributeList(attrs, attributeCount, 0, ref size), "Initialize attribute list");
             attrsInitialized = true;
             handles = Marshal.AllocHGlobal(IntPtr.Size * 3);
             Marshal.WriteIntPtr(handles, 0, input);
@@ -119,9 +128,34 @@ internal static class Program
             Marshal.WriteIntPtr(jobHandles, job);
             Win(UpdateProcThreadAttribute(attrs, 0, JOB_LIST, jobHandles, (UIntPtr)IntPtr.Size,
                 IntPtr.Zero, IntPtr.Zero), "Set creation-time job list");
+            uint flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
+            if (plan.AppContainerSid != null) {
+                var sid = new SecurityIdentifier(plan.AppContainerSid);
+                var bytes = new byte[sid.BinaryLength];
+                sid.GetBinaryForm(bytes, 0);
+                packageSid = Marshal.AllocHGlobal(bytes.Length);
+                Marshal.Copy(bytes, 0, packageSid, bytes.Length);
+                var caps = new SecurityCapabilities { AppContainerSid = packageSid, Capabilities = IntPtr.Zero, CapabilityCount = 0, Reserved = 0 };
+                securityCaps = Marshal.AllocHGlobal(Marshal.SizeOf<SecurityCapabilities>());
+                Marshal.StructureToPtr(caps, securityCaps, false);
+                Win(UpdateProcThreadAttribute(attrs, 0, SecurityCapabilitiesAttribute, securityCaps,
+                    (UIntPtr)Marshal.SizeOf<SecurityCapabilities>(), IntPtr.Zero, IntPtr.Zero), "Set offline package identity");
+                // A fresh child environment: never inherit the Agent or supervisor
+                // profile, credentials, global caches or arbitrary PATH entries.
+                string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                string tool = Path.GetDirectoryName(plan.Executable)!;
+                var block = string.Join('\0', new[] {
+                    "APPDATA=" + plan.Cwd, "LOCALAPPDATA=" + plan.Cwd, "PATH=" + tool + ";" + Environment.SystemDirectory,
+                    "SystemRoot=" + windows, "TEMP=" + plan.Cwd, "TMP=" + plan.Cwd,
+                    "USERPROFILE=" + plan.Cwd, "WINDIR=" + windows
+                }) + "\0\0";
+                environment = Marshal.StringToHGlobalUni(block);
+                flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CreateUnicodeEnvironment | DetachedProcess;
+            }
             var startup = new StartupInfoEx {
                 StartupInfo = new StartupInfo {
                     cb = (uint)Marshal.SizeOf<StartupInfoEx>(), dwFlags = STARTF_USESTDHANDLES,
+                    lpDesktop = plan.AppContainerSid == null ? null : "",
                     hStdInput = input, hStdOutput = output, hStdError = error
                 },
                 lpAttributeList = attrs
@@ -130,13 +164,17 @@ internal static class Program
             foreach (var arg in plan.Args) command.Append(' ').Append(plan.Verbatim ? arg : Quote(arg));
             if (command.Length >= 32767) throw new InvalidDataException("Command line exceeds Windows limit");
             Win(CreateProcessWithHandles(plan.Executable, command, IntPtr.Zero, IntPtr.Zero, true,
-                CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
-                IntPtr.Zero, plan.Cwd, ref startup, out pi), "Create suspended runner");
+                flags,
+                environment, plan.Cwd, ref startup, out pi), "Create suspended runner");
             // The process was created with JOB_LIST and is still suspended.
             // Verify membership before any runner instruction is allowed.
             Win(IsProcessInJob(pi.hProcess, job, out var inJob), "Verify created process job membership");
             if (!inJob) throw new InvalidOperationException("Created runner is outside its job");
             assigned = true;
+            if (plan.AppContainerSid != null) {
+                VerifyZeroCapabilityToken(pi.hProcess, plan.AppContainerSid);
+                Console.Error.WriteLine("NATIVE_RUNNER_OFFLINE_TOKEN_VERIFIED");
+            }
             if (cancel.IsCompleted) {
                 Win(TerminateJobObject(job, Cancelled), "Cancel before resume");
                 return Drain(job, pi.hProcess) ? Cancelled : Uncertain;
@@ -176,6 +214,8 @@ internal static class Program
             if (attrs != IntPtr.Zero) Marshal.FreeHGlobal(attrs);
             if (handles != IntPtr.Zero) Marshal.FreeHGlobal(handles);
             if (jobHandles != IntPtr.Zero) Marshal.FreeHGlobal(jobHandles);
+            foreach (var mem in new[] { packageSid, securityCaps, environment })
+                if (mem != IntPtr.Zero) Marshal.FreeHGlobal(mem);
             foreach (var h in new[] { input, output, error, pi.hProcess, pi.hThread })
                 if (ValidHandle(h)) CloseHandle(h);
         }

@@ -163,8 +163,10 @@ internal static class Program {
         if(!OperatingSystem.IsWindows()||Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||
            Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")
             throw new InvalidOperationException("Disposable GitHub-hosted Windows runner required.");
-        Require(args.Length==1 && Path.IsPathFullyQualified(args[0]) &&
+        Require(args.Length==3 && Path.IsPathFullyQualified(args[0]) &&
             Path.GetFileName(args[0]).Equals("node.exe",StringComparison.OrdinalIgnoreCase) && File.Exists(args[0]),"CI Node executable required");
+        Require(Path.IsPathFullyQualified(args[1]) && File.Exists(args[1]) && Path.GetFileName(args[1]).Equals("WindowsJobRunner.exe",StringComparison.OrdinalIgnoreCase),"Native runner required");
+        Require(Path.IsPathFullyQualified(args[2]) && File.Exists(args[2]) && Path.GetFileName(args[2]).Equals("windows-offline-executor-smoke.cjs",StringComparison.OrdinalIgnoreCase),"Fixed integration script required");
         var owner=WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("Missing owner SID");
         string root=Directory.CreateTempSubdirectory("dsu-ac-").FullName;
         string name="DevSpace.CI."+Guid.NewGuid().ToString("N");
@@ -191,6 +193,30 @@ internal static class Program {
             server.Start();
             Run(root,node,script,sid,((IPEndPoint)server.LocalEndpoint).Port,ref safeToRemove);
             Require(!server.Pending(),"Loopback listener received a connection");
+            // Repeat the proven boundary through the actual compiled TaskExecutor
+            // and native Job Runner, without duplicating launch code in the test.
+            File.Delete(Path.Combine(work,"report.json"));
+            File.Delete(Path.Combine(work,"positive.txt"));
+            safeToRemove=false;
+            var psi=new ProcessStartInfo(args[0]) { UseShellExecute=false, CreateNoWindow=true,
+                RedirectStandardOutput=true, RedirectStandardError=true };
+            foreach(var arg in new[]{args[2],args[1],root,package.Value,((IPEndPoint)server.LocalEndpoint).Port.ToString()})
+                psi.ArgumentList.Add(arg);
+            using(var integration=Process.Start(psi) ?? throw new InvalidOperationException("Integration start")) {
+                var output=integration.StandardOutput.ReadToEndAsync();
+                var error=integration.StandardError.ReadToEndAsync();
+                if(!integration.WaitForExit(60000)) {
+                    integration.Kill();
+                    Require(integration.WaitForExit(5000),"Integration host exit unknown");
+                    throw new TimeoutException("Integration host timeout; retain fixture");
+                }
+                Console.WriteLine(output.GetAwaiter().GetResult());
+                Console.Error.WriteLine(error.GetAwaiter().GetResult());
+                Require(integration.ExitCode==0,"Offline executor integration failed; retain fixture");
+            }
+            safeToRemove=true;
+            Require(!server.Pending(),"Offline executor loopback listener received a connection");
+            Console.WriteLine("APPCONTAINER_EXECUTOR_BOUNDARY PASS");
             using var report=JsonDocument.Parse(File.ReadAllText(Path.Combine(work,"report.json")));
             var checks=report.RootElement.GetProperty("checks").EnumerateArray().Select(x=>x.GetString()).ToArray();
             string[] expected={"environment-isolated","workspace-write-read","tool-read","tool-write","protected-read","protected-write","protected-delete","sibling-read","sibling-write","loopback-no-connect"};

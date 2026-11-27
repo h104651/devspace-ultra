@@ -136,7 +136,9 @@ jobs:
         shell: pwsh
         run: |
           $node = (Get-Command node.exe -ErrorAction Stop).Source
-          dotnet run --project tests/windows-appcontainer-fixture/WindowsAppContainerFixture.csproj --configuration Release -- "$node"
+          $hostPath = (Resolve-Path native/windows-job-runner/bin/Release/net8.0/WindowsJobRunner.exe).Path
+          $integration = (Resolve-Path tests/windows-offline-executor-smoke.cjs).Path
+          dotnet run --project tests/windows-appcontainer-fixture/WindowsAppContainerFixture.csproj --configuration Release -- "$node" "$hostPath" "$integration"
           if ($LASTEXITCODE -ne 0) { throw 'AppContainer boundary fixture failed' }
 
   verify-windows-identity:

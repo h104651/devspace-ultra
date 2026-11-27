@@ -47,12 +47,14 @@ class TaskExecutor {
     allowRawShell;
     hostExecutionBlocked;
     windowsJobRunnerPath;
+    windowsAppContainerSid;
     executionQuarantined = false;
     fileLocks = new Map();
     constructor(config) {
         this.allowRawShell = !!config.allowRawShell;
         this.hostExecutionBlocked = config.hostExecutionBlocked === true;
         this.windowsJobRunnerPath = config.windowsJobRunnerPath;
+        this.windowsAppContainerSid = config.windowsAppContainerSid;
         if (config.projectRegistry) {
             this.projectRegistry = config.projectRegistry;
         }
@@ -724,6 +726,9 @@ class TaskExecutor {
         if (signal?.aborted)
             throw new Error('LOCAL_PROCESS_CANCELLED: Cancelled before launch.');
         const useJobRunner = process.platform === 'win32' && !!this.windowsJobRunnerPath;
+        if (this.windowsAppContainerSid !== undefined && (!useJobRunner || !/^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$/.test(this.windowsAppContainerSid))) {
+            throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Offline identity requires a native Windows Job Runner and valid package SID.');
+        }
         let plan;
         let launchCwd = cwd;
         if (useJobRunner) {
@@ -733,7 +738,7 @@ class TaskExecutor {
             if (path.basename(host).toLowerCase() !== 'windowsjobrunner.exe' || !fs.statSync(host).isFile()) {
                 throw new Error('LOCAL_RUNNER_INVALID: Invalid native Job Runner path.');
             }
-            plan = JSON.stringify({ executable: launchExecutable, args: launchArgs, cwd, verbatim, timeoutMs });
+            plan = JSON.stringify({ executable: launchExecutable, args: launchArgs, cwd, verbatim, timeoutMs, appContainerSid: this.windowsAppContainerSid });
             if (plan.length >= 65536)
                 throw new Error('LOCAL_RUNNER_INVALID: Job Runner plan exceeds size limit.');
             launchExecutable = host;

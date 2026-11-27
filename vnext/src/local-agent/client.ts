@@ -20,6 +20,7 @@ export interface LocalAgentClientConfig {
   allowRawShell?: boolean;
   hostExecutionBlocked?: boolean;
   windowsJobRunnerPath?: string;
+  windowsAppContainerSid?: string;
   heartbeatIntervalMs?: number;
   pollIntervalMs?: number;
   onPolicyRejected?: (reason: string) => void;
@@ -65,7 +66,8 @@ export class LocalAgentClient {
       projectsConfigFile: config.projectsConfigFile,
       allowRawShell: config.allowRawShell,
       hostExecutionBlocked: config.hostExecutionBlocked,
-      windowsJobRunnerPath: config.windowsJobRunnerPath
+      windowsJobRunnerPath: config.windowsJobRunnerPath,
+      windowsAppContainerSid: config.windowsAppContainerSid
     };
     const revisionBeforeLoad = this.computeExecutorConfigRevision();
     this.executor = new TaskExecutor(this.executorConfig);
@@ -236,6 +238,7 @@ export class LocalAgentClient {
         .map(p => registry.getProject(p.projectId));
       return crypto.createHash('sha256').update(JSON.stringify({
         sourceRevision: this.executorConfigRevision,
+        appContainerSid: this.executorConfig.windowsAppContainerSid,
         projects
       })).digest('hex');
     } catch { return undefined; }

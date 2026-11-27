@@ -79,7 +79,8 @@ class LocalAgentClient {
             projectsConfigFile: config.projectsConfigFile,
             allowRawShell: config.allowRawShell,
             hostExecutionBlocked: config.hostExecutionBlocked,
-            windowsJobRunnerPath: config.windowsJobRunnerPath
+            windowsJobRunnerPath: config.windowsJobRunnerPath,
+            windowsAppContainerSid: config.windowsAppContainerSid
         };
         const revisionBeforeLoad = this.computeExecutorConfigRevision();
         this.executor = new task_executor_1.TaskExecutor(this.executorConfig);
@@ -247,6 +248,7 @@ class LocalAgentClient {
                 .map(p => registry.getProject(p.projectId));
             return crypto.createHash('sha256').update(JSON.stringify({
                 sourceRevision: this.executorConfigRevision,
+                appContainerSid: this.executorConfig.windowsAppContainerSid,
                 projects
             })).digest('hex');
         }
