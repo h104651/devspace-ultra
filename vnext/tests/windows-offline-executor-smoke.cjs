@@ -64,7 +64,9 @@ async function main() {
   const repo=path.join(work,'git-repo');
   fs.mkdirSync(repo);
   const canon=p=>fs.realpathSync(p);
-  const executable=canon(path.join(root,'tool','git-bin','git.exe'));
+  const prefix=path.basename(path.dirname(path.dirname(hostGit)));
+  assert.ok(['mingw64','clangarm64'].includes(prefix),'Unexpected hosted Git prefix');
+  const executable=canon(path.join(root,'tool','git-dist',prefix,'bin','git.exe'));
   const image=fs.readFileSync(executable);
   assert.equal(image.readUInt16LE(0),0x5a4d);
   const pe=image.readUInt32LE(0x3c);
@@ -90,6 +92,43 @@ async function main() {
   const actual=new TaskExecutor({projects:[{projectId:policy.projectId,root:repo,permissions:{read:true,test:true,hostExecution:true},commands:{test:{git_log:{
     executable,args:buildGitReadArgs('git_log',{head,limit:1}),timeoutMs:10000
   }}}}],windowsJobRunnerPath:host,windowsAppContainerSid:sid});
+  // Fixture-only observation of the exact compiled runner. Keep diagnostics
+  // separate from machine-readable stdout and print only on synthetic failure.
+  // Never add arbitrary remote task output or credentials to this diagnostic.
+  const originalRun=actual.executeProcessWithoutShell.bind(actual);
+  let sequence=0;
+  actual.executeProcessWithoutShell=async (exe,args,cwd,extra,onLog,timeout,signal,stdoutOnly)=>{
+    assert.equal(exe,executable);
+    const number=++sequence;
+    const verb=args[0]==='--version'?'version':
+      args.find(a=>['log','config','symbolic-ref','rev-parse','for-each-ref','ls-tree','status','update-ref','switch','diff','add','ls-files','write-tree','commit-tree','show'].includes(a))||'other';
+    const diagnostics=[];
+    let size=0;
+    console.log('STAGED_GIT_STEP BEGIN',number,verb);
+    try {
+      const result=await originalRun(exe,args,cwd,extra,line=>{
+        if(line.startsWith('[STDERR]')&&size<4096) {
+          const accepted=line.slice(0,4096-size); diagnostics.push(accepted);size+=accepted.length;
+        }
+        onLog(line);
+      },timeout,signal,stdoutOnly);
+      console.log('STAGED_GIT_STEP PASS',number,verb);
+      return result;
+    } catch(error) {
+      console.error('STAGED_GIT_STEP FAIL',number,verb,diagnostics.join('\n'));
+      throw error;
+    }
+  };
+  // Verify relocation separately from the zero-capability execution.
+  // Use the same allowlisted minimal environment and exact staged image;
+  // this host-side probe is only the fixed --version command on hosted CI.
+  const minimal={SystemRoot:process.env.SystemRoot||process.env.SYSTEMROOT,WINDIR:process.env.WINDIR,
+    PATH:path.dirname(executable)+';'+path.join(process.env.SystemRoot||process.env.SYSTEMROOT,'System32'),
+    USERPROFILE:repo,APPDATA:repo,LOCALAPPDATA:repo,TEMP:repo,TMP:repo,
+    GIT_CONFIG_GLOBAL:'NUL',GIT_CONFIG_NOSYSTEM:'1',GIT_NO_LAZY_FETCH:'1',GIT_OPTIONAL_LOCKS:'0',GIT_TERMINAL_PROMPT:'0'};
+  const relocatedVersion=execFileSync(executable,['--version'],{cwd:repo,env:minimal,encoding:'utf8',timeout:10000,maxBuffer:262144});
+  assert.match(relocatedVersion,/^git version /);
+  console.log('STAGED_GIT_HOST_RELOCATION PASS',process.arch);
   const version=await actual.runStagedGitCandidate(executable,['--version'],policy.root,10000);
   assert.match(version,/^git version /);
   const read=await actual.executeTask({capability:'local:git_read',payload:{projectId:policy.projectId,operation:'git_log',head,limit:1}},()=>{});

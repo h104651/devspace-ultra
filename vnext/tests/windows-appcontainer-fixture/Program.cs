@@ -159,6 +159,33 @@ internal static class Program {
             foreach(var h in new[]{nul,diagnostics,pi.hProcess,pi.hThread})if(Valid(h))CloseHandle(h);
         }
     }
+    static void RemoveDrainedFixture(string root) {
+        NoReparse(root);
+        int visited=0, readOnly=0;
+        var pending=new Stack<(string directory,int depth)>();
+        pending.Push((root,0));
+        var files=new List<(string file,FileAttributes attributes)>();
+        while(pending.Count!=0) {
+            var (directory,depth)=pending.Pop();
+            Require(depth<=32,"Fixture cleanup depth limit");
+            foreach(string entry in Directory.EnumerateFileSystemEntries(directory)) {
+                Require(++visited<=50000,"Fixture cleanup entry limit");
+                FileAttributes attributes=File.GetAttributes(entry);
+                Require((attributes&FileAttributes.ReparsePoint)==0,"Fixture cleanup refuses reparse points");
+                if((attributes&FileAttributes.Directory)!=0) pending.Push((entry,depth+1));
+                else if((attributes&FileAttributes.ReadOnly)!=0) files.Add((entry,attributes));
+            }
+        }
+        // First validate the full tree; then change only the DOS readonly bit.
+        // The fixture has no concurrent writers after verified process drain.
+        foreach(var (file,attributes) in files) {
+            File.SetAttributes(file,attributes&~FileAttributes.ReadOnly);
+            readOnly++;
+        }
+        Directory.Delete(root,true);
+        Require(!Directory.Exists(root),"Fixture directory still exists");
+        Console.WriteLine("APPCONTAINER_FIXTURE_CLEANUP PASS (readonly files="+readOnly+")");
+    }
     static int Main(string[] args) {
         if(!OperatingSystem.IsWindows()||Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||
            Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")
@@ -190,13 +217,17 @@ internal static class Program {
             LowIntegrity(work);
             File.Copy(args[0],node);
             File.Copy(Path.Combine(AppContext.BaseDirectory,"Probe.cjs"),script);
-            // Stage only the trusted hosted Git binary and adjacent DLLs.
-            // No host installation changes, downloads or credential access.
-            string gitBin=Path.Combine(root,"tool","git-bin");
-            Directory.CreateDirectory(gitBin);
-            Directory.CreateDirectory(Path.Combine(root,"tool","empty-hooks"));
+            // Preserve Git-for-Windows' installation-relative prefix layout.
+            // Only the trusted native executable and adjacent DLLs are staged;
+            // no host config, helper executable, credentials or install changes.
             string sourceBin=Path.GetDirectoryName(args[3])!;
             NoReparse(sourceBin);
+            string prefix=Path.GetFileName(Path.GetDirectoryName(sourceBin)!);
+            Require(prefix=="mingw64"||prefix=="clangarm64","Unexpected native Git distribution layout");
+            Require(Path.GetFileName(sourceBin)=="bin","Unexpected Git binary directory");
+            string gitBin=Path.Combine(root,"tool","git-dist",prefix,"bin");
+            Directory.CreateDirectory(gitBin);
+            Directory.CreateDirectory(Path.Combine(root,"tool","empty-hooks"));
             foreach(string source in Directory.EnumerateFiles(sourceBin,"*.dll").Append(args[3])) {
                 Require((File.GetAttributes(source)&FileAttributes.ReparsePoint)==0,"Git distribution reparse point denied");
                 File.Copy(source,Path.Combine(gitBin,Path.GetFileName(source)));
@@ -248,8 +279,7 @@ internal static class Program {
                 int hr=DeleteAppContainerProfile(name);
                 if(hr<0)Marshal.ThrowExceptionForHR(hr);
             }
-            Directory.Delete(root,true);
-            Console.WriteLine("APPCONTAINER_FIXTURE_CLEANUP PASS");
+            RemoveDrainedFixture(root);
         }
     }
 }

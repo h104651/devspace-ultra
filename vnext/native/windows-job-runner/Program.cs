@@ -194,6 +194,9 @@ internal static class Program
             }
             if (!Drain(job, pi.hProcess)) return Uncertain;
             Win(GetExitCodeProcess(pi.hProcess, out var exit), "Get runner exit");
+            // Numeric native status is safe diagnostic metadata (e.g. a loader
+            // failure); do not expose command arguments or environment.
+            if(exit!=0) Console.Error.WriteLine("NATIVE_RUNNER_CHILD_EXIT 0x"+exit.ToString("X8"));
             return exit == 0 ? 0 : Failed;
         } catch (Exception ex) {
             // Never print command arguments or the inherited environment.
