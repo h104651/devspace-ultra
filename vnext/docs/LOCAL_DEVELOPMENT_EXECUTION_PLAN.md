@@ -149,3 +149,6 @@ Baseline 1380cf7 completed both CI workflows; 687/687 vNext tests passed and pro
 
 ### Batch development/CI policy
 Accumulate related implementation, tests and documentation as Git commit objects without updating the PR ref until the complete batch is ready. Trigger full CI once at the batch boundary; do not suppress or weaken deployment gates. Verify exact HEAD and fix failures in a consolidated follow-up batch. No automatic merge, deployment or grant.
+
+### Wave C native staged Git adapter and machine-readable output (offline candidate)
+Preserve legacy combined runner stdout; dedicated Git read and trusted local candidate Git commands use a distinct stdout-only channel while stderr still consumes the shared output budget. UTF-8 stream decoding avoids split-byte corruption. A trusted local adapter joins staged policy, native Job Runner, real snapshots, branch/index execution and durable fence, without MCP routing or Test profile authorization. Native hosted fixture adds stdout/diagnostic separation and truncation checks. Runtime hold remains unchanged, no production activation. Real Git-for-Windows distribution staging and ACL/exclusive writer proof still required. Tracked dist synchronized manually and must pass compiler parity in batch CI.

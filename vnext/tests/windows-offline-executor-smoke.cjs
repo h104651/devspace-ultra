@@ -16,6 +16,13 @@ async function main() {
   const result=await executor.executeTask(task,()=>{});
   assert.equal(result.exitCode,0);
   assert.match(result.stdout,/NATIVE_RUNNER_OFFLINE_TOKEN_VERIFIED/);
+  const isolated=await executor.executeProcessWithoutShell(path.join(root,'tool','node.exe'),
+    ['-e',"process.stdout.write('fixture\\0');process.stderr.write('diagnostic')"],work,undefined,()=>{},10000,undefined,true);
+  assert.equal(isolated.stdout,'fixture\0');
+  assert.equal(isolated.outputTruncated,false);
+  const bounded=await executor.executeProcessWithoutShell(path.join(root,'tool','node.exe'),
+    ['-e',"process.stderr.write('x'.repeat(270000));process.stdout.write('fixture')"],work,undefined,()=>{},10000,undefined,true);
+  assert.equal(bounded.outputTruncated,true);
   const noHost=new TaskExecutor({projects,windowsAppContainerSid:sid});
   await assert.rejects(()=>noHost.executeTask(task,()=>{}),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
   const invalid=new TaskExecutor({projects,windowsJobRunnerPath:host,windowsAppContainerSid:'invalid'});

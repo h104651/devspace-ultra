@@ -584,7 +584,7 @@ class TaskExecutor {
                 const targetCwd = this.resolveRunnerCwd(project, cmdConfig.workingRelativePath, cmdConfig);
                 this.validateOfflineGitReadCommand(project, query.operation, cmdConfig, targetCwd);
                 onLog(`[EXECUTOR] Reading committed Git history in project '${project.projectId}' via '${query.operation}'`);
-                return this.executeProcessWithoutShell(cmdConfig.executable, query.args, targetCwd, undefined, onLog, cmdConfig.timeoutMs, signal);
+                return this.executeProcessWithoutShell(cmdConfig.executable, query.args, targetCwd, undefined, onLog, cmdConfig.timeoutMs, signal, true);
             }
             case 'local:run_tests': {
                 if (this.isHostExecutionBlocked()) {
@@ -702,7 +702,23 @@ class TaskExecutor {
         }
         return cwd;
     }
-    executeProcessWithoutShell(executable, args, cwd, extraEnv, onLog, timeoutMs = 1_800_000, signal) {
+    /** Local staged Git adapter only; intentionally not routed by executeTask. */
+    async runStagedGitCandidate(executable, args, cwd, timeoutMs, signal) {
+        if (this.isHostExecutionBlocked() || process.platform !== 'win32' || !this.windowsJobRunnerPath ||
+            !/^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$/.test(this.windowsAppContainerSid || '')) {
+            throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Native staged Git identity required.');
+        }
+        if (!path.isAbsolute(executable) || !path.isAbsolute(cwd) ||
+            path.basename(fs.realpathSync(executable)).toLowerCase() !== 'git.exe' ||
+            !Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) {
+            throw new Error('LOCAL_GIT_PROFILE_DENIED: Fixed local Git executable, workspace and bounded timeout required.');
+        }
+        const result = await this.executeProcessWithoutShell(executable, [...args], cwd, undefined, () => { }, timeoutMs, signal, true);
+        if (result.outputTruncated)
+            throw new Error('LOCAL_GIT_OUTPUT_TRUNCATED: Complete Git output required.');
+        return result.stdout;
+    }
+    executeProcessWithoutShell(executable, args, cwd, extraEnv, onLog, timeoutMs = 1_800_000, signal, stdoutOnly = false) {
         // Runner environment is intentionally distinct from the Agent environment.
         // This does not provide an OS sandbox or prevent same-user filesystem access.
         if (typeof executable !== 'string' || !executable.trim() || executable.includes('\0') ||
@@ -823,12 +839,15 @@ class TaskExecutor {
                 }, timeoutMs + 20_000);
             }
             let stdoutAcc = '';
+            let outputChars = 0;
             const maxOutputChars = 256 * 1024;
             let outputTruncated = false;
             const appendOutput = (text, stderr) => {
-                const remaining = Math.max(0, maxOutputChars - stdoutAcc.length);
+                const remaining = Math.max(0, maxOutputChars - outputChars);
                 const accepted = text.slice(0, remaining);
-                stdoutAcc += accepted;
+                outputChars += accepted.length;
+                if (!stdoutOnly || !stderr)
+                    stdoutAcc += accepted;
                 if (accepted)
                     onLog(stderr ? `[STDERR] ${accepted.trim()}` : accepted.trim());
                 if (accepted.length < text.length && !outputTruncated) {
@@ -836,13 +855,13 @@ class TaskExecutor {
                     onLog('[EXECUTOR] Output limit reached; further output discarded.');
                 }
             };
+            child.stdout?.setEncoding('utf8');
+            child.stderr?.setEncoding('utf8');
             child.stdout?.on('data', (data) => {
-                const text = data.toString();
-                appendOutput(text, false);
+                appendOutput(data, false);
             });
             child.stderr?.on('data', (data) => {
-                const text = data.toString();
-                appendOutput(text, true);
+                appendOutput(data, true);
             });
             child.on('close', (code) => {
                 cleanup();

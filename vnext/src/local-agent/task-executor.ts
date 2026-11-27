@@ -664,7 +664,7 @@ export class TaskExecutor {
         const targetCwd = this.resolveRunnerCwd(project, cmdConfig.workingRelativePath, cmdConfig);
         this.validateOfflineGitReadCommand(project, query.operation, cmdConfig, targetCwd);
         onLog(`[EXECUTOR] Reading committed Git history in project '${project.projectId}' via '${query.operation}'`);
-        return this.executeProcessWithoutShell(cmdConfig.executable, query.args, targetCwd, undefined, onLog, cmdConfig.timeoutMs, signal);
+        return this.executeProcessWithoutShell(cmdConfig.executable, query.args, targetCwd, undefined, onLog, cmdConfig.timeoutMs, signal, true);
       }
 
       case 'local:run_tests': {
@@ -798,6 +798,22 @@ export class TaskExecutor {
     return cwd;
   }
 
+  /** Local staged Git adapter only; intentionally not routed by executeTask. */
+  public async runStagedGitCandidate(executable: string, args: readonly string[], cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
+    if (this.isHostExecutionBlocked() || process.platform !== 'win32' || !this.windowsJobRunnerPath ||
+        !/^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$/.test(this.windowsAppContainerSid || '')) {
+      throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Native staged Git identity required.');
+    }
+    if (!path.isAbsolute(executable) || !path.isAbsolute(cwd) ||
+        path.basename(fs.realpathSync(executable)).toLowerCase() !== 'git.exe' ||
+        !Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) {
+      throw new Error('LOCAL_GIT_PROFILE_DENIED: Fixed local Git executable, workspace and bounded timeout required.');
+    }
+    const result = await this.executeProcessWithoutShell(executable, [...args], cwd, undefined, () => {}, timeoutMs, signal, true);
+    if (result.outputTruncated) throw new Error('LOCAL_GIT_OUTPUT_TRUNCATED: Complete Git output required.');
+    return result.stdout;
+  }
+
   private executeProcessWithoutShell(
     executable: string,
     args: string[],
@@ -805,7 +821,8 @@ export class TaskExecutor {
     extraEnv: Record<string, string> | undefined,
     onLog: (line: string) => void,
     timeoutMs = 1_800_000,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    stdoutOnly = false
   ): Promise<{ stdout: string; exitCode: number; outputTruncated: boolean }> {
     // Runner environment is intentionally distinct from the Agent environment.
     // This does not provide an OS sandbox or prevent same-user filesystem access.
@@ -920,12 +937,14 @@ export class TaskExecutor {
       }
 
       let stdoutAcc = '';
+      let outputChars = 0;
       const maxOutputChars = 256 * 1024;
       let outputTruncated = false;
       const appendOutput = (text: string, stderr: boolean) => {
-        const remaining = Math.max(0, maxOutputChars - stdoutAcc.length);
+        const remaining = Math.max(0, maxOutputChars - outputChars);
         const accepted = text.slice(0, remaining);
-        stdoutAcc += accepted;
+        outputChars += accepted.length;
+        if (!stdoutOnly || !stderr) stdoutAcc += accepted;
         if (accepted) onLog(stderr ? `[STDERR] ${accepted.trim()}` : accepted.trim());
         if (accepted.length < text.length && !outputTruncated) {
           outputTruncated = true;
@@ -933,14 +952,14 @@ export class TaskExecutor {
         }
       };
 
-      child.stdout?.on('data', (data) => {
-        const text = data.toString();
-        appendOutput(text, false);
+      child.stdout?.setEncoding('utf8');
+      child.stderr?.setEncoding('utf8');
+      child.stdout?.on('data', (data: string) => {
+        appendOutput(data, false);
       });
 
-      child.stderr?.on('data', (data) => {
-        const text = data.toString();
-        appendOutput(text, true);
+      child.stderr?.on('data', (data: string) => {
+        appendOutput(data, true);
       });
 
       child.on('close', (code) => {

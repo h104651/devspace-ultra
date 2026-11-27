@@ -1,3 +1,4 @@
+import { createNativeStagedGitAdapter } from '../../scripts/native-staged-git-adapter';
 import { parseGitIndexIntent, runGitIndexMutation } from '../../scripts/execute-git-index-mutations';
 import { collectGitBranchSnapshot } from '../../scripts/git-branch-snapshot';
 import { withDurableGitFence } from '../../scripts/git-mutation-fence';
@@ -365,5 +366,15 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       passed++;
     } finally { fs.rmSync(dir,{recursive:true,force:true});fs.rmSync(hooks,{recursive:true,force:true});fs.rmSync(locks,{recursive:true,force:true}); }
   } catch(err) { failed++; console.error('Git index mutation fixture regression:',err); }
+  try {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsu-native-git-gate-'));
+    try {
+      const executor=new TaskExecutor({projects:[],hostExecutionBlocked:true});
+      const policy={projectId:'fixture',root:dir,executable:path.join(dir,'git.exe'),emptyHooksDirectory:dir,protectedFenceDirectory:dir,approvedTargets:[],approvedPaths:[],timeoutMs:1000};
+      assert.throws(()=>createNativeStagedGitAdapter(executor,policy),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+      await assert.rejects(()=>executor.runStagedGitCandidate(policy.executable,['status'],dir,1000),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+      passed++;
+    } finally {fs.rmSync(dir,{recursive:true,force:true});}
+  } catch(err) {failed++;console.error('Native staged Git activation gate regression:',err);}
   return {passed,failed};
 }
