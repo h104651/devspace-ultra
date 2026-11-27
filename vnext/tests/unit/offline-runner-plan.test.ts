@@ -1,3 +1,4 @@
+import { parseGitBranchIntent, checkGitBranchPreflight } from '../../scripts/plan-git-branch-mutations';
 import * as assert from 'assert';
 import { planOfflineRunners, buildGitReadArgs } from '../../scripts/plan-offline-runners';
 import * as fs from 'fs';
@@ -20,6 +21,30 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
     adb: 'C:\\Stage Tools\\sdk\\platform-tools\\adb.exe'
   };
   const cases: Array<() => void> = [
+    () => {
+      const head = 'a'.repeat(40), targetHead = 'b'.repeat(40);
+      const create = { projectId: 'fixture', operation: 'git_branch_create', expectedBranch: 'main', expectedHead: head, branch: 'feat/fixture' };
+      const snapshot = { currentBranch: 'main', head, clean: true, operationInProgress: false, targetHead: null, targetCheckedOutElsewhere: false };
+      assert.deepStrictEqual(checkGitBranchPreflight(create, ['feat/fixture'], snapshot), create);
+      const change = { ...create, operation: 'git_switch', expectedTargetHead: targetHead };
+      assert.deepStrictEqual(checkGitBranchPreflight(change, ['feat/fixture'], { ...snapshot, targetHead }), change);
+      for (const bad of ['main','master','release/v1','--force','feat/../x','feat/x.lock','feat/x@{1}','feat/CON','feat/con','feat/x\\y','feat//x','feat/x y','feat/x;push']) {
+        assert.throws(() => parseGitBranchIntent({ ...create, branch: bad }));
+      }
+      for (const extra of [{ args: ['push'] }, { force: true }, { remote: 'origin' }, { expectedTargetHead: head }, { env: {} }]) {
+        assert.throws(() => parseGitBranchIntent({ ...create, ...extra }), /FIELDS/);
+      }
+      assert.throws(() => parseGitBranchIntent({ ...create, expectedHead: 'HEAD' }), /OBJECT_ID/);
+      assert.throws(() => parseGitBranchIntent({ ...create, operation: 'git_switch' }), /FIELDS/);
+      assert.throws(() => parseGitBranchIntent({ ...change, expectedTargetHead: 'a'.repeat(64) }), /FORMAT/);
+      assert.throws(() => checkGitBranchPreflight(create, [], snapshot), /POLICY/);
+      for (const state of [{ clean: false }, { head: targetHead }, { currentBranch: '' }, { operationInProgress: true }, { targetCheckedOutElsewhere: true }, { clean: undefined }]) {
+        assert.throws(() => checkGitBranchPreflight(create, ['feat/fixture'], { ...snapshot, ...state }), /STATE/);
+      }
+      assert.throws(() => checkGitBranchPreflight(create, ['feat/fixture'], { ...snapshot, targetHead }), /TARGET_CONFLICT/);
+      assert.throws(() => checkGitBranchPreflight(change, ['feat/fixture'], snapshot), /TARGET_CONFLICT/);
+      assert.throws(() => checkGitBranchPreflight(change, ['feat/fixture'], { ...snapshot, targetHead: head }), /TARGET_CONFLICT/);
+    },
     () => {
       const p = planOfflineRunners({ tools, profiles:['flutter_analyze','flutter_test','flutter_build_apk_debug','dart_format_check'], workingRelativePath:'app/mobile' });
       assert.deepStrictEqual(p.commands.test.flutter_analyze.args,['analyze','--no-pub']);
