@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { TaskExecutor } from '../../src/local-agent/task-executor';
+import { validateGitReadProfile } from '../../src/local-agent/git-read-plan';
 
 export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; failed: number }> {
   let passed = 0, failed = 0;
@@ -69,6 +70,15 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       assert.deepStrictEqual(p.commands.test.git_diff_commits.args.slice(-3),[base,head,'--']);
       assert.ok(p.commands.test.git_diff_commits.args.includes('--no-ext-diff'));
       assert.ok(p.commands.test.git_diff_commits.args.includes('--no-textconv'));
+      validateGitReadProfile('git_log',p.commands.test.git_log.args);
+      validateGitReadProfile('git_diff_commits',p.commands.test.git_diff_commits.args);
+      for(const changed of [
+        ['push','origin','main'],
+        [...p.commands.test.git_log.args,'--all'],
+        p.commands.test.git_diff_commits.args.filter(arg=>arg!=='--no-ext-diff'),
+        p.commands.test.git_log.args.map(arg=>arg==='--no-show-signature'?'--show-signature':arg)
+      ]) assert.throws(()=>validateGitReadProfile('git_log',changed),/LOCAL_GIT_PROFILE_DENIED/);
+      assert.throws(()=>validateGitReadProfile('git_diff_commits',p.commands.test.git_diff_commits.args.filter(arg=>arg!=='--no-textconv')),/LOCAL_GIT_PROFILE_DENIED/);
       for(const bad of ['HEAD','HEAD~1','--all','a..b','a'.repeat(39),'0'.repeat(40),'@{upstream}'])
         assert.throws(()=>buildGitReadArgs('git_log',{head:bad}),/Full lowercase/);
       assert.throws(()=>buildGitReadArgs('git_log',{head,limit:101}),/limit/);

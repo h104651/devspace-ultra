@@ -38,6 +38,7 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto = __importStar(require("crypto"));
 const child_process_1 = require("child_process");
+const git_read_plan_1 = require("./git-read-plan");
 const project_registry_1 = require("./project-registry");
 function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -593,6 +594,11 @@ class TaskExecutor {
                     if (process.platform !== 'win32' || !this.windowsAppContainerSid || !this.windowsJobRunnerPath) {
                         throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Git history profiles require offline Windows isolation.');
                     }
+                    if (path.basename(cmdConfig.executable).toLowerCase() !== 'git.exe' || Object.keys(cmdConfig.env || {}).length ||
+                        (cmdConfig.timeoutMs ?? 30000) > 30000) {
+                        throw new Error('LOCAL_GIT_PROFILE_DENIED: Expected fixed Git executable and bounded timeout without environment overrides.');
+                    }
+                    (0, git_read_plan_1.validateGitReadProfile)(runnerId, cmdConfig.args);
                     const gitDir = path.join(targetCwd, '.git');
                     const stat = fs.lstatSync(gitDir);
                     if (!stat.isDirectory() || stat.isSymbolicLink() || path.relative(gitDir, fs.realpathSync(gitDir)) !== '') {

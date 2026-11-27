@@ -5,6 +5,8 @@
  */
 import * as fs from 'fs';
 import { ConfiguredCommand, LocalProjectCommands } from '../src/local-agent/project-registry';
+import { buildGitReadArgs } from '../src/local-agent/git-read-plan';
+export { buildGitReadArgs } from '../src/local-agent/git-read-plan';
 
 const PROFILES = {
   flutter_analyze: { tool: 'flutter', group: 'test', args: ['analyze', '--no-pub'], timeoutMs: 600000 },
@@ -61,37 +63,6 @@ function checkedTool(tool: string, value: unknown): string {
     throw new Error('Expected explicit local Windows tool path for ' + tool);
   }
   return value;
-}
-
-// Git query inputs are operator-selected immutable object IDs, not arbitrary
-// revision expressions, options, pathspecs, remotes or shell fragments.
-export function buildGitReadArgs(id: 'git_log' | 'git_diff_commits', selection: unknown): string[] {
-  if (!object(selection)) throw new Error('Explicit Git commit selection required');
-  onlyKeys(selection, id === 'git_log' ? ['head', 'limit'] : ['base', 'head']);
-  const oid = (value: unknown): string => {
-    if (typeof value !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value) || /^0+$/.test(value)) {
-      throw new Error('Full lowercase Git object ID required');
-    }
-    return value;
-  };
-  const head = oid(selection.head);
-  // Explicit .git path prevents discovery in parent directories. No working
-  // tree content, external diff/textconv, notes, signatures or replace refs.
-  // Network is denied by AppContainer, not solely these Git options.
-  const common = ['--no-pager', '--no-replace-objects', '--literal-pathspecs',
-    '--git-dir=.git', '--work-tree=.', '-c', 'protocol.allow=never',
-    '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0'];
-  if (id === 'git_log') {
-    const limit = selection.limit ?? 30;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Git log limit must be 1-100');
-    return [...common, 'log', '--no-notes', '--no-show-signature', '--no-decorate',
-      '--no-color', '--no-patch', '--format=%H%x09%P%x09%ct%x09%s', '--max-count=' + limit, head, '--'];
-  }
-  if (id !== 'git_diff_commits') throw new Error('Unknown Git read operation');
-  const base = oid(selection.base);
-  if (base.length !== head.length) throw new Error('Git object ID lengths must match');
-  return [...common, 'diff-tree', '-r', '--no-commit-id', '--patch', '--no-ext-diff',
-    '--no-textconv', '--no-renames', '--no-color', '--ignore-submodules=all', base, head, '--'];
 }
 
 export function planOfflineRunners(input: unknown): {

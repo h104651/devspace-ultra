@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { spawn } from 'child_process';
 import { DurableTask } from '../types/task';
+import { validateGitReadProfile } from './git-read-plan';
 import {
   ProjectRegistry,
   ProjectPathSecurity,
@@ -675,6 +676,11 @@ export class TaskExecutor {
           if (process.platform !== 'win32' || !this.windowsAppContainerSid || !this.windowsJobRunnerPath) {
             throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Git history profiles require offline Windows isolation.');
           }
+          if (path.basename(cmdConfig.executable).toLowerCase() !== 'git.exe' || Object.keys(cmdConfig.env || {}).length ||
+              (cmdConfig.timeoutMs ?? 30000) > 30000) {
+            throw new Error('LOCAL_GIT_PROFILE_DENIED: Expected fixed Git executable and bounded timeout without environment overrides.');
+          }
+          validateGitReadProfile(runnerId, cmdConfig.args);
           const gitDir = path.join(targetCwd, '.git');
           const stat = fs.lstatSync(gitDir);
           if (!stat.isDirectory() || stat.isSymbolicLink() || path.relative(gitDir, fs.realpathSync(gitDir)) !== '') {
