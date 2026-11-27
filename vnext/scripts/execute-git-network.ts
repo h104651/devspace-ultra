@@ -37,7 +37,13 @@ export async function executeGitNetworkIntent(payload:unknown, broker:GitNetwork
     const ref='refs/heads/'+intent.branch;
     const before=await lease.observe(intent,endpoint,ref);
     disposition='release';
-    authorizeGitNetworkIntent(intent,lease.policy,before);
+    if(intent.operation==='git_pull_ff') {
+      // The remote object may not exist locally yet. Check pinned identity and
+      // clean state before fetching; prove ancestry only after pinned fetch.
+      if(before.currentBranch!==intent.branch || before.localHead!==intent.expectedLocalHead ||
+         before.remoteHead!==intent.expectedRemoteHead || before.operationInProgress!==false) throw new Error('GIT_NETWORK_STATE_CONFLICT');
+      if(before.clean!==true) throw new Error('GIT_NETWORK_NOT_FAST_FORWARD');
+    } else authorizeGitNetworkIntent(intent,lease.policy,before);
     disposition='quarantine';
     if(intent.operation==='git_fetch' || intent.operation==='git_pull_ff') {
       await lease.fetchPinned(endpoint,ref,intent.expectedRemoteHead);

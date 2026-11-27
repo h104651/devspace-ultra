@@ -415,7 +415,7 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       const a=git(source,['rev-parse','HEAD']).trim();
       git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
       init(local);git(local,['-c','protocol.file.allow=always','fetch','--no-tags',remote,ref]);
-      git(local,['reset','--hard','FETCH_HEAD']); // fixture setup only, not broker operation
+      git(local,['checkout','-B',branch,'FETCH_HEAD']); // fixture setup only
       fs.writeFileSync(path.join(source,'fixture.txt'),'two\n');git(source,['add','fixture.txt']);git(source,['commit','-qm','two']);
       const b=git(source,['rev-parse','HEAD']).trim();
       git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
@@ -463,9 +463,17 @@ export async function runOfflineRunnerPlanTests(): Promise<{ passed: number; fai
       await executeGitNetworkIntent({...request,operation:'git_pull_ff'},broker);
       assert.equal(git(local,['rev-parse','HEAD']).trim(),b);
       assert.equal(fs.readFileSync(path.join(local,'fixture.txt'),'utf8'),'two\n');
+      // Direct pull of a previously unknown remote object must prove ancestry
+      // after pinned fetch, not require a separate caller fetch operation.
+      fs.writeFileSync(path.join(source,'fixture.txt'),'remote third\n');git(source,['add','fixture.txt']);git(source,['commit','-qm','remote third']);
+      const b2=git(source,['rev-parse','HEAD']).trim();
+      git(source,['-c','protocol.file.allow=always','push',remote,ref+':'+ref]);
+      await executeGitNetworkIntent({...request,operation:'git_pull_ff',expectedLocalHead:b,expectedRemoteHead:b2},broker);
+      assert.equal(git(local,['rev-parse','HEAD']).trim(),b2);
+      assert.equal(fs.readFileSync(path.join(local,'fixture.txt'),'utf8'),'remote third\n');
       fs.writeFileSync(path.join(local,'fixture.txt'),'three\n');git(local,['add','fixture.txt']);git(local,['commit','-qm','three']);
       const c=git(local,['rev-parse','HEAD']).trim();
-      await executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:c,expectedRemoteHead:b},broker);
+      await executeGitNetworkIntent({...request,operation:'git_push',expectedLocalHead:c,expectedRemoteHead:b2},broker);
       assert.equal(git(remote,['rev-parse',ref]).trim(),c);
       fs.writeFileSync(path.join(local,'fixture.txt'),'four\n');git(local,['add','fixture.txt']);git(local,['commit','-qm','four']);
       const d=git(local,['rev-parse','HEAD']).trim();

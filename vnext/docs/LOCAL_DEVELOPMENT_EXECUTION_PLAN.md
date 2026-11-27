@@ -161,3 +161,5 @@ Baseline 199095c passed 690/690, both CI workflows and compiler parity; producti
 
 ### Wave C network broker execution contract and real bare-remote fixture
 Added shared fenced network operation orchestration with exact approved endpoint resolution before observation, pinned fetch, fast-forward local update, exact remote ref CAS interface, postconditions and quarantine on ambiguous results. Real disposable bare Git remote fixture tests fetch, fast-forward pull, push object transfer and server-side CAS simulation, including a competing remote update and blocked retry. No real HTTPS transport, authentication, network broker service or production grants are provided. The fixture uses local file transport and server-local update-ref solely for acceptance; ordinary Git push alone is not claimed to enforce exact caller-pinned remote CAS. Keep runtime routing held.
+
+Pull preflight permits a not-yet-fetched remote object only after pinned branch/HEAD and clean-state checks; the post-fetch ancestry check is mandatory before checkout. Added direct-pull fixture coverage. Batch CI remains the sole validation trigger.
