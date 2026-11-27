@@ -8,6 +8,7 @@ import { runPathSanitizerUnitTests } from './unit/path-sanitizer.test';
 import { runArtifactsUnitTests } from './unit/artifacts.test';
 import { runProjectRegistryUnitTests } from './unit/project-registry.test';
 import { runEnvironmentProbeUnitTests } from './unit/environment-probe.test';
+import { runOfflineRunnerPlanTests } from './unit/offline-runner-plan.test';
 import { runDeviceStatusLiveCapabilitiesUnitTests } from './unit/device-status-live-capabilities.test';
 import { runLocalFastToolsBoundedResultTests } from './unit/local-fast-tools-bounded-result.test';
 import { runInventoryTasksUnitTests } from './unit/inventory-tasks.test';
@@ -33,6 +34,7 @@ async function main() {
     { name: 'Unit: Artifacts & Integrity', runner: runArtifactsUnitTests },
     { name: 'Unit: Local Project Registry & Path Security', runner: runProjectRegistryUnitTests },
     { name: 'Unit: Local Agent Environment Probe Capabilities', runner: runEnvironmentProbeUnitTests },
+    { name: 'Unit: Offline Runner Profile Planner', runner: runOfflineRunnerPlanTests },
     { name: 'Unit: Device Status Live Capabilities & Eligibility', runner: runDeviceStatusLiveCapabilitiesUnitTests },
     { name: 'Unit: Local Fast Tools Bounded Direct Results', runner: runLocalFastToolsBoundedResultTests },
     { name: 'Unit: Read-Only Task Inventory & Preflight Verification', runner: runInventoryTasksUnitTests },

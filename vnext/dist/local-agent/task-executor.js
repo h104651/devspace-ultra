@@ -615,6 +615,9 @@ class TaskExecutor {
                 return this.executeProcessWithoutShell(cmdConfig.executable, cmdConfig.args, targetCwd, cmdConfig.env, onLog, cmdConfig.timeoutMs, signal);
             }
             case 'local:raw_shell': {
+                if (this.windowsAppContainerSid !== undefined) {
+                    throw new Error('RAW_SHELL_DENIED: Offline execution identity cannot use raw shell.');
+                }
                 if (!this.allowRawShell) {
                     const err = new Error('RAW_SHELL_DENIED: Raw shell execution is disabled on this agent');
                     err.code = 'RAW_SHELL_DENIED';
@@ -726,6 +729,9 @@ class TaskExecutor {
         if (signal?.aborted)
             throw new Error('LOCAL_PROCESS_CANCELLED: Cancelled before launch.');
         const useJobRunner = process.platform === 'win32' && !!this.windowsJobRunnerPath;
+        if (this.windowsAppContainerSid !== undefined && Object.keys(extraEnv || {}).length) {
+            throw new Error('LOCAL_RUNNER_ENV_DENIED: Offline identity uses its own minimal environment; overrides are not supported.');
+        }
         if (this.windowsAppContainerSid !== undefined && (!useJobRunner || !/^S-1-15-2-(?:[0-9]+-){6,14}[0-9]+$/.test(this.windowsAppContainerSid))) {
             throw new Error('LOCAL_EXECUTION_RUNTIME_BLOCKED: Offline identity requires a native Windows Job Runner and valid package SID.');
         }

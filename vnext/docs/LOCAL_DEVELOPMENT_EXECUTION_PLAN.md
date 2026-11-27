@@ -122,3 +122,6 @@ Exposed persistent per-device admission through `device_drain` and `device_resum
 
 ### Wave D: offline identity integration candidate
 Device admission tools verified 672/672 with full CI at 2237977 (45924808030). Reused existing native Job Runner and verified AppContainer primitives, added locally configured SID and explicit isolated child environment, actual TaskExecutor integration fixture; no production CLI change. This is a pre-provisioned identity runtime candidate, not complete deployment or Flutter compatibility. Native CI pending.
+
+### Wave D offline profile planner
+Added a pure local planner for 17 fixed Flutter/Dart/Android/Node/Python command profiles using existing configured runner IDs, explicit staged absolute paths, nested working directory and fixed timeouts; dependency-changing profiles require explicit local selection. No project permission changes, network/signing/release, arbitrary argv or runtime activation. Tests validate planner output, invalid paths, unknown profiles, mutation opt-in and config injection. Offline native mode explicitly denies raw shell and configured environment overrides rather than silently falling back or ignoring the overrides. Actual SDK/cache/toolchain compatibility and Git capabilities remain pending; see OFFLINE_TOOLCHAIN_PROFILES.md. CI pending.

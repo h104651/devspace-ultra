@@ -22,6 +22,12 @@ async function main() {
   await assert.rejects(()=>invalid.executeTask(task,()=>{}),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
   const held=new TaskExecutor({projects,windowsJobRunnerPath:host,windowsAppContainerSid:sid,hostExecutionBlocked:true});
   await assert.rejects(()=>held.executeTask(task,()=>{}),/LOCAL_EXECUTION_RUNTIME_BLOCKED/);
+  const raw=new TaskExecutor({projects,windowsJobRunnerPath:host,windowsAppContainerSid:sid,allowRawShell:true});
+  await assert.rejects(()=>raw.executeTask({capability:'local:raw_shell',payload:{projectId:'fixture',command:'echo fixture'}},()=>{}),/RAW_SHELL_DENIED/);
+  const extraProjects=JSON.parse(JSON.stringify(projects));
+  extraProjects[0].commands.test.offline.env={HOME:work};
+  const extra=new TaskExecutor({projects:extraProjects,windowsJobRunnerPath:host,windowsAppContainerSid:sid});
+  await assert.rejects(()=>extra.executeTask(task,()=>{}),/LOCAL_RUNNER_ENV_DENIED/);
   console.log('OFFLINE_EXECUTOR_INTEGRATION PASS',process.arch);
 }
 main().catch(e=>{console.error(e);process.exitCode=1});
